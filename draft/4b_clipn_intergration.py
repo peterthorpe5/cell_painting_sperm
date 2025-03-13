@@ -22,6 +22,8 @@ CLIPn Input:
 CLIPn Output:
     - Z: dictionary of latent representations from all datasets, indexed numerically.
     - `.csv` files mapping numerical dataset indices and labels back to original names.
+    - A `.csv` file mapping numerical labels back to their original names.
+    - Latent representation files saved with `cpd_id` as row index.
 
 """
 
@@ -34,6 +36,8 @@ from pathlib import Path
 from clipn import CLIPn
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder
+from scipy.spatial.distance import cdist
+import seaborn as sns
 
 # Configure logging
 logging.basicConfig(
@@ -72,6 +76,17 @@ stb_dfs = [pd.read_csv(f) for f in stb_files]
 mitotox_data = pd.concat(mitotox_dfs, axis=0, ignore_index=True)
 stb_data = pd.concat(stb_dfs, axis=0, ignore_index=True)
 
+#  Create cpd_id Mapping Dictionary ---
+if 'cpd_id' in mitotox_data.columns:
+    mitotox_cpd_id_map = dict(enumerate(mitotox_data['cpd_id']))  # Store index -> cpd_id mapping
+else:
+    raise KeyError("Error: 'cpd_id' column is missing from Mitotox data!")
+
+# Store a direct mapping from the original indices to cpd_id
+mitotox_cpd_id_map = mitotox_data['cpd_id'].copy()
+stb_cpd_id_map = stb_data['cpd_id'].copy()
+
+
 # Extract numerical features
 mitotox_numeric = mitotox_data.select_dtypes(include=[np.number])
 stb_numeric = stb_data.select_dtypes(include=[np.number])
@@ -98,6 +113,8 @@ common_columns_after = mitotox_numeric_imputed.columns.intersection(stb_numeric_
 columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {list(columns_lost)}")
 
+
+
 # Ensure both datasets retain only these common columns AFTER imputation
 mitotox_numeric_imputed = mitotox_numeric_imputed[common_columns_after]
 stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
@@ -108,26 +125,42 @@ logger.info(f"STB data shape after imputation: {stb_numeric_imputed.shape}")
 
 
 
+
+
 # Create dataset labels
 dataset_labels = {0: "Mitotox Assay", 1: "STB"}
 
+# Initialize dictionaries to store mappings between LabelEncoder values and cpd_id
+mitotox_cpd_id_map = {}
+stb_cpd_id_map = {}
 
 # **Handle labels (assuming 'cpd_type' exists)**
 if 'cpd_type' in mitotox_data.columns:
     label_encoder = LabelEncoder()
     mitotox_labels = label_encoder.fit_transform(mitotox_data['cpd_type'])
     mitotox_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+    
+    # Store mapping of encoded label to cpd_id
+    mitotox_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(mitotox_data['cpd_id'].values)}
+
 else:
     mitotox_labels = np.zeros(mitotox_numeric_imputed.shape[0])
     mitotox_label_mapping = {"unknown": 0}
+    mitotox_cpd_id_map = {i: None for i in range(len(mitotox_numeric_imputed))}  # Empty mapping
 
 if 'cpd_type' in stb_data.columns:
     label_encoder = LabelEncoder()
     stb_labels = label_encoder.fit_transform(stb_data['cpd_type'])
     stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+    
+    # Store mapping of encoded label to cpd_id
+    stb_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(stb_data['cpd_id'].values)}
+
 else:
     stb_labels = np.zeros(stb_numeric_imputed.shape[0])
     stb_label_mapping = {"unknown": 0}
+    stb_cpd_id_map = {i: None for i in range(len(stb_numeric_imputed))}  # Empty mapping
+
 
 # **Convert dataset names to numerical indices using LabelEncoder**
 dataset_names = ["Mitotox_assay_combined", "STB_combined"]
@@ -143,12 +176,12 @@ logger.info("Datasets successfully structured for CLIPn.")
 logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
 
 # **CLIPn clustering**
-latent_dim = 10
+latent_dim = 20
 logger.info(f"Running CLIPn with latent dimension: {latent_dim}")
 
 clipn_model = CLIPn(X, y, latent_dim=latent_dim)
 logger.info("Fitting CLIPn model...")
-clipn_model.fit(X, y, lr=1e-5, epochs=100)
+clipn_model.fit(X, y, lr=1e-5, epochs=200)
 
 # **Extract latent representations**
 logger.info("Generating latent representations.")
@@ -173,8 +206,27 @@ logger.info("Latent representations saved successfully as CSV files.")
 # Save index and label mappings
 pd.Series({"Mitotox_assay_combined": 0, "STB_combined": 1}).to_csv("dataset_index_mapping.csv")
 pd.DataFrame(label_mappings).to_csv("label_mappings.csv")
+
 logger.info("Index and label mappings saved.")
 
+
+# Convert latent representations to DataFrame and restore cpd_id
+mitotox_latent_df = pd.DataFrame(Z[0])
+stb_latent_df = pd.DataFrame(Z[1])
+
+# Restore original cpd_id values
+mitotox_latent_df.index = [mitotox_cpd_id_map[i] for i in range(len(mitotox_latent_df))]
+stb_latent_df.index = [stb_cpd_id_map[i] for i in range(len(stb_latent_df))]
+
+# Save combined file with cpd_id as index
+combined_latent_df = pd.concat([mitotox_latent_df, stb_latent_df])
+combined_latent_df.to_csv("CLIPn_latent_representations_with_cpd_id.csv")
+
+logger.info("Latent representations saved successfully with cpd_id as index.")
+
+
+
+##########################################################
 ### **UMAP Visualization of CLIPn Latent Representations**
 logger.info("Generating UMAP visualization.")
 
@@ -220,3 +272,119 @@ logger.info("UMAP visualization saved with corrected labels.")
 
 
 logger.info("SCP data analysis completed successfully.")
+
+
+
+#####################################################################
+# Perform UMAP dimensionality reduction
+logger.info("Generating UMAP visualization with cpd_id labels.")
+umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
+latent_umap = umap_model.fit_transform(combined_latent_df)
+
+# Extract `cpd_id` for labeling
+cpd_id_list = list(combined_latent_df.index)
+
+# Create UMAP scatter plot with `cpd_id` labels
+plt.figure(figsize=(12, 8))
+plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, cmap="viridis")
+
+# Add small text labels for `cpd_id`
+for i, cpd in enumerate(cpd_id_list):
+    plt.text(latent_umap[i, 0], latent_umap[i, 1], str(cpd), fontsize=6, alpha=0.7)
+
+plt.xlabel("UMAP 1")
+plt.ylabel("UMAP 2")
+plt.title("UMAP Visualization with cpd_id Labels")
+plt.savefig("CLIPn_UMAP_latent_visualization_cpd_id.pdf", dpi=300)
+logger.info("UMAP visualization with cpd_id labels saved.")
+plt.show()
+
+
+
+##################################################################################
+# Compute Pairwise Distances
+
+# Ensure we correctly map the original cpd_id back to Z
+logger.info("Reconstructing cpd_id mappings for latent representations.")
+
+# Reconstruct original cpd_id mappings for Mitotox and STB
+mitotox_latent_df = pd.DataFrame(Z[0], index=[mitotox_cpd_id_map[i] for i in range(len(Z[0]))])
+stb_latent_df = pd.DataFrame(Z[1], index=[stb_cpd_id_map[i] for i in range(len(Z[1]))])
+
+# Save latent representations with proper cpd_id
+mitotox_latent_df.to_csv("CLIPn_latent_representations_mitotox.csv")
+stb_latent_df.to_csv("CLIPn_latent_representations_stb.csv")
+
+# Merge both datasets into a single CSV
+combined_latent_df = pd.concat([mitotox_latent_df, stb_latent_df])
+combined_latent_df.to_csv("CLIPn_latent_representations_combined.csv")
+
+logger.info("Latent representations successfully saved with cpd_id as index.")
+
+
+# Compute Pairwise Distances using cpd_id as index
+logger.info("Computing pairwise distances.")
+
+mitotox_distances = cdist(mitotox_latent_df.values, mitotox_latent_df.values, metric="euclidean")
+stb_distances = cdist(stb_latent_df.values, stb_latent_df.values, metric="euclidean")
+inter_dataset_distances = cdist(mitotox_latent_df.values, stb_latent_df.values, metric="euclidean")
+
+# Compute average distances
+avg_mitotox_dist = np.mean(mitotox_distances)
+avg_stb_dist = np.mean(stb_distances)
+avg_inter_dist = np.mean(inter_dataset_distances)
+
+logger.info(f"Average Intra-Mitotox Distance: {avg_mitotox_dist}")
+logger.info(f"Average Intra-STB Distance: {avg_stb_dist}")
+logger.info(f"Average Inter-Dataset Distance: {avg_inter_dist}")
+
+# Save distances to CSV
+distance_df = pd.DataFrame({
+    "cpd_id": list(mitotox_latent_df.index) + list(stb_latent_df.index),
+    "Average Intra-Mitotox Distance": [avg_mitotox_dist] * len(mitotox_latent_df) + [None] * len(stb_latent_df),
+    "Average Intra-STB Distance": [None] * len(mitotox_latent_df) + [avg_stb_dist] * len(stb_latent_df),
+    "Average Inter-Dataset Distance": [avg_inter_dist] * (len(mitotox_latent_df) + len(stb_latent_df))
+})
+distance_df.to_csv("cpd_id_pairwise_distances.csv", index=False)
+logger.info("Pairwise distances saved to 'cpd_id_pairwise_distances.csv'.")
+
+
+
+
+
+###########
+# Generate UMAP Visualization with `cpd_id` Labels
+
+logger.info("Generating UMAP visualization with cpd_id labels.")
+
+# Perform UMAP dimensionality reduction
+latent_umap = umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean").fit_transform(combined_latent_df)
+
+# Convert to DataFrame for saving
+umap_df = pd.DataFrame(latent_umap, index=combined_latent_df.index, columns=["UMAP1", "UMAP2"])
+umap_df.to_csv("CLIPn_UMAP_coordinates.csv")
+
+logger.info("UMAP coordinates saved with cpd_id.")
+
+# Plot UMAP
+plt.figure(figsize=(12, 8))
+scatter = plt.scatter(latent_umap[:, 0], latent_umap[:, 1], c="blue", alpha=0.7, s=5)
+
+# Add cpd_id labels to each point (very small text)
+for i, txt in enumerate(combined_latent_df.index):
+    plt.annotate(txt, (latent_umap[i, 0], latent_umap[i, 1]), fontsize=3, alpha=0.6)
+
+plt.xlabel("UMAP 1")
+plt.ylabel("UMAP 2")
+plt.title("CLIPn UMAP Visualization with cpd_id Labels")
+plt.savefig("CLIPn_UMAP_latent_visualization_cpd_id.pdf", dpi=300)
+plt.show()
+
+logger.info("UMAP visualization with cpd_id labels saved.")
+
+
+
+
+
+logger.info(f"Shape of data passed to UMAP: {combined_latent_df.shape}")
+
