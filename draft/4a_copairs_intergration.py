@@ -1,0 +1,186 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+"""
+Sperm Cell Painting Data Analysis with CoPairs Clustering and UMAP
+-----------------------------------------------------------------
+This script performs downstream analysis on sperm cell painting (SCP) data by:
+    - Loading and merging SCP datasets.
+    - Cleaning and preprocessing data.
+    - Computing similarity-based clustering using CoPairs.
+    - Dimensionality reduction via UMAP.
+    - Visualising clusters.
+    - Comprehensive logging for future troubleshooting and validation.
+
+CoPairs Documentation:
+----------------------
+CoPairs identifies pairs of samples that are similar based on provided grouping criteria. 
+
+Inputs:
+- A DataFrame containing numeric data and a categorical 'group' column indicating group membership.
+- `sameby`: specifies columns within which pairs should be found (e.g., within the same group).
+- `diffby`: specifies columns that must differ between pairs (optional).
+
+Output:
+- A DataFrame with pairs of indices representing similar samples, along with their group information.
+
+Example Usage:
+--------------
+matcher = copairs.Matcher(dframe=df, columns=df.columns.tolist(), seed=123)
+pairs_dict = matcher.get_all_pairs(sameby=['group'], diffby=[])
+pairs_df = copairs.matching.dict_to_dframe(pairs_dict, sameby=['group'])
+"""
+
+import pandas as pd
+import numpy as np
+import logging
+import seaborn as sns
+import matplotlib.pyplot as plt
+import umap.umap_ as umap
+from pathlib import Path
+import copairs
+
+# Configure logging
+logging.basicConfig(
+    filename='copairs_integration.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger()
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
+
+logger.info("CoPairs clustering and UMAP script started.")
+
+# Load and merge datasets
+data_files = [
+    '/uod/npsc/Lab_Book/BMGF/NHCP/SCP/Mitotox_assay/Normalised/Mitotox_assay_NPSCDD0003999_25102024_normalised.csv',
+    '/uod/npsc/Lab_Book/BMGF/NHCP/SCP/Mitotox_assay/Normalised/Mitotox_assay_NPSCDD0004023_25102024_normalised.csv',
+    '/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/04022025/Normalised/STB_NPSCDD0003971_05092024_normalised.csv',
+    '/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/04022025/Normalised/STB_NPSCDD0003972_05092024_normalised.csv',
+    '/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/04022025/Normalised/STB_NPSCDD000400_05092024_normalised.csv',
+    '/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/04022025/Normalised/STB_NPSCDD000401_05092024_normalised.csv',
+    '/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/13022025/Normalised/STB_NPSCDD0004034_13022025_normalised.csv'
+]
+
+logger.info("Loading and merging SCP datasets.")
+sp_data = pd.concat([pd.read_csv(f) for f in data_files], ignore_index=True)
+logger.info(f"Merged data shape: {sp_data.shape}")
+
+# Data cleaning
+logger.info("Starting data cleaning process.")
+cols_to_drop = ['Source_Plate_Barcode', 'Source_well', 'Destination_Concentration']
+sp_data.drop(columns=[col for col in cols_to_drop if col in sp_data.columns], inplace=True)
+
+# Remove rows with missing compound IDs
+sp_data['cpd_id'] = sp_data['cpd_id'].astype(str)
+sp_data = sp_data[~sp_data['cpd_id'].str.contains("empty|nan", case=False)]
+
+# Assign library labels
+sp_data['Library'] = 'Unknown'
+sp_data.loc[sp_data['cpd_type'].str.contains('positive controls', case=False, na=False), 'Library'] = 'STB'
+sp_data.loc[sp_data['cpd_type'].str.contains('negative control \(DMSO\)', case=False, na=False), 'Library'] = 'control'
+sp_data.loc[sp_data['cpd_id'].str.contains('MCP09|DDD', na=False), 'Library'] = 'MCP09'
+
+# Select numeric data for clustering
+numeric_data = sp_data.select_dtypes(include=[np.number])
+if numeric_data.empty:
+    raise ValueError("Numeric dataset required for clustering is empty.")
+
+# Prepare metadata for CoPairs
+metadata = sp_data[['Library']].copy()
+metadata.rename(columns={'Library': 'group'}, inplace=True)
+
+# Combine numeric data with group metadata for CoPairs
+numeric_data_with_group = numeric_data.copy()
+numeric_data_with_group['group'] = metadata['group'].values
+
+
+# Detailed CoPairs usage explanation:
+# CoPairs Matcher expects:
+# - A numeric dataframe (samples x features) for similarity computation.
+# - Metadata containing a categorical column specifying groups to match samples by.
+# The 'sameby' parameter defines groups for similarity calculations. The groups should match column names in the metadata.
+
+
+    # Example (commented out) for future reference:
+    # matcher = copairs.Matcher(my_numeric_df, my_numeric_df.columns.tolist(), seed=42)
+    # metadata_example = pd.DataFrame({'group': ['control', 'treated', 'treated', 'control']})
+    # matcher.get_all_pairs(sameby='group', metadata=metadata_example)
+    # similarity_matrix = matcher.similarity_matrix
+
+
+
+    # Explanation of the CoPairs Output:
+# The output file (SCP_CoPairs_Pairs.csv) generated by CoPairs contains pairs of indices (ix1 and ix2) for rows identified as similar within the same group (as specified by the column group). Each row in this file represents a pair of samples from the same library (e.g., MCP09), indicating that these two samples share similar feature profiles.
+
+
+"""Explanation of the CoPairs Output:
+The output file (SCP_CoPairs_Pairs.csv) generated by CoPairs contains pairs of indices (ix1 and ix2) for rows identified as similar within the same group (as specified by the column group). Each row in this file represents a pair of samples from the same library (e.g., MCP09), indicating that these two samples share similar feature profiles.
+
+For example, the snippet you provided:
+
+
+group,ix1,ix2
+Mxx09,731,2
+Mxx09,731,3
+Mxx09,731,4
+Mxx09,731,5
+
+Sample at index 731 is paired with samples at indices 2, 3, 4, and 5, 
+all belonging to group Mxx09, 
+suggesting these pairs are highly similar in terms of their feature data.
+"""
+
+# CoPairs similarity analysis
+logger.info("Computing similarity scores using CoPairs.")
+
+try:
+    matcher = copairs.Matcher(
+        dframe=numeric_data_with_group,
+        columns=numeric_data_with_group.columns.tolist(),
+        seed=123
+    )
+    pairs_dict = matcher.get_all_pairs(sameby=['group'], diffby=[])
+    pairs_df = copairs.matching.dict_to_dframe(pairs_dict, sameby=['group'])
+    pairs_df.to_csv("SCP_CoPairs_Pairs.csv", index=False)
+    logger.info("Similarity pairs computed and saved successfully.")
+except Exception as e:
+    logger.exception(f"CoPairs similarity computation failed: {e}")
+    raise
+
+# Impute NaN values with column median before UMAP
+logger.info("Imputing NaN values with column medians for UMAP.")
+numeric_data_imputed = numeric_data.fillna(numeric_data.median())
+
+
+# Drop rows with NaN values (less recommended, as data loss can occur)
+numeric_data_clean = numeric_data_imputed.dropna()
+sp_data_clean = sp_data.loc[numeric_data_clean.index]
+
+# UMAP dimensionality reduction
+logger.info("Performing UMAP dimensionality reduction on cleaned data.")
+umap_model = umap.UMAP(random_state=123, min_dist=0.001, n_neighbors=8)
+umap_results = umap_model.fit_transform(numeric_data_clean)
+sp_data_clean[['UMAP1', 'UMAP2']] = umap_results
+
+
+# Visualisation
+plt.figure(figsize=(10, 6))
+sns.scatterplot(x='UMAP1', y='UMAP2', hue='Library', palette='tab10', data=sp_data, alpha=0.7)
+plt.title("UMAP Projection with CoPairs Clustering")
+plt.legend(title='Library', bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.xlabel('UMAP1')
+plt.ylabel('UMAP2')
+plt.tight_layout()
+plt.savefig("umap_copairs_clustering.pdf")
+plt.close()
+logger.info("UMAP clustering plot saved as umap_copairs_clustering.pdf.")
+
+# Save clustered data
+sp_data.to_csv("SCP_CoPairs_Clustered.csv", index=False)
+logger.info("Clustered data saved successfully.")
+
+logger.info("CoPairs clustering and UMAP visualisation completed successfully.")
