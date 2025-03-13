@@ -388,3 +388,65 @@ logger.info("UMAP visualization with cpd_id labels saved.")
 
 logger.info(f"Shape of data passed to UMAP: {combined_latent_df.shape}")
 
+
+
+# Load the latent representation CSV
+latent_df = pd.read_csv("CLIPn_latent_representations_combined.csv", index_col=0)
+
+# Compute pairwise Euclidean distances
+dist_matrix = cdist(latent_df.values, latent_df.values, metric="euclidean")
+
+# Convert to DataFrame for easy analysis
+dist_df = pd.DataFrame(dist_matrix, index=latent_df.index, columns=latent_df.index)
+
+# Save full distance matrix for further analysis
+dist_df.to_csv("pairwise_compound_distances.csv")
+
+print("Pairwise distance matrix saved as 'pairwise_compound_distances.csv'.")
+
+
+# Find closest compounds (excluding self-comparison)
+closest_compounds = dist_df.replace(0, np.nan).idxmin(axis=1)
+
+# Find farthest compounds
+farthest_compounds = dist_df.idxmax(axis=1)
+
+# Create a summary DataFrame
+summary_df = pd.DataFrame({
+    "Closest Compound": closest_compounds,
+    "Distance to Closest": dist_df.min(axis=1),
+    "Farthest Compound": farthest_compounds,
+    "Distance to Farthest": dist_df.max(axis=1)
+})
+
+# Save results
+summary_df.to_csv("compound_similarity_summary.csv")
+
+print("Compound similarity summary saved as 'compound_similarity_summary.csv'.")
+
+
+
+
+# Generate a clustered heatmap
+plt.figure(figsize=(12, 10))
+sns.clustermap(dist_df, cmap="viridis", method="ward", figsize=(12, 10))
+plt.title("Pairwise Distance Heatmap of Compounds")
+plt.savefig("compound_distance_heatmap.pdf")
+
+# Perform hierarchical clustering
+linkage_matrix = linkage(dist_matrix, method="ward")
+
+# Create a dendrogram
+plt.figure(figsize=(12, 6))
+dendrogram(linkage_matrix, labels=latent_df.index, leaf_rotation=90, leaf_font_size=8)
+plt.title("Hierarchical Clustering of Compounds")
+plt.xlabel("Compound")
+plt.ylabel("Distance")
+plt.savefig("compound_clustering_dendrogram.pdf")
+
+# Save linkage matrix for further reference
+np.savetxt("compound_clustering_linkage_matrix.csv", linkage_matrix, delimiter="\t")
+
+# Display final outputs
+import ace_tools as tools
+tools.display_dataframe_to_user(name="Pairwise Compound Distances", dataframe=dist_df)
