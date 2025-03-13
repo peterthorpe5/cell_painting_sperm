@@ -38,6 +38,9 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder
 from scipy.spatial.distance import cdist
 import seaborn as sns
+import fastcluster
+import ace_tools as tools
+from scipy.cluster.hierarchy import linkage
 
 # Configure logging
 logging.basicConfig(
@@ -448,5 +451,5 @@ plt.savefig("compound_clustering_dendrogram.pdf")
 np.savetxt("compound_clustering_linkage_matrix.csv", linkage_matrix, delimiter="\t")
 
 # Display final outputs
-import ace_tools as tools
+
 tools.display_dataframe_to_user(name="Pairwise Compound Distances", dataframe=dist_df)
