@@ -221,6 +221,9 @@ logger.info("Generating latent representations.")
 Z = clipn_model.predict(X)
 
 
+# Convert numerical dataset names back to original names
+Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
+
 
 # Save latent representations
 np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z)
@@ -245,8 +248,7 @@ plt.close()
 
 logger.info(f"UMAP visualization saved to '{output_folder}/clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf'.")
 
-# Final message
-logger.info("SCP data analysis with CLIPn completed successfully!")
+
 
 
 
@@ -357,5 +359,5 @@ np.savetxt(linkage_matrix_file, linkage_matrix, delimiter="\t")
 logger.info(f"Linkage matrix saved to '{linkage_matrix_file}'.")
 
 # Final completion message
-logger.info("SCP data analysis with CLIPn completed successfully! 🚀")
+logger.info("SCP data analysis with CLIPn completed successfully!")
 
