@@ -44,6 +44,7 @@ from scipy.spatial.distance import cdist
 import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import squareform
+import optuna
 
 #  Step 1: Command-Line Arguments
 parser = argparse.ArgumentParser(description="Perform CLIPn clustering and UMAP on SCP data.")
@@ -74,6 +75,71 @@ parser.add_argument("--experiment", nargs="+", default=default_experiment_files,
                     help="List of Experiment dataset files (default: predefined experiment files)")
 
 args = parser.parse_args()
+
+
+
+def objective(trial):
+    """
+    Bayesian optimization objective function for CLIPn.
+
+    This function tunes `latent_dim`, `lr`, and `epochs` dynamically to minimize
+    the final training loss.
+
+    Parameters
+    ----------
+    trial : optuna.trial.Trial
+        An Optuna trial object for hyperparameter tuning.
+
+    Returns
+    -------
+    float
+        The final loss after training CLIPn with the suggested hyperparameters.
+    """
+    latent_dim = trial.suggest_int("latent_dim", 10, 100, step=10)
+    lr = trial.suggest_loguniform("lr", 1e-5, 1e-2)
+    epochs = trial.suggest_int("epochs", 100, 500, step=50)
+
+    logger.info(f"Trying CLIPn with latent_dim={latent_dim}, lr={lr:.6f}, epochs={epochs}")
+
+    # Train CLIPn model
+    clipn_model = CLIPn(X, y, latent_dim=latent_dim)
+    loss = clipn_model.fit(X, y, lr=lr, epochs=epochs)
+
+    final_loss = loss[-1]  # Get final loss
+    logger.info(f"Final loss for this run: {final_loss:.6f}")
+
+    return final_loss
+
+
+def optimize_clipn(n_trials=20):
+    """
+    Runs Bayesian optimization for CLIPn hyperparameter tuning.
+
+    This function optimizes `latent_dim`, `lr`, and `epochs` using Optuna
+    to find the best combination that minimizes the final loss.
+
+    Parameters
+    ----------
+    n_trials : int, optional
+        The number of trials for optimization (default is 20).
+
+    Returns
+    -------
+    dict
+        The best hyperparameters found (latent_dim, lr, epochs).
+    """
+    logger.info(f"Starting Bayesian optimization with {n_trials} trials.")
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+
+    best_params = study.best_params
+    best_loss = study.best_value
+
+    logger.info(f"Best hyperparameters found: {best_params} with final loss {best_loss:.6f}")
+
+    return best_params
+
 
 
 ######################################
@@ -220,7 +286,34 @@ logger.info(f"CLIPn training completed. Final loss: {loss[-1]:.6f}")  # Log the 
 logger.info("Generating latent representations.")
 Z = clipn_model.predict(X)
 
+########################
+logger.info("Run Hyperparameter Optimization")
+# **Run Hyperparameter Optimization**
+best_params = optimize_clipn(n_trials=20)  # Run Bayesian Optimization
 
+# **Update arguments with best hyperparameters**
+args.latent_dim = best_params["latent_dim"]
+args.lr = best_params["lr"]
+args.epoch = best_params["epochs"]
+
+logger.info(f"Using optimized parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+
+# **Final CLIPn training with best parameters**
+logger.info(f"Running CLIPn with optimized latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+
+clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
+logger.info("Fitting CLIPn model...")
+loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
+logger.info(f"CLIPn training completed with optimized parameters. Final loss: {loss[-1]:.6f}")
+
+# **Extract latent representations**
+logger.info("Generating latent representations.")
+Z = clipn_model.predict(X)
+
+
+# mk new dir for new params. 
+output_folder = f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}"
+os.makedirs(output_folder, exist_ok=True)
 
 # Convert numerical dataset names back to string names
 Z_named = {str(k): v for k, v in Z.items()}  # Ensure all keys are strings
@@ -257,7 +350,43 @@ plt.close()
 
 logger.info(f"UMAP visualization saved to '{output_folder}/clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf'.")
 
+# Define the output folder dynamically based on hyperparameters
+output_folder = f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}"
+Path(output_folder).mkdir(parents=True, exist_ok=True)  # Create folder if it doesn't exist
 
+# Save each dataset's latent representations separately with the correct prefix
+for dataset, values in Z_named.items():
+    df = pd.DataFrame(values)
+    df.to_csv(os.path.join(output_folder, f"{output_folder}_latent_representations_{dataset}.csv"), index=False)
+
+logger.info(f"Latent representations saved successfully in {output_folder}/")
+
+# Save index and label mappings
+pd.Series({"experiment_assay_combined": 0, "STB_combined": 1}).to_csv(
+    os.path.join(output_folder, f"{output_folder}_dataset_index_mapping.csv")
+)
+pd.DataFrame(label_mappings).to_csv(
+    os.path.join(output_folder, f"{output_folder}_label_mappings.csv")
+)
+
+logger.info(f"Index and label mappings saved successfully in {output_folder}/")
+
+logger.info("Index and label mappings saved.")
+
+
+# Convert latent representations to DataFrame and restore cpd_id
+experiment_latent_df = pd.DataFrame(Z[0])
+stb_latent_df = pd.DataFrame(Z[1])
+
+# Restore original cpd_id values
+experiment_latent_df.index = [experiment_cpd_id_map[i] for i in range(len(experiment_latent_df))]
+stb_latent_df.index = [stb_cpd_id_map[i] for i in range(len(stb_latent_df))]
+
+# Save combined file with cpd_id as index
+combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
+combined_latent_df.to_csv("CLIPn_latent_representations_with_cpd_id.csv")
+
+logger.info("Latent representations saved successfully with cpd_id as index.")
 
 
 
