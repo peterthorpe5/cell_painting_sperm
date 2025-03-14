@@ -223,8 +223,7 @@ Z = clipn_model.predict(X)
 
 
 # Save latent representations
-np.savez(os.path.join(output_folder, 
-                      f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z)
+np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z)
 
 # Perform UMAP
 logger.info("Generating UMAP visualization.")
