@@ -440,6 +440,9 @@ logger.info("Latent representations saved successfully with cpd_id as index.")
 
 #####################################################################
 # Perform UMAP dimensionality reduction
+
+logger.info(f"UMAP visualization saved as '{umap_plot_file}'.")
+# Perform UMAP dimensionality reduction
 logger.info("Generating UMAP visualization with cpd_id labels.")
 umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
 latent_umap = umap_model.fit_transform(combined_latent_df)
@@ -453,7 +456,9 @@ umap_file = os.path.join(output_folder, f"{output_folder}_UMAP_coordinates.csv")
 umap_df.to_csv(umap_file)
 logger.info(f"UMAP coordinates saved to '{umap_file}'.")
 
-# Generate UMAP scatter plot
+# -----------------------------------------------
+# UMAP 1: Scatter Plot with `cpd_id` Labels
+# -----------------------------------------------
 plt.figure(figsize=(12, 8))
 plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, cmap="viridis")
 
@@ -469,6 +474,34 @@ umap_plot_file = os.path.join(output_folder, f"{output_folder}_UMAP_latent_visua
 plt.savefig(umap_plot_file, dpi=300)
 plt.close()
 logger.info(f"UMAP visualization saved as '{umap_plot_file}'.")
+
+# -----------------------------------------------
+# UMAP 2: Colour-coded by Dataset (Experiment vs. STB)
+# -----------------------------------------------
+logger.info("Generating UMAP visualization highlighting Experiment vs. STB data.")
+
+# Create a colour list based on dataset membership
+dataset_labels = []
+for cpd in combined_latent_df.index:
+    if cpd in experiment_cpd_id_map.values:
+        dataset_labels.append("Experiment")  # Colour these differently
+    else:
+        dataset_labels.append("STB")
+
+# Convert to colour-mapped values
+dataset_colors = ["red" if label == "Experiment" else "blue" for label in dataset_labels]
+
+plt.figure(figsize=(12, 8))
+plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=dataset_colors)
+
+plt.xlabel("UMAP 1")
+plt.ylabel("UMAP 2")
+plt.title("UMAP Visualization: Experiment (Red) vs. STB (Blue)")
+
+umap_colored_plot_file = os.path.join(output_folder, f"{output_folder}_UMAP_experiment_vs_stb.pdf")
+plt.savefig(umap_colored_plot_file, dpi=300)
+plt.close()
+logger.info(f"UMAP visualization (experiment vs. STB) saved as '{umap_colored_plot_file}'.")
 
 
 ##################################################################################
@@ -490,19 +523,38 @@ logger.info(f"Pairwise distance matrix saved to '{dist_matrix_file}'.")
 ###########
 # Generate Summary of Closest & Farthest Compounds
 
+
+
+# Load the latent representation CSV
+latent_df = combined_latent_df
+
+# Compute pairwise Euclidean distances
+dist_matrix = cdist(latent_df.values, latent_df.values, metric="euclidean")
+
+# Convert to DataFrame for easy analysis
+dist_df = pd.DataFrame(dist_matrix, index=latent_df.index, columns=latent_df.index)
+
+# Save full distance matrix for further analysis
+dist_df.to_csv("pairwise_compound_distances.csv")
+
+print("Pairwise distance matrix saved as 'pairwise_compound_distances.csv'.")
+
+
 # Find closest compounds (excluding self-comparison)
 closest_compounds = dist_df.replace(0, np.nan).idxmin(axis=1)
 
 # Find farthest compounds
 farthest_compounds = dist_df.idxmax(axis=1)
 
-# Create summary DataFrame
+# Create a summary DataFrame
 summary_df = pd.DataFrame({
     "Closest Compound": closest_compounds,
     "Distance to Closest": dist_df.min(axis=1),
     "Farthest Compound": farthest_compounds,
     "Distance to Farthest": dist_df.max(axis=1)
 })
+
+
 
 # Save summary file
 summary_file = os.path.join(output_folder, f"{output_folder}_compound_similarity_summary.csv")
