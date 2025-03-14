@@ -1,0 +1,15 @@
+clipn
+copairs
+pandas
+numpy
+matplotlib
+seaborn
+umap
+scikit-learn
+natsort
+plotly
+colorcet
+openpyxl
+umap-learn
+# fastcluster  # this is breaking for me. 
+

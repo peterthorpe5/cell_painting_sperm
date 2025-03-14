@@ -38,9 +38,11 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder
 from scipy.spatial.distance import cdist
 import seaborn as sns
-#import fastcluster
-import ace_tools as tools
-from scipy.cluster.hierarchy import linkage
+# import fastcluster  # install probs for me :( 
+import ace_tools_open as tools
+from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.spatial.distance import squareform
+
 
 # Configure logging
 logging.basicConfig(
@@ -437,7 +439,7 @@ plt.title("Pairwise Distance Heatmap of Compounds")
 plt.savefig("compound_distance_heatmap.pdf")
 
 # Perform hierarchical clustering
-linkage_matrix = linkage(dist_matrix, method="ward")
+linkage_matrix = linkage(squareform(dist_matrix), method="ward")
 
 # Create a dendrogram
 plt.figure(figsize=(12, 6))
