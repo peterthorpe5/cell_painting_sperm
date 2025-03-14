@@ -83,7 +83,7 @@ python 5_compound_similarity_network.py --similarity 0.8 -c MCP
 
 """
 
-
+import os
 import pandas as pd
 import networkx as nx
 import community  # Python-Louvain for clustering
