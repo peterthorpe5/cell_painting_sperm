@@ -156,12 +156,14 @@ net = Network(height="750px", width="100%", notebook=False)
 
 for node in G.nodes:
     cluster_id = partition[node]
-    net.add_node(node, label=node, title=f"Cluster: {cluster_id}", group=cluster_id)
+    net.add_node(str(node), label=str(node), title=f"Cluster: {cluster_id}", group=cluster_id)
 
 for compound1, compound2, distance in edges:
-    net.add_edge(compound1, compound2, title=f"Distance: {distance:.3f}")
+    net.add_edge(str(compound1), str(compound2), title=f"Distance: {distance:.3f}")
 
-net.show("compound_network.html")
+
+net.save_graph("compound_network.html")
+
 
 logging.info("Interactive network visualization saved to 'compound_network.html'.")
 logging.info("Processing complete!")
