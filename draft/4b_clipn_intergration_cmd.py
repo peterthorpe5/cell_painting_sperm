@@ -107,20 +107,106 @@ experiment_data = pd.concat(experiment_dfs, axis=0, ignore_index=True)
 stb_numeric = stb_data.select_dtypes(include=[np.number])
 experiment_numeric = experiment_data.select_dtypes(include=[np.number])
 
-# Drop columns entirely NaN before imputation
-stb_numeric = stb_numeric.dropna(axis=1, how='all')
+
+
+#  Create cpd_id Mapping Dictionary ---
+if 'cpd_id' in experiment_data.columns:
+    experiment_cpd_id_map = dict(enumerate(experiment_data['cpd_id']))  # Store index -> cpd_id mapping
+else:
+    raise KeyError("Error: 'cpd_id' column is missing from experiment data!")
+
+# Store a direct mapping from the original indices to cpd_id
+experiment_cpd_id_map = experiment_data['cpd_id'].copy()
+stb_cpd_id_map = stb_data['cpd_id'].copy()
+
+
+# Extract numerical features
+experiment_numeric = experiment_data.select_dtypes(include=[np.number])
+stb_numeric = stb_data.select_dtypes(include=[np.number])
+
+# **Drop columns that are entirely NaN in either dataset BEFORE imputation**
 experiment_numeric = experiment_numeric.dropna(axis=1, how='all')
+stb_numeric = stb_numeric.dropna(axis=1, how='all')
+
+# Identify initial common columns BEFORE imputation
+common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
+logger.info(f"Common numerical columns BEFORE imputation: {list(common_columns_before)}")
 
 # Retain only common columns
-common_columns = stb_numeric.columns.intersection(experiment_numeric.columns)
-stb_numeric = stb_numeric[common_columns]
-experiment_numeric = experiment_numeric[common_columns]
+experiment_numeric = experiment_numeric[common_columns_before]
+stb_numeric = stb_numeric[common_columns_before]
 
-# Handle missing values with median imputation
+# **Handle missing values with median imputation**
 imputer = SimpleImputer(strategy="median")
-stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns)
-experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns)
+experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns_before)
+stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns_before)
 
+# **Identify columns lost during imputation**
+common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
+columns_lost = set(common_columns_before) - set(common_columns_after)
+logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+
+
+
+# Ensure both datasets retain only these common columns AFTER imputation
+experiment_numeric_imputed = experiment_numeric_imputed[common_columns_after]
+stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
+
+logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
+logger.info(f"experiment data shape after imputation: {experiment_numeric_imputed.shape}")
+logger.info(f"STB data shape after imputation: {stb_numeric_imputed.shape}")
+
+# Create dataset labels
+dataset_labels = {0: "experiment Assay", 1: "STB"}
+
+# Initialize dictionaries to store mappings between LabelEncoder values and cpd_id
+experiment_cpd_id_map = {}
+stb_cpd_id_map = {}
+
+# **Handle labels (assuming 'cpd_type' exists)**
+if 'cpd_type' in experiment_data.columns:
+    label_encoder = LabelEncoder()
+    experiment_labels = label_encoder.fit_transform(experiment_data['cpd_type'])
+    experiment_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+    
+    # Store mapping of encoded label to cpd_id
+    experiment_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(experiment_data['cpd_id'].values)}
+
+else:
+    experiment_labels = np.zeros(experiment_numeric_imputed.shape[0])
+    experiment_label_mapping = {"unknown": 0}
+    experiment_cpd_id_map = {i: None for i in range(len(experiment_numeric_imputed))}  # Empty mapping
+
+if 'cpd_type' in stb_data.columns:
+    label_encoder = LabelEncoder()
+    stb_labels = label_encoder.fit_transform(stb_data['cpd_type'])
+    stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+    
+    # Store mapping of encoded label to cpd_id
+    stb_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(stb_data['cpd_id'].values)}
+
+else:
+    stb_labels = np.zeros(stb_numeric_imputed.shape[0])
+    stb_label_mapping = {"unknown": 0}
+    stb_cpd_id_map = {i: None for i in range(len(stb_numeric_imputed))}  # Empty mapping
+
+
+# **Convert dataset names to numerical indices using LabelEncoder**
+dataset_names = ["experiment_assay_combined", "STB_combined"]
+dataset_encoder = LabelEncoder()
+dataset_indices = dataset_encoder.fit_transform(dataset_names)
+
+dataset_mapping = dict(zip(dataset_indices, dataset_names))
+X = {dataset_indices[0]: experiment_numeric_imputed.values, dataset_indices[1]: stb_numeric_imputed.values}
+y = {dataset_indices[0]: experiment_labels, dataset_indices[1]: stb_labels}
+label_mappings = {dataset_indices[0]: experiment_label_mapping, dataset_indices[1]: stb_label_mapping}
+
+logger.info("Datasets successfully structured for CLIPn.")
+logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
+
+
+
+#####################
 # CLIPn clustering
 logger.info(f"Running CLIPn with latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
 clipn_model = CLIPn(
