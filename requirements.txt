@@ -12,4 +12,6 @@ colorcet
 openpyxl
 umap-learn
 # fastcluster  # this is breaking for me. 
-
+ace_tools_open
+community
+ç
