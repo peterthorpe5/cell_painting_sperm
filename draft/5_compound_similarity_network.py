@@ -22,43 +22,59 @@ logging.basicConfig(
 #  Step 2: Command-Line Arguments 
 parser = argparse.ArgumentParser(description="Cluster compounds based on similarity and save to a file.")
 
-parser.add_argument("--input", type=str, default="pairwise_compound_distances.csv",
+parser.add_argument("--input", 
+                    type=str, 
+                    default="pairwise_compound_distances.csv",
                     help="Input file containing the pairwise compound distance matrix")
 
-parser.add_argument("--output", type=str, default="compound_clusters.tsv",
+parser.add_argument("--output", 
+                    type=str, 
+                    default="compound_clusters.tsv",
                     help="Output file for cluster assignments")
 
-parser.add_argument("--similarity", type=float, default=1.5,
+parser.add_argument("--similarity", 
+                    type=float, 
+                    default=1.5,
                     help="Similarity threshold for clustering")
 
-parser.add_argument("--mcp-only", action="store_true",
+parser.add_argument("--mcp-only", 
+                    action="store_true",
                     help="Filter to only include MCP compounds")
 
 args = parser.parse_args()
 
 #  Step 3: Load Distance Matrix 
 logging.info(f"Loading distance matrix from {args.input}")
+logging.info("... this takes a long time ... go and have a beer")
 dist_df = pd.read_csv(args.input, index_col=0)
 
 filter_mcp_only = args.mcp_only
 distance_threshold = args.similarity
 
-#  Step 4: Filter for Close Compounds 
-logging.info(f"Filtering compounds with similarity threshold {distance_threshold}")
+#  Step 4: Efficiently Filter for Close Compounds (Vectorized)
+logging.info(f"Filtering large dataset efficiently...")
 
-edges = []
-for compound1 in dist_df.index:
-    for compound2 in dist_df.columns:
-        if compound1 != compound2:
-            distance = dist_df.loc[compound1, compound2]
-            if isinstance(distance, pd.Series):
-                distance = distance.iloc[0] if not distance.empty else float("inf")
+# Convert distance DataFrame into long-form table for efficient filtering
+dist_long_df = dist_df.stack().reset_index()
+dist_long_df.columns = ["Compound1", "Compound2", "Distance"]
 
-            if pd.notna(distance) and distance < distance_threshold:
-                if not filter_mcp_only or (compound1.startswith("MCP") or compound2.startswith("MCP")):
-                    edges.append((compound1, compound2, distance))
+# Remove self-comparisons (Compound1 == Compound2)
+dist_long_df = dist_long_df[dist_long_df["Compound1"] != dist_long_df["Compound2"]]
 
-logging.info(f"Filtered {len(edges)} compound connections.")
+# Apply distance threshold
+dist_long_df = dist_long_df[dist_long_df["Distance"] < distance_threshold]
+
+# Apply MCP filtering if required
+if filter_mcp_only:
+    dist_long_df = dist_long_df[
+        (dist_long_df["Compound1"].str.startswith("MCP")) | 
+        (dist_long_df["Compound2"].str.startswith("MCP"))
+    ]
+
+# Convert filtered data back into a list of edges
+edges = list(dist_long_df.itertuples(index=False, name=None))
+
+logging.info(f"Finished filtering: {len(edges)} compound connections found.")
 
 #  Step 5: Create Network 
 G = nx.Graph()
