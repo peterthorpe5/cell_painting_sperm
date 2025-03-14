@@ -441,6 +441,9 @@ logger.info("Latent representations saved successfully with cpd_id as index.")
 #####################################################################
 # Perform UMAP dimensionality reduction
 logger.info("Generating UMAP visualization with cpd_id labels.")
+#####################################################################
+# Perform UMAP dimensionality reduction
+logger.info("Generating UMAP visualization with cpd_id labels.")
 umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
 latent_umap = umap_model.fit_transform(combined_latent_df)
 
@@ -457,7 +460,7 @@ logger.info(f"UMAP coordinates saved to '{umap_file}'.")
 # UMAP 1: Scatter Plot with `cpd_id` Labels
 # -----------------------------------------------
 plt.figure(figsize=(12, 8))
-plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, cmap="viridis")
+plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c="blue")  # Fix: Set explicit color
 
 # Add small text labels for `cpd_id`
 for i, cpd in enumerate(cpd_id_list):
@@ -477,19 +480,17 @@ logger.info(f"UMAP visualization saved as '{umap_plot_file}'.")
 # -----------------------------------------------
 logger.info("Generating UMAP visualization highlighting Experiment vs. STB data.")
 
+# Convert experiment_cpd_id_map.values to a set to avoid TypeError
+experiment_cpd_id_set = set(experiment_cpd_id_map.tolist()) 
+
 # Create a colour list based on dataset membership
-dataset_labels = []
-for cpd in combined_latent_df.index:
-    if cpd in experiment_cpd_id_map.values:
-        dataset_labels.append("Experiment")  # Colour these differently
-    else:
-        dataset_labels.append("STB")
+dataset_labels = ["Experiment" if cpd in experiment_cpd_id_set else "STB" for cpd in cpd_id_list]
 
 # Convert to colour-mapped values
 dataset_colors = ["red" if label == "Experiment" else "blue" for label in dataset_labels]
 
 plt.figure(figsize=(12, 8))
-plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=dataset_colors)
+plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=dataset_colors)  # Fix: c now correctly maps colors
 
 plt.xlabel("UMAP 1")
 plt.ylabel("UMAP 2")
@@ -499,22 +500,6 @@ umap_colored_plot_file = os.path.join(output_folder, f"{output_folder}_UMAP_expe
 plt.savefig(umap_colored_plot_file, dpi=300)
 plt.close()
 logger.info(f"UMAP visualization (experiment vs. STB) saved as '{umap_colored_plot_file}'.")
-
-
-##################################################################################
-# Compute Pairwise Distances
-logger.info("Computing pairwise distances.")
-
-# Compute distance matrices
-dist_matrix = cdist(combined_latent_df.values, combined_latent_df.values, metric="euclidean")
-
-# Convert to DataFrame
-dist_df = pd.DataFrame(dist_matrix, index=combined_latent_df.index, columns=combined_latent_df.index)
-
-# Save full distance matrix
-dist_matrix_file = os.path.join(output_folder, f"{output_folder}_pairwise_compound_distances.csv")
-dist_df.to_csv(dist_matrix_file)
-logger.info(f"Pairwise distance matrix saved to '{dist_matrix_file}'.")
 
 
 ###########
