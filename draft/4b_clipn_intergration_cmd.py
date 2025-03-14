@@ -439,7 +439,7 @@ logger.info("Latent representations saved successfully with cpd_id as index.")
 #####################################################################
 # Perform UMAP dimensionality reduction
 logger.info("Generating UMAP visualization with cpd_id labels.")
-umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
+umap_model = umap.UMAP(n_neighbors=25, min_dist=0.1, n_components=2, random_state=42)
 latent_umap = umap_model.fit_transform(combined_latent_df)
 
 # Extract `cpd_id` for labeling
