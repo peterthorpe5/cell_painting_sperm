@@ -6,6 +6,8 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pyvis.network import Network  # For interactive visualization
+import community.community_louvain as community  # Correct import for Louvain clustering
+
 
 #  Step 1: Setup Logging 
 log_filename = "network_clusters.log"
