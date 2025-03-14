@@ -108,7 +108,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
+###########################################
 #  Step 2: Command-Line Arguments 
 parser = argparse.ArgumentParser(description="Cluster compounds based on similarity and save to a file.")
 
@@ -137,7 +137,7 @@ parser.add_argument("--no-prefix-filtering",
                     help="Include all compounds, ignoring prefix filtering.")
 
 args = parser.parse_args()
-
+###########################################
 
 
 # Create formatted output filename prefix
