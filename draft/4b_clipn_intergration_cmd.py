@@ -481,7 +481,8 @@ logger.info(f"UMAP visualization saved as '{umap_plot_file}'.")
 logger.info("Generating UMAP visualization highlighting Experiment vs. STB data.")
 
 # Convert experiment_cpd_id_map.values to a set to avoid TypeError
-experiment_cpd_id_set = set(experiment_cpd_id_map.tolist()) 
+experiment_cpd_id_set = set(experiment_cpd_id_map.values()) 
+
 
 # Create a colour list based on dataset membership
 dataset_labels = ["Experiment" if cpd in experiment_cpd_id_set else "STB" for cpd in cpd_id_list]
