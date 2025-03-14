@@ -209,23 +209,18 @@ logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v
 #####################
 # CLIPn clustering
 logger.info(f"Running CLIPn with latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
-clipn_model = CLIPn(
-    {0: stb_numeric_imputed.values, 
-     1: experiment_numeric_imputed.values},
-    {0: np.zeros(len(stb_numeric_imputed)), 
-     1: np.ones(len(experiment_numeric_imputed))},
-    latent_dim=args.latent_dim
-)
-clipn_model.fit({0: stb_numeric_imputed.values, 
-                 1: experiment_numeric_imputed.values},
-                {0: np.zeros(len(stb_numeric_imputed)), 
-                 1: np.ones(len(experiment_numeric_imputed))},
-                lr=args.lr, epochs=args.epoch)
-
-# Extract latent representations
+# **CLIPn clustering**
+latent_dim = args.latent_dim
+logger.info(f"Running CLIPn with latent dimension: {latent_dim}")
+clipn_model = CLIPn(X, y, latent_dim=latent_dim)
+logger.info("Fitting CLIPn model...")
+loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
+logger.info(f"CLIPn training completed. Final loss: {loss[-1]:.6f}")  # Log the final loss value
+# **Extract latent representations**
 logger.info("Generating latent representations.")
-Z = clipn_model.predict({0: stb_numeric_imputed.values, 
-                         1: experiment_numeric_imputed.values})
+Z = clipn_model.predict(X)
+
+
 
 # Save latent representations
 np.savez(os.path.join(output_folder, 
