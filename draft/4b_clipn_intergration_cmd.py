@@ -27,6 +27,22 @@ CLIPn Output:
     - A `.csv` file mapping numerical labels back to their original names.
     - Latent representation files saved with `cpd_id` as row index.
 
+    
+The automated hyperparameter optimisation process in this script uses Bayesian 
+Optimisation to fine-tune the CLIPn model’s key parameters: latent dimension, 
+learning rate, and number of epochs. If no pre-optimized parameters are provided, 
+the script runs multiple trials (n_trials=20 by default) to find the best 
+combination of these hyperparameters based on the model’s training loss. 
+Once the optimisation is complete, the best parameters are saved to a 
+JSON file inside the output directory, which is dynamically named based on 
+the optimized values (e.g., clipn_ldim10_lr0.0001_epoch500/best_hyperparameters.json).
+ If the user wishes to skip retraining, they can pass the --use_optimised_params 
+ argument with the path to this JSON file, allowing the script to 
+ load the best parameters, initialize the model, and proceed directly 
+ to generating latent representations. This approach significantly 
+ speeds up analysis by avoiding redundant training while ensuring that 
+ the most effective hyperparameters are consistently used
+
 """
 
 import os
@@ -86,15 +102,13 @@ parser.add_argument("--use_optimised_params",
                     type=str,
                     default=None,
                     help="Path to JSON file containing optimised hyperparameters. If provided, training is skipped.")
-
-
 args = parser.parse_args()
 
 
-
+# functions
 def objective(trial):
     """
-    Bayesian optimization objective function for CLIPn.
+    Bayesian optimisation objective function for CLIPn.
 
     This function tunes `latent_dim`, `lr`, and `epochs` dynamically to minimize
     the final training loss.
@@ -127,7 +141,7 @@ def objective(trial):
 
 def optimize_clipn(n_trials=20):
     """
-    Runs Bayesian optimization for CLIPn hyperparameter tuning.
+    Runs Bayesian optimisation for CLIPn hyperparameter tuning.
 
     This function optimizes `latent_dim`, `lr`, and `epochs` using Optuna
     to find the best combination that minimizes the final loss.
@@ -135,14 +149,14 @@ def optimize_clipn(n_trials=20):
     Parameters
     ----------
     n_trials : int, optional
-        The number of trials for optimization (default is 20).
+        The number of trials for optimisation (default is 20).
 
     Returns
     -------
     dict
         The best hyperparameters found (latent_dim, lr, epochs).
     """
-    logger.info(f"Starting Bayesian optimization with {n_trials} trials.")
+    logger.info(f"Starting Bayesian optimisation with {n_trials} trials.")
 
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=n_trials)
@@ -156,8 +170,9 @@ def optimize_clipn(n_trials=20):
 
 
 
-######################################
+##################################################################
 #  Step 2: Setup Output Directory
+# TO DO: needs to change as we train for best params, so this doesnt work. 
 output_folder = f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}"
 os.makedirs(output_folder, exist_ok=True)
 
@@ -312,9 +327,9 @@ if args.use_optimised_params:
     Z = clipn_model.predict(X)
 
 else:
-    # Run Hyperparameter Optimization
-    logger.info("Running Hyperparameter Optimization")
-    best_params = optimize_clipn(n_trials=20)  # Bayesian Optimization
+    # Run Hyperparameter Optimisation
+    logger.info("Running Hyperparameter Optimisation")
+    best_params = optimize_clipn(n_trials=20)  # Bayesian Optimisation
 
     # Save optimised parameters
     with open(hyperparam_file, "w") as f:
@@ -416,7 +431,7 @@ stb_latent_df.index = [stb_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(
 
 # Save combined file with cpd_id as index
 combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
-combined_latent_df.to_csv("CLIPn_latent_representations_with_cpd_id.csv")
+combined_latent_df.to_csv(os.path.join(output_folder, f"{output_folder}_CLIPn_latent_representations_with_cpd_id.csv"))
 
 logger.info("Latent representations saved successfully with cpd_id as index.")
 
