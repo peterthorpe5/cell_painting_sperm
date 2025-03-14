@@ -38,7 +38,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder
 from scipy.spatial.distance import cdist
 import seaborn as sns
-import fastcluster
+#import fastcluster
 import ace_tools as tools
 from scipy.cluster.hierarchy import linkage
 
