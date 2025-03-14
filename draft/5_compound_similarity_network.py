@@ -17,9 +17,15 @@ for compound1 in dist_df.index:
         if compound1 != compound2:  # Exclude self-comparisons
             distance = dist_df.loc[compound1, compound2]
 
-            if distance < distance_threshold:
+            # Ensure distance is a single numeric value
+            if isinstance(distance, pd.Series):
+                distance = distance.iloc[0] if not distance.empty else float("inf")  # Assign infinity if empty
+
+            # Apply filtering
+            if pd.notna(distance) and distance < distance_threshold:
                 if not filter_mcp_only or (compound1.startswith("MCP") or compound2.startswith("MCP")):
                     edges.append((compound1, compound2, distance))
+
 
 # Step 3: Create Network ----------------
 G = nx.Graph()
