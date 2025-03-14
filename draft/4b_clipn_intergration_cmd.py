@@ -30,6 +30,7 @@ CLIPn Output:
 """
 
 import os
+import json
 import argparse
 import pandas as pd
 import numpy as np
@@ -73,6 +74,12 @@ parser.add_argument("--stb", nargs="+", default=default_stb_files,
 
 parser.add_argument("--experiment", nargs="+", default=default_experiment_files,
                     help="List of Experiment dataset files (default: predefined experiment files)")
+
+parser.add_argument("--use-optimized-params",
+                    type=str,
+                    default=None,
+                    help="Path to JSON file containing optimized hyperparameters. If provided, training is skipped.")
+
 
 args = parser.parse_args()
 
@@ -273,42 +280,58 @@ logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v
 
 
 #####################
-# CLIPn clustering
-logger.info(f"Running CLIPn with latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
-# **CLIPn clustering**
-latent_dim = args.latent_dim
-logger.info(f"Running CLIPn with latent dimension: {latent_dim}")
-clipn_model = CLIPn(X, y, latent_dim=latent_dim)
-logger.info("Fitting CLIPn model...")
-loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
-logger.info(f"CLIPn training completed. Final loss: {loss[-1]:.6f}")  # Log the final loss value
-# **Extract latent representations**
-logger.info("Generating latent representations.")
-Z = clipn_model.predict(X)
+# CLIPn clustering with hyper optimisation
+logger.info(f"Running CLIPn")
 
-########################
-logger.info("Run Hyperparameter Optimization")
-# **Run Hyperparameter Optimization**
-best_params = optimize_clipn(n_trials=20)  # Run Bayesian Optimization
+# Define hyperparameter output path
+hyperparam_file = os.path.join(output_folder, "best_hyperparameters.json")
 
-# **Update arguments with best hyperparameters**
-args.latent_dim = best_params["latent_dim"]
-args.lr = best_params["lr"]
-args.epoch = best_params["epochs"]
+if args.use_optimised_params:
+    # Load pre-trained parameters and skip training
+    logger.info(f"Loading optimised hyperparameters from {args.use_optimised_params}")
+    with open(args.use_optimised_params, "r") as f:
+        best_params = json.load(f)
 
-logger.info(f"Using optimized parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+    # Update args with loaded parameters
+    args.latent_dim = best_params["latent_dim"]
+    args.lr = best_params["lr"]
+    args.epoch = best_params["epochs"]
 
-# **Final CLIPn training with best parameters**
-logger.info(f"Running CLIPn with optimized latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+    logger.info(f"Using pre-trained parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
 
-clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
-logger.info("Fitting CLIPn model...")
-loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
-logger.info(f"CLIPn training completed with optimized parameters. Final loss: {loss[-1]:.6f}")
+    # Initialize model and directly run prediction
+    clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
+    logger.info("Skipping training. Generating latent representations using pre-trained parameters.")
+    Z = clipn_model.predict(X)
 
-# **Extract latent representations**
-logger.info("Generating latent representations.")
-Z = clipn_model.predict(X)
+else:
+    # Run Hyperparameter Optimization
+    logger.info("Running Hyperparameter Optimization")
+    best_params = optimize_clipn(n_trials=20)  # Bayesian Optimization
+
+    # Save optimised parameters
+    with open(hyperparam_file, "w") as f:
+        json.dump(best_params, f, indent=4)
+
+    logger.info(f"Optimised hyperparameters saved to {hyperparam_file}")
+
+    # Update args with best parameters
+    args.latent_dim = best_params["latent_dim"]
+    args.lr = best_params["lr"]
+    args.epoch = best_params["epochs"]
+
+    logger.info(f"Using optimised parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+
+    # Train the model with the optimised parameters
+    logger.info(f"Running CLIPn with optimised latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+    clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
+    logger.info("Fitting CLIPn model...")
+    loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
+    logger.info(f"CLIPn training completed. Final loss: {loss[-1]:.6f}")
+
+    # Generate latent representations
+    logger.info("Generating latent representations.")
+    Z = clipn_model.predict(X)
 
 
 # mk new dir for new params. 
@@ -379,8 +402,10 @@ experiment_latent_df = pd.DataFrame(Z[0])
 stb_latent_df = pd.DataFrame(Z[1])
 
 # Restore original cpd_id values
-experiment_latent_df.index = [experiment_cpd_id_map[i] for i in range(len(experiment_latent_df))]
-stb_latent_df.index = [stb_cpd_id_map[i] for i in range(len(stb_latent_df))]
+experiment_latent_df.index = [experiment_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(experiment_latent_df))]
+stb_latent_df.index = [stb_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(stb_latent_df))]
+
+
 
 # Save combined file with cpd_id as index
 combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
