@@ -436,11 +436,6 @@ combined_latent_df.to_csv(os.path.join(output_folder, f"{output_folder}_CLIPn_la
 logger.info("Latent representations saved successfully with cpd_id as index.")
 
 
-
-
-#####################################################################
-# Perform UMAP dimensionality reduction
-logger.info("Generating UMAP visualization with cpd_id labels.")
 #####################################################################
 # Perform UMAP dimensionality reduction
 logger.info("Generating UMAP visualization with cpd_id labels.")
