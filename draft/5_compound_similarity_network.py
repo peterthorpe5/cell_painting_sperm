@@ -95,9 +95,11 @@ from pyvis.network import Network  # For interactive visualization
 import community.community_louvain as community  # Correct import for Louvain clustering
 
 
-#  Step 1: Setup Logging 
-log_filename = "network_clusters.log"
 
+#  Step 1: Setup Logging 
+log_folder = "similarity_network"
+os.makedirs(log_folder, exist_ok=True)  # Ensure output folder exists
+log_filename = os.path.join(log_folder, "network_clusters.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
