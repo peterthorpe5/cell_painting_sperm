@@ -36,7 +36,7 @@ parser.add_argument("--output",
 
 parser.add_argument("--similarity", 
                     type=float, 
-                    default=1.5,
+                    default=0.5,
                     help="Similarity threshold for clustering")
 
 parser.add_argument("--mcp-only", 
