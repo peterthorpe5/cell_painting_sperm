@@ -221,12 +221,21 @@ logger.info("Generating latent representations.")
 Z = clipn_model.predict(X)
 
 
+
+# Convert numerical dataset names back to string names
+Z_named = {str(k): v for k, v in Z.items()}  # Ensure all keys are strings
+# Save latent representations
+np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z_named)
+
+
 # Convert numerical dataset names back to original names
 Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
 
+# Save latent representations in NPZ format
+np.savez("CLIPn_latent_representations.npz", **Z_named)
+logger.info("Latent representations saved successfully.")
 
-# Save latent representations
-np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z)
+
 
 # Perform UMAP
 logger.info("Generating UMAP visualization.")
