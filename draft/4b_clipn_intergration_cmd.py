@@ -50,9 +50,16 @@ import optuna
 #  Step 1: Command-Line Arguments
 parser = argparse.ArgumentParser(description="Perform CLIPn clustering and UMAP on SCP data.")
 
-parser.add_argument("--latent_dim", type=int, default=20, help="Dimensionality of latent space (default: 20)")
-parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate for CLIPn (default: 1e-5)")
-parser.add_argument("--epoch", type=int, default=200, help="Number of training epochs (default: 200)")
+parser.add_argument("--latent_dim", 
+                    type=int, 
+                    default=20, 
+                    help="Dimensionality of latent space (default: 20)")
+parser.add_argument("--lr", type=float, 
+                    default=1e-5, 
+                    help="Learning rate for CLIPn (default: 1e-5)")
+parser.add_argument("--epoch", type=int, 
+                    default=200, 
+                    help="Number of training epochs (default: 200)")
 
 # Default STB files
 default_stb_files = [
@@ -75,10 +82,10 @@ parser.add_argument("--stb", nargs="+", default=default_stb_files,
 parser.add_argument("--experiment", nargs="+", default=default_experiment_files,
                     help="List of Experiment dataset files (default: predefined experiment files)")
 
-parser.add_argument("--use-optimized-params",
+parser.add_argument("--use_optimised_params",
                     type=str,
                     default=None,
-                    help="Path to JSON file containing optimized hyperparameters. If provided, training is skipped.")
+                    help="Path to JSON file containing optimised hyperparameters. If provided, training is skipped.")
 
 
 args = parser.parse_args()
@@ -279,7 +286,7 @@ logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v
 
 
 
-#####################
+########################################################
 # CLIPn clustering with hyper optimisation
 logger.info(f"Running CLIPn")
 
