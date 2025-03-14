@@ -136,6 +136,13 @@ parser.add_argument("--no-prefix-filtering",
 
 args = parser.parse_args()
 
+
+
+# Create formatted output filename prefix
+prefix_label = "ALL" if args.no_prefix_filtering else args.compound_prefix
+similarity_label = f"{args.similarity:.2f}"
+output_prefix = os.path.join(log_folder, f"{prefix_label}_sim{similarity_label}")
+
 #  Step 3: Load Distance Matrix 
 logging.info(f"Loading distance matrix from {args.input}")
 logging.info("... this takes a long time ... go and have a beer")
@@ -192,9 +199,9 @@ cluster_df = pd.DataFrame(list(partition.items()), columns=["Compound", "Cluster
 # Compute cluster sizes
 cluster_size_df = cluster_df["Cluster"].value_counts().reset_index()
 cluster_size_df.columns = ["Cluster", "Size"]
-cluster_size_df.to_csv("cluster_summary.tsv", sep="\t", index=False)
+cluster_size_df.to_csv(f"{output_prefix}_cluster_summary.tsv", sep="\t", index=False)
 
-logging.info("Cluster summary saved to 'cluster_summary.tsv'.")
+logging.info(f"Cluster summary saved to '{output_prefix}_cluster_summary.tsv'.")
 
 # Compute average similarity within each cluster
 cluster_similarities = []
@@ -204,9 +211,9 @@ for compound, cluster in partition.items():
     cluster_similarities.append(avg_similarity)
 
 cluster_df["Avg_Similarity"] = cluster_similarities
-cluster_df.to_csv(args.output, index=False, sep="\t")
+cluster_df.to_csv(f"{output_prefix}_compound_clusters.tsv", index=False, sep="\t")
 
-logging.info(f"Cluster assignments saved to {args.output}")
+logging.info(f"Cluster assignments saved to '{output_prefix}_compound_clusters.tsv'.")
 
 #  Step 8: Identify Strongest & Weakest Connections 
 edges_sorted = sorted(edges, key=lambda x: x[2])
@@ -215,9 +222,9 @@ weakest_connections = edges_sorted[-10:]
 
 strongest_weakest_df = pd.DataFrame(strongest_connections + weakest_connections,
                                     columns=["Compound1", "Compound2", "Distance"])
-strongest_weakest_df.to_csv("strongest_weakest_connections.tsv", sep="\t", index=False)
+strongest_weakest_df.to_csv(f"{output_prefix}_strongest_weakest_connections.tsv", sep="\t", index=False)
 
-logging.info("Strongest & weakest connections saved to 'strongest_weakest_connections.tsv'.")
+logging.info(f"Strongest & weakest connections saved to '{output_prefix}_strongest_weakest_connections.tsv'.")
 
 #  Step 9: Visualize Compound Distance Distribution 
 plt.figure(figsize=(8, 6))
@@ -226,10 +233,10 @@ sns.histplot([dist for _, _, dist in edges], bins=30, kde=True, color="blue")
 plt.xlabel("Compound Distance")
 plt.ylabel("Frequency")
 plt.title("Distribution of Compound Pairwise Distances")
-plt.savefig("compound_distance_distribution.pdf", format="pdf", bbox_inches="tight")
+plt.savefig(f"{output_prefix}_distance_distribution.pdf", format="pdf", bbox_inches="tight")
 plt.close()
 
-logging.info("Distance distribution saved to 'compound_distance_distribution.pdf'.")
+logging.info(f"Distance distribution saved to '{output_prefix}_distance_distribution.pdf'.")
 
 #  Step 10: Scatterplot of Similarity vs. Cluster Size 
 plt.figure(figsize=(8, 6))
@@ -238,10 +245,10 @@ sns.scatterplot(x=cluster_size_df["Size"], y=cluster_df["Avg_Similarity"], alpha
 plt.xlabel("Cluster Size")
 plt.ylabel("Average Similarity")
 plt.title("Cluster Size vs. Similarity")
-plt.savefig("cluster_similarity_vs_size.pdf", format="pdf", bbox_inches="tight")
+plt.savefig(f"{output_prefix}_cluster_similarity_vs_size.pdf", format="pdf", bbox_inches="tight")
 plt.close()
 
-logging.info("Scatterplot of similarity vs. cluster size saved to 'cluster_similarity_vs_size.pdf'.")
+logging.info(f"Scatterplot of similarity vs. cluster size saved to '{output_prefix}_cluster_similarity_vs_size.pdf'.")
 
 #  Step 11: Create Interactive Network Visualization 
 net = Network(height="750px", width="100%", notebook=False)
@@ -253,7 +260,7 @@ for node in G.nodes:
 for compound1, compound2, distance in edges:
     net.add_edge(str(compound1), str(compound2), title=f"Distance: {distance:.3f}")
 
-net.save_graph("compound_network.html")
+net.save_graph(f"{output_prefix}_network.html")
 
-logging.info("Interactive network visualization saved to 'compound_network.html'.")
+logging.info(f"Interactive network visualization saved to '{output_prefix}_network.html'.")
 logging.info("Processing complete!")
