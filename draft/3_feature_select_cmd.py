@@ -143,6 +143,28 @@ def csv_parser(file: Path) -> pd.DataFrame:
           .add_suffix(f"_{organelle}"))
     return df
 
+def impute_per_plate(group, imputer):
+    """
+    Applies imputation within each Plate_Metadata group separately.
+    
+    Parameters
+    ----------
+    group : pd.DataFrame
+        Data subset for a specific plate.
+
+    Returns
+    -------
+    pd.DataFrame
+        Imputed data for the plate.
+    """
+    numeric_cols = group.select_dtypes(include=[np.number]).columns  # Select only numeric columns
+    if numeric_cols.empty:
+        logger.warning(f"No numeric columns found for plate: {group['Plate_Metadata'].iloc[0]}. Skipping imputation.")
+        return group  # Skip if no numeric columns
+
+    # Apply imputation only to numeric columns
+    group[numeric_cols] = imputer.fit_transform(group[numeric_cols])
+    return group
 
 
 if __name__ == "__main__":
@@ -249,50 +271,57 @@ if __name__ == "__main__":
         logger.warning(f"Only {len(parsed_dfs)} organelle data files found. Expected 3 (acrosome, nucleus, mitochondria).")
 
     # Merge datasets safely
+    # Merge organelle data first
     df = parsed_dfs[0]
     for df_other in parsed_dfs[1:]:
         df = df.join(df_other, how="outer")
 
+    # Merge annotation data
     df = df.join(ddu, how='inner').reset_index()
-    df.query('~Plate_Metadata.str.contains("Plate_Metadata")', inplace=True)
-    df.set_index(['Source_Plate_Barcode', 'Source_well', 'name', 'Plate_Metadata', 'Well_Metadata', 'cpd_id', 'cpd_type'], inplace=True)
-
-    
-    
-    # Merge datasets
-    df = parsed_dfs[0].join(parsed_dfs[1:]).join(ddu, how='inner').reset_index()
-    df.query('~Plate_Metadata.str.contains("Plate_Metadata")', inplace=True)
+    df = df.query('~Plate_Metadata.str.contains("Plate_Metadata")')
     df.set_index(['Source_Plate_Barcode', 'Source_well', 'name', 'Plate_Metadata', 'Well_Metadata', 'cpd_id', 'cpd_type'], inplace=True)
     logger.info(f"Merged data shape: {df.shape}")
+
     
 
     # clean data prior to imputation, no inf or only NaN values
     # Check for Inf values
-    if np.isinf(df.to_numpy()).sum() > 0:
-        logger.warning("Data contains infinite values! Replacing with NaN before imputation.")
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Select only numeric columns before checking for infinities
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    # replace inf values with NaN
+    df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
 
-    # Check if any numeric columns still contain only NaNs (which can break imputation)
+
+    # Drop columns that contain only NaN values
     num_cols = df.select_dtypes(include=[np.number]).columns
     nan_counts = df[num_cols].isna().sum()
     nan_only_cols = nan_counts[nan_counts == df.shape[0]].index.tolist()
 
-if nan_only_cols:
-    logger.warning(f"These numeric columns contain only NaNs and will be dropped: {nan_only_cols}")
-    df.drop(columns=nan_only_cols, inplace=True)
+    if nan_only_cols:
+        logger.warning(f"These numeric columns contain only NaNs and will be dropped: {nan_only_cols}")
+        df.drop(columns=nan_only_cols, inplace=True)
 
-
-    # Handle missing values
+    # Choose imputer based on argument
     if args.impute_method == "knn":
         imputer = KNNImputer(n_neighbors=args.knn_neighbors)
     else:
         imputer = SimpleImputer(strategy=args.impute_method)
-    
-    df_imputed = pd.DataFrame(imputer.fit_transform(df.select_dtypes(include=[np.number])),
-                              columns=df.select_dtypes(include=[np.number]).columns)
-    df[df_imputed.columns] = df_imputed
-    logger.info(f"Missing values imputed using {args.impute_method} method.")
-    
+
+    if "Plate_Metadata" not in df.columns:
+        df.reset_index(inplace=True)  # Ensure Plate_Metadata is a column
+
+    # Apply imputation per plate
+    if "Plate_Metadata" in df.columns:
+        df = df.groupby("Plate_Metadata", group_keys=False).apply(lambda g: impute_per_plate(g, imputer))
+
+        logger.info(f"Missing values imputed using {args.impute_method} method per plate.")
+    else:
+        logger.warning("Plate_Metadata column not found in DataFrame. Applying imputation to entire dataset.")
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
+        logger.info(f"Missing values imputed using {args.impute_method} method on full dataset.")
+
+
     # Handle non-numeric data explicitly
     non_numeric_cols = df.select_dtypes(exclude=[np.number]).columns
     if len(non_numeric_cols) > 0:
@@ -312,9 +341,12 @@ if nan_only_cols:
     # Variance thresholding
     final_df = variance_threshold_selector(df3)
     logger.info(f"Final data shape after feature selection: {final_df.shape}")
+    logger.info(f"Final selected features: {final_df.shape[1]} columns out of {df3.shape[1]}. {df3.shape[1] - final_df.shape[1]} features dropped.")
+
     
     # Save cleaned data
     output_file = Path(args.output_dir) / f"{args.experiment_name}_feature_select.csv"
     final_df.to_csv(output_file)
     logger.info(f"Cleaned data saved successfully to {output_file}.")
+    logger.info(f"Final selected features: {final_df.shape[1]} columns out of {df3.shape[1]}")
     print(f"Feature selection and cleaning completed. Data saved to {output_file}.")
