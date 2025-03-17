@@ -46,7 +46,9 @@ the optimized values (e.g., clipn_ldim10_lr0.0001_epoch500/best_hyperparameters.
 """
 
 import os
+import sys
 import json
+import time
 import argparse
 import pandas as pd
 import numpy as np
@@ -76,24 +78,23 @@ parser.add_argument("--lr", type=float,
 parser.add_argument("--epoch", type=int, 
                     default=200, 
                     help="Number of training epochs (default: 200)")
-
 parser.add_argument("--impute", 
                     type=lambda x: (str(x).lower() == 'true'), 
                     default=True, 
                     help="Perform imputation for missing values (default: True)")
-
 parser.add_argument("--impute-method", 
                     type=str, 
                     choices=["median", "knn"], 
                     default="median", 
                     help="Imputation method: 'median' (default) or 'knn'.")
-
 parser.add_argument("--knn-neighbors", 
                     type=int, 
                     default=5, 
                     help="Number of neighbors for KNN imputation (default: 5).")
-
-
+parser.add_argument("--experiment_name", 
+                    type=str, 
+                    default="test", 
+                    help="Name of the experiment (default: inferred from input filenames)")
 # Default STB files
 default_stb_files = [
     "data/STB_NPSCDD0003971_05092024_normalised.csv",
@@ -102,19 +103,15 @@ default_stb_files = [
     "data/STB_NPSCDD000401_05092024_normalised.csv",
     "data/STB_NPSCDD0004034_13022025_normalised.csv"
 ]
-
 # Default experiment files
 default_experiment_files = [
     "data/Mitotox_assay_NPSCDD0003999_25102024_normalised.csv",
     "data/Mitotox_assay_NPSCDD0004023_25102024_normalised.csv"
 ]
-
 parser.add_argument("--stb", nargs="+", default=default_stb_files,
                     help="List of STB dataset files (default: predefined STB files)")
-
 parser.add_argument("--experiment", nargs="+", default=default_experiment_files,
                     help="List of Experiment dataset files (default: predefined experiment files)")
-
 parser.add_argument("--use_optimised_params",
                     type=str,
                     default=None,
@@ -187,12 +184,79 @@ def optimize_clipn(n_trials=20):
     return best_params
 
 
+# Determine the experiment name from the argument or infer from file names
+if args.experiment_name:
+    experiment_name = args.experiment_name
+else:
+    # Default: extract from first experiment file (assuming it's structured as 'experiment_assay_...')
+    experiment_name = os.path.basename(args.experiment[0]).split("_")[0]
+
+logger.info(f"Using experiment name: {experiment_name}")
+
+
+
+if sys.version_info[:1] != (3,):
+    # e.g. sys.version_info(major=3, minor=9, micro=7,
+    # releaselevel='final', serial=0)
+    # break the program
+    print ("currently using:", sys.version_info,
+           "  version of python")
+    raise ImportError("Python 3.x is required")
+    print ("did you activate the virtual environment?")
+    print ("this is to deal with module imports")
+    sys.exit(1)
+
+VERSION = "cell painting: clipn intergration: v0.0.1"
+if "--version" in sys.argv:
+    print(VERSION)
+    sys.exit(1)
 
 ##################################################################
 #  Step 2: Setup Output Directory
 # TO DO: needs to change as we train for best params, so this doesnt work. 
-output_folder = f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}"
-os.makedirs(output_folder, exist_ok=True)
+
+# Define the main output directory for this experiment
+main_output_folder = f"{experiment_name}_clipn_output"
+os.makedirs(main_output_folder, exist_ok=True)
+
+##################################################################
+# Log file name includes the experiment name
+logger = logging.getLogger()
+logger.info(f"Starting SCP data analysis for experiment: {experiment_name}")
+
+
+# Determine the log file name (including the experiment prefix)
+log_filename = os.path.join(main_output_folder, f"{experiment_name}_hyperparameter_results.log")
+
+# Initialize logger with experiment name and timestamp
+logger = logging.getLogger(f"{experiment_name}: {time.asctime()}")
+logger.setLevel(logging.DEBUG)  # Capture all levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+
+# Stream Handler (stderr)
+err_handler = logging.StreamHandler(sys.stderr)
+err_formatter = logging.Formatter('%(levelname)s: %(message)s')
+err_handler.setFormatter(err_formatter)
+logger.addHandler(err_handler)
+
+# File Handler (Logfile)
+try:
+    logstream = open(log_filename, 'w')
+    err_handler_file = logging.StreamHandler(logstream)
+    err_handler_file.setFormatter(err_formatter)
+    err_handler_file.setLevel(logging.INFO)  # Logfile should always be verbose
+    logger.addHandler(err_handler_file)
+except Exception as e:
+    logger.error(f"Could not open {log_filename} for logging: {e}")
+    sys.exit(1)
+
+# **System & Command-line Information for Reproducibility**
+logger.info(f"Python Version: {sys.version_info}")
+logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
+logger.info(f"Experiment Name: {experiment_name}")
+logger.info(f"STB Datasets: {args.stb}")
+logger.info(f"Experiment Datasets: {args.experiment}")
+logger.info(f"Using Logfile: {log_filename}")
+logger.info(f"Logging initialized at {time.asctime()}")
 
 #  Step 3: Setup Logging
 log_filename = os.path.join(output_folder, "clipn_integration.log")
@@ -204,10 +268,8 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger()
+
 logger.info(f"Starting SCP data analysis using CLIPn with latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
-logger.info(f"STB datasets: {args.stb}")
-logger.info(f"Experiment datasets: {args.experiment}")
 
 # Load and merge datasets
 stb_dfs = [pd.read_csv(f) for f in args.stb]
