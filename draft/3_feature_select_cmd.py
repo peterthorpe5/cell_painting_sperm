@@ -103,6 +103,7 @@ def variance_threshold_selector(data: pd.DataFrame, threshold: float = 0.05) -> 
     logger.debug(f"Selected {selected_data.shape[1]} features out of {data.shape[1]} after variance filtering.")
     return selected_data
 
+
 def csv_parser(file: Path) -> pd.DataFrame:
     """
     Reads normalised CSV files and annotates organelle information.
@@ -114,23 +115,35 @@ def csv_parser(file: Path) -> pd.DataFrame:
 
     Returns
     -------
-    pd.DataFrame
-        Parsed and formatted DataFrame.
+    pd.DataFrame or None
+        Parsed and formatted DataFrame if valid, otherwise None.
     """
-    organelle_map = {'acrosome': 'acrosome', 'nucleus': 'nucleus', 'mitochondria': 'mitochondria'}
+    organelle_map = {
+        'acrosome': 'acrosome',
+        'nucleus': 'nucleus',
+        'mitochondria': 'mitochondria'
+    }
+    # Detect organelle type from filename
     organelle = next((name for key, name in organelle_map.items() if key in file.stem.lower()), None)
     if organelle is None:
-        raise ValueError(f"Unknown organelle type in filename: {file.stem}")
-
-    logger.debug(f"Parsing file: {file}")
+        # Log the ignored file
+        logger.warning(f"Ignoring file: {file.stem} (does not contain a known organelle type).")
+        return None  # Skip processing this file
+    logger.debug(f"Processing organelle file: {file}")
     df = pd.read_csv(file)
+    if df.empty:
+        logger.warning(f"File {file} is empty. Skipping processing.")
+        return None  # Skip empty files
+    
     logger.debug(f"Sample data from {file.name}:\n{df.head()}")
-
+    # Assign filename metadata and set the appropriate index
     df = (df.assign(fn=file.stem)
           .rename(columns=lambda x: x.replace('Cy5', 'AR'))
-          .set_index(['Plate_Metadata', 'Well_Metadata'])
+          .set_index(['Plate_Metadata', 'Well_Metadata'], drop=False)  # Ensure index is not lost
           .add_suffix(f"_{organelle}"))
     return df
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Feature selection for SCP data.")
@@ -142,7 +155,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--input_dir", 
                         type=str, 
-                        default="/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/IXM_data/MCP09_ext_3751/", 
+                        default="/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/04022025/Normalised/", 
                         help="Path to input directory containing CSV files (default: predefined path)")
 
     parser.add_argument("--output_dir", 
@@ -202,12 +215,6 @@ if __name__ == "__main__":
 
     # Now setting the index should work
     ddu.set_index(['Plate_Metadata', 'Well_Metadata'], inplace=True)
-
-
-
-
-
-
     
     # Standardise plate metadata
     plate_patterns = {
