@@ -349,7 +349,9 @@ if __name__ == "__main__":
     logger.info(f"Final selected features: {final_df.shape[1]} columns out of {df3.shape[1]}. {df3.shape[1] - final_df.shape[1]} features dropped.")
 
     # Ensure output directory exists
-    output_dir = Path(args.output_dir).resolve()
+    # Format the output directory properly
+    output_dir = Path(args.output_dir.format(experiment=args.experiment_name)).resolve()
+
     output_dir.mkdir(parents=True, exist_ok=True)  # Create if not exists
 
 
