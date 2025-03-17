@@ -78,25 +78,46 @@ def csv_parser(file: Path) -> pd.DataFrame:
 annotation_path = Path('/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/04022025/KVP_4Plates_04022025.csv')
 logger.info("Loading annotation data.")
 ddu = pd.read_csv(annotation_path)
-ddu = (ddu.rename(columns={'Plate': 'Plate_Metadata', 'Well': 'Well_Metadata'})
-       .assign(Well_Metadata=lambda df_: df_.Well_Metadata.str[0] + df_.Well_Metadata.str[1:].astype(int).astype(str))
-       .set_index(['Plate_Metadata', 'Well_Metadata'])
-       .drop(columns=['Unnamed: 0'], errors='ignore'))
+logger.info(f"Columns in annotation file before renaming: {list(ddu.columns)}")
 
-logger.info(f"Annotation data loaded with shape: {ddu.shape}")
-logger.debug(f"Annotation data sample:\n{ddu.head()}")
 
-# Standardise plate metadata
+
+# Ensure the correct column names exist before renaming
+if 'Plate' in ddu.columns and 'Well' in ddu.columns:
+    ddu = ddu.rename(columns={'Plate': 'Plate_Metadata', 'Well': 'Well_Metadata'})
+else:
+    raise KeyError("Annotation file does not contain expected 'Plate' and 'Well' columns")
+
+# Ensure 'Plate_Metadata' does not contain NaN before using .str.contains()
+ddu['Plate_Metadata'] = ddu['Plate_Metadata'].astype(str).fillna('')
+
+# Standardise Well_Metadata format (e.g., 'A01' → 'A1')
+ddu['Well_Metadata'] = ddu['Well_Metadata'].astype(str)
+ddu['Well_Metadata'] = ddu['Well_Metadata'].str[0] + ddu['Well_Metadata'].str[1:].astype(int).astype(str)
+
+# Standardise plate metadata names
 plate_patterns = {
     'NPSCDD000401': '20241129_NPSCDD000401_STB',
     'NPSCDD000400': '20241129_NPSCDD000400_STB',
     'NPSCDD0003971': 'NPSCDD0003971_05092024',
     'NPSCDD0003972': 'NPSCDD0003972_05092024'
 }
-ddu.reset_index(inplace=True)
+
 for pattern, replacement in plate_patterns.items():
-    ddu.loc[ddu['Plate_Metadata'].str.contains(pattern, na=False), 'Plate_Metadata'] = replacement
+    mask = ddu['Plate_Metadata'].str.contains(pattern, na=False)
+    ddu.loc[mask, 'Plate_Metadata'] = replacement
+
+# Drop 'Unnamed: 0' if it exists
+ddu.drop(columns=['Unnamed: 0'], errors='ignore', inplace=True)
+
+# Reset index and set new index
+ddu.reset_index(inplace=True, drop=True)
 ddu.set_index(['Plate_Metadata', 'Well_Metadata'], inplace=True)
+
+logger.info(f"Annotation data loaded with shape: {ddu.shape}")
+logger.debug(f"Annotation data sample:\n{ddu.head()}")
+
+
 
 # Load and parse SCP data
 input_directory = Path('/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/IXM_data/MCP09_ext_3751/Processed_data/')
