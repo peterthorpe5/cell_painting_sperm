@@ -240,7 +240,7 @@ os.makedirs(main_output_folder, exist_ok=True)
 # **3. Initialize Logger BEFORE Calling logger.info()**
 
 # Determine the log file name (including the experiment prefix)
-log_filename = os.path.join(main_output_folder, f"{experiment_name}_hyperparameter_results.log")
+log_filename = os.path.join(main_output_folder, f"{experiment_name}_clipn_intergration.log")
 
 # **Proper Logger Initialization**
 logger = logging.getLogger(f"{experiment_name}: {time.asctime()}")
@@ -486,8 +486,9 @@ else:
 
 
 # mk new dir for new params. 
-output_folder = f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}"
+output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}")
 os.makedirs(output_folder, exist_ok=True)
+
 
 # Convert numerical dataset names back to string names
 Z_named = {str(k): v for k, v in Z.items()}  # Ensure all keys are strings
