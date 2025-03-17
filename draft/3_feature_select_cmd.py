@@ -265,6 +265,23 @@ if __name__ == "__main__":
     df.set_index(['Source_Plate_Barcode', 'Source_well', 'name', 'Plate_Metadata', 'Well_Metadata', 'cpd_id', 'cpd_type'], inplace=True)
     logger.info(f"Merged data shape: {df.shape}")
     
+
+    # clean data prior to imputation, no inf or only NaN values
+    # Check for Inf values
+    if np.isinf(df.to_numpy()).sum() > 0:
+        logger.warning("Data contains infinite values! Replacing with NaN before imputation.")
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # Check if any numeric columns still contain only NaNs (which can break imputation)
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    nan_counts = df[num_cols].isna().sum()
+    nan_only_cols = nan_counts[nan_counts == df.shape[0]].index.tolist()
+
+if nan_only_cols:
+    logger.warning(f"These numeric columns contain only NaNs and will be dropped: {nan_only_cols}")
+    df.drop(columns=nan_only_cols, inplace=True)
+
+
     # Handle missing values
     if args.impute_method == "knn":
         imputer = KNNImputer(n_neighbors=args.knn_neighbors)
