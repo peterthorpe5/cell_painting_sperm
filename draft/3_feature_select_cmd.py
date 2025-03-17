@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--input_dir", 
                         type=str, 
-                        default="/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/IXM_data/MCP09_ext_3751/Processed_data/", 
+                        default="/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/IXM_data/MCP09_ext_3751/", 
                         help="Path to input directory containing CSV files (default: predefined path)")
 
     parser.add_argument("--output_dir", 

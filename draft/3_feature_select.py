@@ -120,7 +120,7 @@ logger.debug(f"Annotation data sample:\n{ddu.head()}")
 
 
 # Load and parse SCP data
-input_directory = Path('/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/IXM_data/MCP09_ext_3751/Processed_data/')
+input_directory = Path('/uod/npsc/Lab_Book/BMGF/NHCP/SCP/STB/IXM_data/MCP09_ext_3751/')
 input_files = list(input_directory.glob('NPSCDD000400*csv*'))
 logger.info(f"Loading SCP data from {len(input_files)} files.")
 parsed_dfs = [csv_parser(file) for file in input_files]
