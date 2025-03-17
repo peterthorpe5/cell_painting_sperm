@@ -220,14 +220,29 @@ os.makedirs(main_output_folder, exist_ok=True)
 
 ##################################################################
 # Log file name includes the experiment name
-logger = logging.getLogger()
-logger.info(f"Starting SCP data analysis for experiment: {experiment_name}")
 
+
+# **1. Define Experiment Name First**
+if args.experiment_name:
+    experiment_name = args.experiment_name
+else:
+    # Default: extract from first experiment file (assuming structured as 'experiment_assay_...')
+    experiment_name = os.path.basename(args.experiment[0]).split("_")[0]  
+
+# Ensure experiment_name is defined from command-line arguments
+experiment_name = args.experiment_name if hasattr(args, "experiment_name") else "test"
+
+# **2. Create Main Output Folder Before Logging**
+main_output_folder = f"{experiment_name}_clipn_output"
+os.makedirs(main_output_folder, exist_ok=True)
+
+##################################################################
+# **3. Initialize Logger BEFORE Calling logger.info()**
 
 # Determine the log file name (including the experiment prefix)
 log_filename = os.path.join(main_output_folder, f"{experiment_name}_hyperparameter_results.log")
 
-# Initialize logger with experiment name and timestamp
+# **Proper Logger Initialization**
 logger = logging.getLogger(f"{experiment_name}: {time.asctime()}")
 logger.setLevel(logging.DEBUG)  # Capture all levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 
@@ -245,8 +260,11 @@ try:
     err_handler_file.setLevel(logging.INFO)  # Logfile should always be verbose
     logger.addHandler(err_handler_file)
 except Exception as e:
-    logger.error(f"Could not open {log_filename} for logging: {e}")
+    print(f"Could not open {log_filename} for logging: {e}", file=sys.stderr)
     sys.exit(1)
+
+# ✅ **4. Now we can use `logger.info()` because `logger` is initialized**
+logger.info(f"Using experiment name: {experiment_name}")
 
 # **System & Command-line Information for Reproducibility**
 logger.info(f"Python Version: {sys.version_info}")
@@ -257,7 +275,12 @@ logger.info(f"Experiment Datasets: {args.experiment}")
 logger.info(f"Using Logfile: {log_filename}")
 logger.info(f"Logging initialized at {time.asctime()}")
 
-#  Step 3: Setup Logging
+##################################################################
+#  Step 3: Setup Per-Run Output Folder for Different Hyperparameters
+output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}")
+os.makedirs(output_folder, exist_ok=True)
+
+# **5. Reinitialize logging inside per-run folder**
 log_filename = os.path.join(output_folder, "clipn_integration.log")
 logging.basicConfig(
     level=logging.INFO,
@@ -267,6 +290,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
 
 logger.info(f"Starting SCP data analysis using CLIPn with latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
 logger.info(f"STB datasets: {args.stb}")
