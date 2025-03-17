@@ -45,11 +45,30 @@ The log file is saved in the output directory as "{experiment_name}_feature_sele
 
 import pandas as pd
 import numpy as np
+import os
+import sys
 import logging
 import argparse
 from pathlib import Path
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.feature_selection import VarianceThreshold
+
+
+if sys.version_info[:1] != (3,):
+    # e.g. sys.version_info(major=3, minor=9, micro=7,
+    # releaselevel='final', serial=0)
+    # break the program
+    print ("currently using:", sys.version_info,
+           "  version of python")
+    raise ImportError("Python 3.x is required")
+    print ("did you activate the virtual environment?")
+    print ("this is to deal with module imports")
+    sys.exit(1)
+
+VERSION = "cell painting: feature selection: v0.0.1"
+if "--version" in sys.argv:
+    print(VERSION)
+    sys.exit(1)
 
 # Configure logging
 logger = logging.getLogger("feature_selection")
