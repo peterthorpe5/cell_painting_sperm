@@ -216,6 +216,7 @@ if __name__ == "__main__":
     # Now setting the index should work
     ddu.set_index(['Plate_Metadata', 'Well_Metadata'], inplace=True)
     
+    print("WARNING HARD CODED - change!!")
     # Standardise plate metadata
     plate_patterns = {
         'NPSCDD000401': '20241129_NPSCDD000401_STB',
@@ -233,7 +234,8 @@ if __name__ == "__main__":
 
     # Load and parse SCP data
     input_directory = Path(args.input_dir)
-    input_files = list(input_directory.glob('*.csv'))
+    print("....WARNING hard code -  change.....")
+    input_files = list(input_directory.glob('NPSCDD000400*csv*'))
     logger.info(f"Loading SCP data from {len(input_files)} files.")
     parsed_dfs = [csv_parser(file) for file in input_files]
     
