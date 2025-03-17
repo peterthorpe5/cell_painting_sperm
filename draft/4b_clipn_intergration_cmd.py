@@ -55,7 +55,7 @@ import matplotlib.pyplot as plt
 import umap.umap_ as umap
 from pathlib import Path
 from clipn import CLIPn
-from sklearn.impute import SimpleImputer
+from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import LabelEncoder
 from scipy.spatial.distance import cdist
 import seaborn as sns
@@ -76,6 +76,23 @@ parser.add_argument("--lr", type=float,
 parser.add_argument("--epoch", type=int, 
                     default=200, 
                     help="Number of training epochs (default: 200)")
+
+parser.add_argument("--impute", 
+                    type=lambda x: (str(x).lower() == 'true'), 
+                    default=True, 
+                    help="Perform imputation for missing values (default: True)")
+
+parser.add_argument("--impute-method", 
+                    type=str, 
+                    choices=["median", "knn"], 
+                    default="median", 
+                    help="Imputation method: 'median' (default) or 'knn'.")
+
+parser.add_argument("--knn-neighbors", 
+                    type=int, 
+                    default=5, 
+                    help="Number of neighbors for KNN imputation (default: 5).")
+
 
 # Default STB files
 default_stb_files = [
@@ -105,6 +122,7 @@ parser.add_argument("--use_optimised_params",
 args = parser.parse_args()
 
 
+##################################################################
 # functions
 def objective(trial):
     """
@@ -232,9 +250,33 @@ experiment_numeric = experiment_numeric[common_columns_before]
 stb_numeric = stb_numeric[common_columns_before]
 
 # **Handle missing values with median imputation**
-imputer = SimpleImputer(strategy="median")
-experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns_before)
-stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns_before)
+# NOTE: should imputation be done during the feature selection stage??
+from sklearn.impute import SimpleImputer, KNNImputer  # Import both imputation methods
+
+if args.impute:
+    logger.info(f"Performing imputation for missing values using {args.impute_method} strategy.")
+
+    if args.impute_method == "median":
+        imputer = SimpleImputer(strategy="median")
+    elif args.impute_method == "knn":
+        imputer = KNNImputer(n_neighbors=args.knn_neighbors)
+
+    # Apply imputation
+    experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns_before)
+    stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns_before)
+
+    # Identify columns lost during imputation
+    common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
+    columns_lost = set(common_columns_before) - set(common_columns_after)
+    logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+
+else:
+    logger.info("Skipping imputation as per command-line argument.")
+    
+    # Assign original numerical datasets (no imputation)
+    experiment_numeric_imputed = experiment_numeric[common_columns_before]
+    stb_numeric_imputed = stb_numeric[common_columns_before]
+
 
 # **Identify columns lost during imputation**
 common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
