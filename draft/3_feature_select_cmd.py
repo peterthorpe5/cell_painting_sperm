@@ -238,6 +238,26 @@ if __name__ == "__main__":
     input_files = list(input_directory.glob('NPSCDD000400*csv*'))
     logger.info(f"Loading SCP data from {len(input_files)} files.")
     parsed_dfs = [csv_parser(file) for file in input_files]
+
+    parsed_dfs = [df for df in parsed_dfs if df is not None]  # Remove ignored files
+
+    # Check if we have enough files to join
+    if len(parsed_dfs) == 0:
+        logger.error("No valid organelle data files found! Check input directory or file naming conventions.")
+        sys.exit(1)
+    elif len(parsed_dfs) < 3:
+        logger.warning(f"Only {len(parsed_dfs)} organelle data files found. Expected 3 (acrosome, nucleus, mitochondria).")
+
+    # Merge datasets safely
+    df = parsed_dfs[0]
+    for df_other in parsed_dfs[1:]:
+        df = df.join(df_other, how="outer")
+
+    df = df.join(ddu, how='inner').reset_index()
+    df.query('~Plate_Metadata.str.contains("Plate_Metadata")', inplace=True)
+    df.set_index(['Source_Plate_Barcode', 'Source_well', 'name', 'Plate_Metadata', 'Well_Metadata', 'cpd_id', 'cpd_type'], inplace=True)
+
+    
     
     # Merge datasets
     df = parsed_dfs[0].join(parsed_dfs[1:]).join(ddu, how='inner').reset_index()
