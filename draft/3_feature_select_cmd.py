@@ -185,7 +185,20 @@ if __name__ == "__main__":
     logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
     logger.info(f"Experiment Name: {experiment_name}")
     logger.info("Loading annotation data.")
-    ddu = pd.read_csv(annotation_path)
+
+    ddu = pd.read_csv(annotation_path, index_col=0)  # Ignores the first unnamed column
+    ddu.columns = ddu.columns.str.strip().str.replace(" ", "_")  # Normalize column names
+
+    # Ensure 'Plate_Metadata' exists
+    if 'Plate_Metadata' not in ddu.columns and 'Plate' in ddu.columns:
+        ddu.rename(columns={'Plate': 'Plate_Metadata'}, inplace=True)
+
+    logger.info(f"Columns after processing: {ddu.columns.tolist()}")  # Debugging
+
+
+
+
+
     
     # Standardise plate metadata
     plate_patterns = {
