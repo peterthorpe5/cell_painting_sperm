@@ -184,17 +184,6 @@ def optimize_clipn(n_trials=20):
     return best_params
 
 
-# Determine the experiment name from the argument or infer from file names
-if args.experiment_name:
-    experiment_name = args.experiment_name
-else:
-    # Default: extract from first experiment file (assuming it's structured as 'experiment_assay_...')
-    experiment_name = os.path.basename(args.experiment[0]).split("_")[0]
-
-logger.info(f"Using experiment name: {experiment_name}")
-
-
-
 if sys.version_info[:1] != (3,):
     # e.g. sys.version_info(major=3, minor=9, micro=7,
     # releaselevel='final', serial=0)
@@ -216,6 +205,16 @@ if "--version" in sys.argv:
 # TO DO: needs to change as we train for best params, so this doesnt work. 
 
 # Define the main output directory for this experiment
+# Determine the experiment name from the argument or infer from file names
+if args.experiment_name:
+    experiment_name = args.experiment_name
+else:
+    # Default: extract from first experiment file (assuming it's structured as 'experiment_assay_...')
+    experiment_name = os.path.basename(args.experiment[0]).split("_")[0]
+
+# Ensure experiment_name is defined from command-line arguments
+experiment_name = args.experiment_name if hasattr(args, "experiment_name") else "test"
+
 main_output_folder = f"{experiment_name}_clipn_output"
 os.makedirs(main_output_folder, exist_ok=True)
 
@@ -270,6 +269,8 @@ logging.basicConfig(
 )
 
 logger.info(f"Starting SCP data analysis using CLIPn with latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+logger.info(f"STB datasets: {args.stb}")
+logger.info(f"Experiment datasets: {args.experiment}")
 
 # Load and merge datasets
 stb_dfs = [pd.read_csv(f) for f in args.stb]
