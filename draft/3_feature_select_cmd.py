@@ -12,6 +12,18 @@ This script processes and cleans Sperm Cell Painting (SCP) data by:
     - Preparing data for downstream analysis and visualisation.
     - Logging all operations and key data snapshots for easier debugging.
 
+    
+Step	Action
+--------------------------------------
+1	Merge organelle data + annotations
+2	Check for Inf values & replace with NaN
+3	Drop columns with only NaN values
+4	Perform KNN Imputation per plate (or median based if cmd select)
+5	Remove highly correlated features
+6	Apply variance thresholding
+7	Save the cleaned dataset
+
+
 Command-Line Arguments:
 -----------------------
     --experiment_name          : (str) Name of the experiment. Used as a prefix for output files. Default: "SCP".
@@ -342,7 +354,7 @@ if __name__ == "__main__":
     cm = df2.corr().abs()
     upper_tri = cm.where(np.triu(np.ones(cm.shape), k=1).astype(bool))
     to_drop = [col for col in upper_tri.columns if any(upper_tri[col] > args.correlation_threshold)]
-    logger.debug(f"Dropping {len(to_drop)} correlated features.")
+    logger.info(f"Dropping {len(to_drop)} correlated features.")
     df3 = df2.drop(columns=to_drop)
     
     # Variance thresholding
@@ -353,15 +365,11 @@ if __name__ == "__main__":
     # Ensure output directory exists
     # Format the output directory properly
     output_dir = Path(args.output_dir.format(experiment=args.experiment_name)).resolve()
-
     output_dir.mkdir(parents=True, exist_ok=True)  # Create if not exists
-
-
-
     
     # Save cleaned data
     output_file = output_dir / f"{args.experiment_name}_feature_select.csv"
     final_df.to_csv(output_file)
-    logger.info(f"Cleaned data saved successfully to {output_file}.")
+    logger.info(f"Cleaned data saved successfully to {output_file}")
     logger.info(f"Final selected features: {final_df.shape[1]} columns out of {df3.shape[1]}")
     print(f"Feature selection and cleaning completed. Data saved to {output_file}.")
