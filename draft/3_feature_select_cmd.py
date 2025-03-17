@@ -313,11 +313,13 @@ if __name__ == "__main__":
         imputer = SimpleImputer(strategy=args.impute_method)
 
     if "Plate_Metadata" not in df.columns:
-        df.reset_index(inplace=True)  # Ensure Plate_Metadata is a column
+        df = df.reset_index()  # Avoid modifying in place (prevents fragmentation)
+        df = df.copy()  # Defragment DataFrame
+
 
     # Apply imputation per plate
     if "Plate_Metadata" in df.columns:
-        df = df.groupby("Plate_Metadata", group_keys=False).apply(lambda g: impute_per_plate(g, imputer))
+        df = df.groupby("Plate_Metadata", group_keys=False, observed=True).apply(lambda g: impute_per_plate(g.drop(columns=["Plate_Metadata"]), imputer))
 
         logger.info(f"Missing values imputed using {args.impute_method} method per plate.")
     else:
