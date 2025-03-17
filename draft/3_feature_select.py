@@ -1,16 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-"""
-Sperm Cell Painting Data Feature Selection & Cleaning
------------------------------------------------------
-This script processes and cleans Sperm Cell Painting (SCP) data by:
-    - Importing annotation files for all libraries included on plates.
-    - Performing feature selection based on variance thresholding.
-    - Filtering out highly correlated features.
-    - Preparing data for downstream analysis and visualisation.
-    - Logging all operations and key data snapshots for easier debugging.
-"""
 
 import pandas as pd
 import numpy as np

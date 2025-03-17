@@ -80,7 +80,7 @@ parser.add_argument("--epoch", type=int,
                     help="Number of training epochs (default: 200)")
 parser.add_argument("--impute", 
                     type=lambda x: (str(x).lower() == 'true'), 
-                    default=True, 
+                    default=False, 
                     help="Perform imputation for missing values (default: True)")
 parser.add_argument("--impute-method", 
                     type=str, 
@@ -338,7 +338,7 @@ stb_numeric = stb_numeric[common_columns_before]
 
 # **Handle missing values with median imputation**
 # NOTE: should imputation be done during the feature selection stage??
-from sklearn.impute import SimpleImputer, KNNImputer  # Import both imputation methods
+
 
 if args.impute:
     logger.info(f"Performing imputation for missing values using {args.impute_method} strategy.")
@@ -358,7 +358,8 @@ if args.impute:
     logger.info(f"Columns lost during imputation: {list(columns_lost)}")
 
 else:
-    logger.info("Skipping imputation as per command-line argument.")
+    logger.info("Skipping imputation as per default command-line argument.")
+    logger.info("Imputation should have been done at the feature selection stage....")
     
     # Assign original numerical datasets (no imputation)
     experiment_numeric_imputed = experiment_numeric[common_columns_before]
