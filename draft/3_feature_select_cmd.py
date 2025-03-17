@@ -193,7 +193,16 @@ if __name__ == "__main__":
     if 'Plate_Metadata' not in ddu.columns and 'Plate' in ddu.columns:
         ddu.rename(columns={'Plate': 'Plate_Metadata'}, inplace=True)
 
-    logger.info(f"Columns after processing: {ddu.columns.tolist()}")  # Debugging
+    # Rename 'Well' to 'Well_Metadata' to match expected column names
+    if 'Well_Metadata' not in ddu.columns and 'Well' in ddu.columns:
+        ddu.rename(columns={'Well': 'Well_Metadata'}, inplace=True)
+
+    # Ensure that renaming worked
+    print(f"Columns after renaming: {ddu.columns.tolist()}")
+
+    # Now setting the index should work
+    ddu.set_index(['Plate_Metadata', 'Well_Metadata'], inplace=True)
+
 
 
 
