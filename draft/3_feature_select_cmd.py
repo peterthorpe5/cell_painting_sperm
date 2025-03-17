@@ -272,18 +272,23 @@ if __name__ == "__main__":
 
     # Merge datasets safely
     # Merge organelle data first
-    df = parsed_dfs[0]
-    for df_other in parsed_dfs[1:]:
-        df = df.join(df_other, how="outer")
+    # Merge organelle data efficiently
+    df = pd.concat(parsed_dfs, axis=1)  # Instead of multiple join operations
 
     # Merge annotation data
     df = df.join(ddu, how='inner').reset_index()
+
+    # Defragment DataFrame after heavy modifications
+    df = df.copy()
+ 
+
+    # Ensure no self-referencing metadata rows
+    # Set the correct index first (avoiding reprocessing later)
     df = df.query('~Plate_Metadata.str.contains("Plate_Metadata")')
     df.set_index(['Source_Plate_Barcode', 'Source_well', 'name', 'Plate_Metadata', 'Well_Metadata', 'cpd_id', 'cpd_type'], inplace=True)
     logger.info(f"Merged data shape: {df.shape}")
 
     
-
     # clean data prior to imputation, no inf or only NaN values
     # Check for Inf values
     # Select only numeric columns before checking for infinities
@@ -343,9 +348,15 @@ if __name__ == "__main__":
     logger.info(f"Final data shape after feature selection: {final_df.shape}")
     logger.info(f"Final selected features: {final_df.shape[1]} columns out of {df3.shape[1]}. {df3.shape[1] - final_df.shape[1]} features dropped.")
 
+    # Ensure output directory exists
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)  # Create if not exists
+
+
+
     
     # Save cleaned data
-    output_file = Path(args.output_dir) / f"{args.experiment_name}_feature_select.csv"
+    output_file = output_dir / f"{args.experiment_name}_feature_select.csv"
     final_df.to_csv(output_file)
     logger.info(f"Cleaned data saved successfully to {output_file}.")
     logger.info(f"Final selected features: {final_df.shape[1]} columns out of {df3.shape[1]}")
