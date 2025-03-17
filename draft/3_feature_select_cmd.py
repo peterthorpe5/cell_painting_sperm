@@ -175,6 +175,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Extract the experiment name before using it in logging
+    experiment_name = args.experiment_name
+
     # Load annotation data
     annotation_path = Path(args.annotation_file)
     # **System & Command-line Information for Reproducibility**
