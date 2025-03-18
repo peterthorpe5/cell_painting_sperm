@@ -710,7 +710,7 @@ np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_e
 Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
 
 # Save latent representations in NPZ format
-np.savez(os.path.join(output_folder, "CLIPn_latent_representations.npz"), **Z_named)  # ✅ Save to the correct folder
+np.savez(os.path.join(output_folder, "CLIPn_latent_representations.npz"), **Z_named)
 logger.info("Latent representations saved successfully.")
 
 
@@ -814,7 +814,7 @@ else:
     raise ValueError("Error: No latent representations available to save!")
 
 # Save the combined file if there is data
-combined_output_file = os.path.join(output_folder, f"{output_folder}_CLIPn_latent_representations_with_cpd_id.csv")
+combined_output_file = os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv")
 combined_latent_df.to_csv(combined_output_file)
 
 logger.info(f"Latent representations saved successfully with cpd_id as index to {combined_output_file}.")
@@ -831,7 +831,7 @@ cpd_id_list = list(combined_latent_df.index)
 
 # Save UMAP coordinates
 umap_df = pd.DataFrame(latent_umap, index=combined_latent_df.index, columns=["UMAP1", "UMAP2"])
-umap_file = os.path.join(output_folder, f"{output_folder}_UMAP_coordinates.csv")
+umap_file = os.path.join(output_folder, "UMAP_coordinates.csv")
 umap_df.to_csv(umap_file)
 logger.info(f"UMAP coordinates saved to '{umap_file}'.")
 
@@ -849,7 +849,7 @@ plt.xlabel("UMAP 1")
 plt.ylabel("UMAP 2")
 plt.title("UMAP Visualization with cpd_id Labels")
 
-umap_plot_file = os.path.join(output_folder, f"{output_folder}_UMAP_latent_visualization_cpd_id.pdf")
+umap_plot_file = os.path.join(output_folder, "UMAP_latent_visualization_cpd_id.pdf")
 plt.savefig(umap_plot_file, dpi=300)
 plt.close()
 logger.info(f"UMAP visualization saved as '{umap_plot_file}'.")
@@ -876,7 +876,7 @@ plt.xlabel("UMAP 1")
 plt.ylabel("UMAP 2")
 plt.title("UMAP Visualization: Experiment (Red) vs. STB (Blue)")
 
-umap_colored_plot_file = os.path.join(output_folder, f"{output_folder}_UMAP_experiment_vs_stb.pdf")
+umap_colored_plot_file = os.path.join(output_folder, "UMAP_experiment_vs_stb.pdf")
 plt.savefig(umap_colored_plot_file, dpi=300)
 plt.close()
 logger.info(f"UMAP visualization (experiment vs. STB) saved as '{umap_colored_plot_file}'.")
@@ -921,7 +921,7 @@ summary_df = pd.DataFrame({
 
 
 # Save summary file
-summary_file = os.path.join(output_folder, f"{output_folder}_compound_similarity_summary.csv")
+summary_file = os.path.join(output_folder, "compound_similarity_summary.csv")
 summary_df.to_csv(summary_file)
 logger.info(f"Compound similarity summary saved to '{summary_file}'.")
 
@@ -932,7 +932,7 @@ plt.figure(figsize=(12, 10))
 sns.clustermap(dist_df, cmap="viridis", method="ward", figsize=(12, 10))
 plt.title("Pairwise Distance Heatmap of Compounds")
 
-heatmap_file = os.path.join(output_folder, f"{output_folder}_compound_distance_heatmap.pdf")
+heatmap_file = os.path.join(output_folder, "compound_distance_heatmap.pdf")
 plt.savefig(heatmap_file)
 plt.close()
 logger.info(f"Pairwise distance heatmap saved to '{heatmap_file}'.")
@@ -949,13 +949,13 @@ plt.title("Hierarchical Clustering of Compounds")
 plt.xlabel("Compound")
 plt.ylabel("Distance")
 
-dendrogram_file = os.path.join(output_folder, f"{output_folder}_compound_clustering_dendrogram.pdf")
+dendrogram_file = os.path.join(output_folder, "compound_clustering_dendrogram.pdf")
 plt.savefig(dendrogram_file)
 plt.close()
 logger.info(f"Hierarchical clustering dendrogram saved to '{dendrogram_file}'.")
 
 # Save linkage matrix for further reference
-linkage_matrix_file = os.path.join(output_folder, f"{output_folder}_compound_clustering_linkage_matrix.csv")
+linkage_matrix_file = os.path.join(output_folder, "compound_clustering_linkage_matrix.csv")
 np.savetxt(linkage_matrix_file, linkage_matrix, delimiter="\t")
 logger.info(f"Linkage matrix saved to '{linkage_matrix_file}'.")
 
