@@ -491,10 +491,20 @@ if experiment_numeric_imputed is not None:
 if stb_numeric_imputed is not None:
     stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
 
-
 logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
-logger.info(f"experiment data shape after imputation: {experiment_numeric_imputed.shape}")
-logger.info(f"STB data shape after imputation: {stb_numeric_imputed.shape}")
+
+# ✅ Check if experiment_numeric_imputed is None before accessing .shape
+if experiment_numeric_imputed is not None:
+    logger.info(f"Experiment data shape after imputation: {experiment_numeric_imputed.shape}")
+else:
+    logger.info("Experiment data is None after imputation.")
+
+# ✅ Check if stb_numeric_imputed is None before accessing .shape
+if stb_numeric_imputed is not None:
+    logger.info(f"STB data shape after imputation: {stb_numeric_imputed.shape}")
+else:
+    logger.info("STB data is None after imputation.")
+
 
 # Create dataset labels
 dataset_labels = {0: "experiment Assay", 1: "STB"}
@@ -517,66 +527,68 @@ if experiment_data is not None and 'cpd_type' in experiment_data.columns:
         logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
 
 else:
-    experiment_labels = np.zeros(experiment_numeric_imputed.shape[0]) if experiment_numeric_imputed is not None else np.array([])
+    # ✅ Handle NoneType properly before creating labels
+    if experiment_numeric_imputed is not None:
+        experiment_labels = np.zeros(experiment_numeric_imputed.shape[0])
+    else:
+        experiment_labels = np.array([])  # Empty array if no data exists
+
     experiment_label_mapping = {"unknown": 0}
     experiment_cpd_id_map = {}
 
-if stb_data is not None and 'cpd_type' in stb_data.columns:
-    label_encoder = LabelEncoder()
-    stb_labels = label_encoder.fit_transform(stb_data['cpd_type'])
-    stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
-
-    # Store mapping of encoded label to cpd_id
-    if 'cpd_id' in stb_data.columns:
-        stb_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(stb_data['cpd_id'].values)}
-    else:
-        stb_cpd_id_map = {}
-        logger.warning("Warning: 'cpd_id' column is missing from STB data!")
-
-else:
-    stb_labels = np.zeros(stb_numeric_imputed.shape[0]) if stb_numeric_imputed is not None else np.array([])
-    stb_label_mapping = {"unknown": 0}
-    stb_cpd_id_map = {}
-
+logger.info(f"Experiment label mapping: {experiment_label_mapping}")
+logger.info(f"Experiment cpd_id mapping size: {len(experiment_cpd_id_map)}")
 
 # Convert dataset names to numerical indices using LabelEncoder
 dataset_names = []
-if experiment_numeric_imputed is not None:
+if experiment_numeric_imputed is not None and len(experiment_numeric_imputed) > 0:
     dataset_names.append("experiment_assay_combined")
-if stb_numeric_imputed is not None:
+if stb_numeric_imputed is not None and len(stb_numeric_imputed) > 0:
     dataset_names.append("STB_combined")
 
 # Ensure at least one dataset exists before proceeding
 if not dataset_names:
+    logger.error("No valid datasets available for CLIPn analysis.")
     raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
 dataset_encoder = LabelEncoder()
 dataset_indices = dataset_encoder.fit_transform(dataset_names)
 
-
 dataset_mapping = dict(zip(dataset_indices, dataset_names))
+
+logger.info(f"Dataset Mapping: {dataset_mapping}")
 
 # Initialize empty dictionaries for CLIPn input
 X, y, label_mappings = {}, {}, {}
 
-# Add datasets dynamically if they exist
-if experiment_numeric_imputed is not None:
-    X[dataset_encoder.transform(["experiment_assay_combined"])[0]] = experiment_numeric_imputed.values
-    y[dataset_encoder.transform(["experiment_assay_combined"])[0]] = experiment_labels
-    label_mappings[dataset_encoder.transform(["experiment_assay_combined"])[0]] = experiment_label_mapping
+# Ensure dataset_encoder exists before using transform
+if dataset_names:
+    dataset_encoder = LabelEncoder()
+    dataset_indices = dataset_encoder.fit_transform(dataset_names)
+    dataset_mapping = dict(zip(dataset_indices, dataset_names))
+else:
+    raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
-if stb_numeric_imputed is not None:
-    X[dataset_encoder.transform(["STB_combined"])[0]] = stb_numeric_imputed.values
-    y[dataset_encoder.transform(["STB_combined"])[0]] = stb_labels
-    label_mappings[dataset_encoder.transform(["STB_combined"])[0]] = stb_label_mapping
+# Add datasets dynamically if they exist
+if experiment_numeric_imputed is not None and len(experiment_numeric_imputed) > 0:
+    exp_index = dataset_encoder.transform(["experiment_assay_combined"])[0]
+    X[exp_index] = experiment_numeric_imputed.values
+    y[exp_index] = experiment_labels
+    label_mappings[exp_index] = experiment_label_mapping
+
+if stb_numeric_imputed is not None and len(stb_numeric_imputed) > 0:
+    stb_index = dataset_encoder.transform(["STB_combined"])[0]
+    X[stb_index] = stb_numeric_imputed.values
+    y[stb_index] = stb_labels
+    label_mappings[stb_index] = stb_label_mapping
 
 # Ensure that at least one dataset is available
 if not X:
+    logger.error("No valid datasets available for CLIPn analysis.")
     raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
 logger.info("Datasets successfully structured for CLIPn.")
 logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
-
 
 
 ########################################################
@@ -585,6 +597,15 @@ logger.info(f"Running CLIPn")
 
 # Define hyperparameter output path
 hyperparam_file = os.path.join(output_folder, "best_hyperparameters.json")
+
+if args.use_optimised_params:
+    try:
+        logger.info(f"Loading optimised hyperparameters from {args.use_optimised_params}")
+        with open(args.use_optimised_params, "r") as f:
+            best_params = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.error(f"Failed to load optimised parameters: {e}")
+        raise ValueError("Invalid or missing hyperparameter JSON file.")
 
 if args.use_optimised_params:
     # Load pre-trained parameters and skip training
