@@ -148,7 +148,7 @@ def objective(trial):
     float
         The final loss after training CLIPn with the suggested hyperparameters.
     """
-    latent_dim = trial.suggest_int("latent_dim", 10, 100, step=10)
+    latent_dim = trial.suggest_int("latent_dim", 10, 40, step=10)
     lr = trial.suggest_loguniform("lr", 1e-5, 1e-2)
     epochs = trial.suggest_int("epochs", 100, 500, step=50)
 
@@ -748,7 +748,7 @@ plt.xlabel("UMAP 1")
 plt.ylabel("UMAP 2")
 plt.title("UMAP Visualization with Cluster Labels")
 
-umap_clustered_plot_file = os.path.join(output_folder, f"{output_folder}_UMAP_clusters.pdf")
+umap_clustered_plot_file = os.path.join(output_folder, f"clipn_latent_dim_UMAP_clusters.pdf")
 plt.savefig(umap_clustered_plot_file, dpi=600)
 plt.close()
 logger.info(f"UMAP visualization with clusters saved as '{umap_clustered_plot_file}'.")
