@@ -272,7 +272,7 @@ except Exception as e:
     print(f"Could not open {log_filename} for logging: {e}", file=sys.stderr)
     sys.exit(1)
 
-# ✅ **4. Now we can use `logger.info()` because `logger` is initialized**
+# **4. Now we can use `logger.info()` because `logger` is initialized**
 logger.info(f"Using experiment name: {experiment_name}")
 
 # **System & Command-line Information for Reproducibility**
@@ -377,7 +377,7 @@ stb_cpd_id_map = stb_data['cpd_id'].copy()
 # Extract numerical features
 # Extract numerical features (only if data exists)
 stb_numeric = stb_data.select_dtypes(include=[np.number]) if stb_data is not None else None
-experiment_numeric = experiment_data.select_dtypes(include=[np.number]) if experiment_data is not None else None  # ✅ Fix: Skip if None
+experiment_numeric = experiment_data.select_dtypes(include=[np.number]) if experiment_data is not None else None  # Fix: Skip if None
 
 
 # **Drop columns that are entirely NaN in either dataset BEFORE imputation**
@@ -431,6 +431,8 @@ columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {list(columns_lost)}")
 
 
+# Initialize imputed datasets to None
+experiment_numeric_imputed, stb_numeric_imputed = None, None
 if args.impute:
     logger.info(f"Performing imputation for missing values using {args.impute_method} strategy.")
 
@@ -443,12 +445,12 @@ if args.impute:
     if experiment_numeric is not None:
         experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns_before)
     else:
-        experiment_numeric_imputed = None  # ✅ Prevents NoneType errors
+        experiment_numeric_imputed = None  
 
     if stb_numeric is not None:
         stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns_before)
     else:
-        stb_numeric_imputed = None  # ✅ Prevents NoneType errors
+        stb_numeric_imputed = None  # Prevents NoneType errors
 
     # Identify columns lost during imputation (only if both datasets exist)
     if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
