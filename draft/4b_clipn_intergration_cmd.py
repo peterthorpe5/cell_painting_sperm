@@ -525,13 +525,13 @@ if stb_numeric_imputed is not None:
 
 logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
 
-# ✅ Check if experiment_numeric_imputed is None before accessing .shape
+#   Check if experiment_numeric_imputed is None before accessing .shape
 if experiment_numeric_imputed is not None:
     logger.info(f"Experiment data shape after imputation: {experiment_numeric_imputed.shape}")
 else:
     logger.info("Experiment data is None after imputation.")
 
-# ✅ Check if stb_numeric_imputed is None before accessing .shape
+#   Check if stb_numeric_imputed is None before accessing .shape
 if stb_numeric_imputed is not None:
     logger.info(f"STB data shape after imputation: {stb_numeric_imputed.shape}")
 else:
@@ -559,7 +559,7 @@ if experiment_data is not None and 'cpd_type' in experiment_data.columns:
         logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
 
 else:
-    # ✅ Handle NoneType properly before creating labels
+    # Handle NoneType properly before creating labels
     if experiment_numeric_imputed is not None:
         experiment_labels = np.zeros(experiment_numeric_imputed.shape[0])
     else:
@@ -590,6 +590,8 @@ dataset_mapping = dict(zip(dataset_indices, dataset_names))
 
 logger.info(f"Dataset Mapping: {dataset_mapping}")
 
+
+#######################################################
 # Initialize empty dictionaries for CLIPn input
 X, y, label_mappings = {}, {}, {}
 
@@ -601,26 +603,39 @@ if dataset_names:
 else:
     raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
+logger.info(f"Dataset Mapping: {dataset_mapping}")
+
 # Add datasets dynamically if they exist
-if experiment_numeric_imputed is not None and len(experiment_numeric_imputed) > 0:
+if experiment_numeric_imputed is not None and not experiment_numeric_imputed.empty:
     exp_index = dataset_encoder.transform(["experiment_assay_combined"])[0]
     X[exp_index] = experiment_numeric_imputed.values
     y[exp_index] = experiment_labels
     label_mappings[exp_index] = experiment_label_mapping
+    logger.info(f"  Added Experiment Data to X with shape: {experiment_numeric_imputed.shape}")
+else:
+    logger.warning("⚠️ No valid experiment data for CLIPn.")
 
-if stb_numeric_imputed is not None and len(stb_numeric_imputed) > 0:
+if stb_numeric_imputed is not None and not stb_numeric_imputed.empty:
     stb_index = dataset_encoder.transform(["STB_combined"])[0]
     X[stb_index] = stb_numeric_imputed.values
     y[stb_index] = stb_labels
     label_mappings[stb_index] = stb_label_mapping
+    logger.info(f"  Added STB Data to X with shape: {stb_numeric_imputed.shape}")
+else:
+    logger.warning(" No valid STB data for CLIPn.")
+
+# Debugging: Log dataset keys before passing to CLIPn
+logger.info(f" X dataset keys before CLIPn: {list(X.keys())}")
+logger.info(f" y dataset keys before CLIPn: {list(y.keys())}")
 
 # Ensure that at least one dataset is available
 if not X:
-    logger.error("No valid datasets available for CLIPn analysis.")
+    logger.error(" No valid datasets available for CLIPn analysis. Aborting!")
     raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
-logger.info("Datasets successfully structured for CLIPn.")
-logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
+logger.info(" Datasets successfully structured for CLIPn.")
+logger.info(f" Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
+
 
 
 ########################################################
