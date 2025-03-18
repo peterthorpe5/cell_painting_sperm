@@ -108,10 +108,19 @@ default_experiment_files = [
     "data/Mitotox_assay_NPSCDD0003999_25102024_normalised.csv",
     "data/Mitotox_assay_NPSCDD0004023_25102024_normalised.csv"
 ]
-parser.add_argument("--stb", nargs="+", default=default_stb_files,
-                    help="List of STB dataset files (default: predefined STB files)")
-parser.add_argument("--experiment", nargs="+", default=default_experiment_files,
-                    help="List of Experiment dataset files (default: predefined experiment files)")
+#parser.add_argument("--stb", nargs="+", default=default_stb_files,
+                    #help="List of STB dataset files (default: predefined STB files)")
+#parser.add_argument("--experiment", nargs="+", default=default_experiment_files,
+                   # help="List of Experiment dataset files (default: predefined experiment files)")
+
+# Modify argument parsing to allow only STB or only Experiment runs
+parser.add_argument("--stb", nargs="*", default=None,  # Allow passing multiple files or none
+                    help="List of STB dataset files. If omitted, default STB files are used.")
+
+parser.add_argument("--experiment", nargs="*", default=None,  # Allow passing multiple files or none
+                    help="List of Experiment dataset files. If omitted, default experiment files are used.")
+
+
 parser.add_argument("--use_optimised_params",
                     type=str,
                     default=None,
@@ -296,24 +305,59 @@ logger.info(f"Starting SCP data analysis using CLIPn with latent_dim={args.laten
 logger.info(f"STB datasets: {args.stb}")
 logger.info(f"Experiment datasets: {args.experiment}")
 
-# Load and merge datasets
-stb_dfs = [pd.read_csv(f) for f in args.stb]
-experiment_dfs = [pd.read_csv(f) for f in args.experiment]
 
-stb_data = pd.concat(stb_dfs, axis=0, ignore_index=True)
-experiment_data = pd.concat(experiment_dfs, axis=0, ignore_index=True)
+logger.info(f"Starting SCP data analysis using CLIPn with latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+
+# Default STB files (used only if no --stb argument is given)
+default_stb_files = [
+    "data/STB_NPSCDD0003971_05092024_normalised.csv",
+    "data/STB_NPSCDD0003972_05092024_normalised.csv",
+    "data/STB_NPSCDD000400_05092024_normalised.csv",
+    "data/STB_NPSCDD000401_05092024_normalised.csv",
+    "data/STB_NPSCDD0004034_13022025_normalised.csv"
+]
+
+# Default Experiment files (used only if no --experiment argument is given)
+default_experiment_files = [
+    "data/Mitotox_assay_NPSCDD0003999_25102024_normalised.csv",
+    "data/Mitotox_assay_NPSCDD0004023_25102024_normalised.csv"
+]
+
+# Determine dataset selection based on command-line input
+stb_files = args.stb if args.stb else default_stb_files  # Use provided STB files or default ones
+experiment_files = args.experiment if args.experiment else default_experiment_files  # Use provided Experiment files or default ones
+
+# Ensure that at least one dataset is provided
+if not stb_files and not experiment_files:
+    parser.error("At least one dataset (STB or experiment) must be provided.")
+
+# Log the dataset choices
+if stb_files and experiment_files:
+    logger.info("Running with both STB and Experiment datasets.")
+elif stb_files:
+    logger.info("Running with only STB dataset.")
+elif experiment_files:
+    logger.info("Running with only Experiment dataset.")
+
+# Load and merge datasets
+stb_dfs = [pd.read_csv(f) for f in stb_files]  
+experiment_dfs = [pd.read_csv(f) for f in experiment_files]
+
+# Only concatenate if there are datasets provided
+stb_data = pd.concat(stb_dfs, axis=0, ignore_index=True) if stb_files else None
+experiment_data = pd.concat(experiment_dfs, axis=0, ignore_index=True) if experiment_files else None
 
 # Extract numerical features
-stb_numeric = stb_data.select_dtypes(include=[np.number])
-experiment_numeric = experiment_data.select_dtypes(include=[np.number])
+stb_numeric = stb_data.select_dtypes(include=[np.number]) if stb_data is not None else None
+experiment_numeric = experiment_data.select_dtypes(include=[np.number]) if experiment_data is not None else None
 
-
-
-#  Create cpd_id Mapping Dictionary ---
-if 'cpd_id' in experiment_data.columns:
+# Create cpd_id Mapping Dictionary ---
+if experiment_data is not None and 'cpd_id' in experiment_data.columns:
     experiment_cpd_id_map = dict(enumerate(experiment_data['cpd_id']))  # Store index -> cpd_id mapping
 else:
-    raise KeyError("Error: 'cpd_id' column is missing from experiment data!")
+    experiment_cpd_id_map = None  # Handle missing case gracefully
+    logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
+
 
 # Store a direct mapping from the original indices to cpd_id
 experiment_cpd_id_map = experiment_data['cpd_id'].copy()
