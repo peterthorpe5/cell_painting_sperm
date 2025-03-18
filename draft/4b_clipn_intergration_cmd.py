@@ -59,6 +59,7 @@ from pathlib import Path
 from clipn import CLIPn
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import LabelEncoder
+from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
 import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
@@ -713,6 +714,10 @@ Z_named = {str(k): v for k, v in Z.items()}  # Ensure all keys are strings
 np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z_named)
 
 
+# Define the output folder dynamically based on hyperparameters
+# Ensure all outputs go into the correct location
+
+
 # Convert numerical dataset names back to original names
 Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
 
@@ -737,15 +742,29 @@ plt.scatter(latent_umap[:, 0], latent_umap[:, 1], alpha=0.7, s=5, c="blue")
 plt.xlabel("UMAP 1")
 plt.ylabel("UMAP 2")
 plt.title("CLIPn UMAP Visualization")
-plt.savefig(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf"), dpi=300)
+plt.savefig(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf"), dpi=600)
 plt.close()
 
 logger.info(f"UMAP visualization saved to '{output_folder}/clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf'.")
 
-# Define the output folder dynamically based on hyperparameters
-# Ensure all outputs go into the correct location
-output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}")
-os.makedirs(output_folder, exist_ok=True)
+
+
+# Perform KMeans clustering to assign colors to different clusters
+num_clusters = 10  # Adjust this based on expected number of clusters
+kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+cluster_labels = kmeans.fit_predict(latent_umap)
+
+plt.figure(figsize=(12, 8))
+plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=cluster_labels, cmap="tab10")
+plt.xlabel("UMAP 1")
+plt.ylabel("UMAP 2")
+plt.title("UMAP Visualization with Cluster Labels")
+
+umap_clustered_plot_file = os.path.join(output_folder, f"{output_folder}_UMAP_clusters.pdf")
+plt.savefig(umap_clustered_plot_file, dpi=600)
+plt.close()
+logger.info(f"UMAP visualization with clusters saved as '{umap_clustered_plot_file}'.")
+
 
 
 # Save each dataset's latent representations separately with the correct prefix
