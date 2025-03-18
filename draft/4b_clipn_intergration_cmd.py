@@ -30,13 +30,13 @@ CLIPn Output:
     
 The automated hyperparameter optimisation process in this script uses Bayesian 
 Optimisation to fine-tune the CLIPn model’s key parameters: latent dimension, 
-learning rate, and number of epochs. If no pre-optimised parameters are provided, 
+learning rate, and number of epochs. If no pre-optimized parameters are provided, 
 the script runs multiple trials (n_trials=20 by default) to find the best 
 combination of these hyperparameters based on the model’s training loss. 
 Once the optimisation is complete, the best parameters are saved to a 
 JSON file inside the output directory, which is dynamically named based on 
-the optimised values (e.g., clipn_ldim10_lr0.0001_epoch500/best_hyperparameters.json).
- If the user wishes to skip retraining, they can pass the --use_optimised_params 
+the optimized values (e.g., clipn_ldim10_lr0.0001_epoch500/best_hyperparameters.json).
+ If the user wishes to skip retraining, they can pass the --use_optimized_params 
  argument with the path to this JSON file, allowing the script to 
  load the best parameters, initialize the model, and proceed directly 
  to generating latent representations. This approach significantly 
@@ -122,10 +122,10 @@ parser.add_argument("--experiment", nargs="*", default=None,  # Allow passing mu
                     help="List of Experiment dataset files. If omitted, default experiment files are used.")
 
 
-parser.add_argument("--use_optimised_params",
+parser.add_argument("--use_optimized_params",
                     type=str,
                     default=None,
-                    help="Path to JSON file containing optimised hyperparameters. If provided, training is skipped.")
+                    help="Path to JSON file containing optimized hyperparameters. If provided, training is skipped.")
 args = parser.parse_args()
 
 
@@ -164,11 +164,11 @@ def objective(trial):
     return final_loss
 
 
-def optimise_clipn(n_trials=20):
+def optimize_clipn(n_trials=20):
     """
     Runs Bayesian optimisation for CLIPn hyperparameter tuning.
 
-    This function optimises `latent_dim`, `lr`, and `epochs` using Optuna
+    This function optimizes `latent_dim`, `lr`, and `epochs` using Optuna
     to find the best combination that minimizes the final loss.
 
     Parameters
@@ -184,7 +184,7 @@ def optimise_clipn(n_trials=20):
     logger.info(f"Starting Bayesian optimisation with {n_trials} trials.")
 
     study = optuna.create_study(direction="minimize")
-    study.optimise(objective, n_trials=n_trials)
+    study.optimize(objective, n_trials=n_trials)
 
     best_params = study.best_params
     best_loss = study.best_value
@@ -634,19 +634,19 @@ logger.info(f"Running CLIPn")
 # Define hyperparameter output path
 hyperparam_file = os.path.join(output_folder, "best_hyperparameters.json")
 
-if args.use_optimised_params:
+if args.use_optimized_params:
     try:
-        logger.info(f"Loading optimised hyperparameters from {args.use_optimised_params}")
-        with open(args.use_optimised_params, "r") as f:
+        logger.info(f"Loading optimized hyperparameters from {args.use_optimized_params}")
+        with open(args.use_optimized_params, "r") as f:
             best_params = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        logger.error(f"Failed to load optimised parameters: {e}")
+        logger.error(f"Failed to load optimized parameters: {e}")
         raise ValueError("Invalid or missing hyperparameter JSON file.")
 
-if args.use_optimised_params:
+if args.use_optimized_params:
     # Load pre-trained parameters and skip training
-    logger.info(f"Loading optimised hyperparameters from {args.use_optimised_params}")
-    with open(args.use_optimised_params, "r") as f:
+    logger.info(f"Loading optimized hyperparameters from {args.use_optimized_params}")
+    with open(args.use_optimized_params, "r") as f:
         best_params = json.load(f)
 
     # Update args with loaded parameters
@@ -664,23 +664,23 @@ if args.use_optimised_params:
 else:
     # Run Hyperparameter Optimisation
     logger.info("Running Hyperparameter Optimisation")
-    best_params = optimise_clipn(n_trials=20)  # Bayesian Optimisation
+    best_params = optimize_clipn(n_trials=20)  # Bayesian Optimisation
 
-    # Save optimised parameters
+    # Save optimized parameters
     with open(hyperparam_file, "w") as f:
         json.dump(best_params, f, indent=4)
 
-    logger.info(f"Optimised hyperparameters saved to {hyperparam_file}")
+    logger.info(f"optimized hyperparameters saved to {hyperparam_file}")
 
     # Update args with best parameters
     args.latent_dim = best_params["latent_dim"]
     args.lr = best_params["lr"]
     args.epoch = best_params["epochs"]
 
-    logger.info(f"Using optimised parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+    logger.info(f"Using optimized parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
 
-    # Train the model with the optimised parameters
-    logger.info(f"Running CLIPn with optimised latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+    # Train the model with the optimized parameters
+    logger.info(f"Running CLIPn with optimized latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
     clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
     logger.info("Fitting CLIPn model...")
     loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
