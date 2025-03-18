@@ -462,6 +462,35 @@ else:
     experiment_numeric_imputed = experiment_numeric if experiment_numeric is not None else None
     stb_numeric_imputed = stb_numeric if stb_numeric is not None else None
 
+if stb_data is not None and 'cpd_type' in stb_data.columns:
+    label_encoder = LabelEncoder()
+    stb_labels = label_encoder.fit_transform(stb_data['cpd_type'])
+    stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+
+    # Store mapping of encoded label to cpd_id
+    if 'cpd_id' in stb_data.columns:
+        stb_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(stb_data['cpd_id'].values)}
+    else:
+        stb_cpd_id_map = {}
+        logger.warning("Warning: 'cpd_id' column is missing from STB data!")
+
+else:
+    # Ensure stb_labels is always assigned a valid array
+    if stb_numeric_imputed is not None:
+        stb_labels = np.zeros(stb_numeric_imputed.shape[0])
+    else:
+        stb_labels = np.array([])  # Ensure an empty array instead of unassigned variable
+        logger.warning("Warning: No STB labels available!")
+
+    stb_label_mapping = {"unknown": 0}
+    stb_cpd_id_map = {}
+
+# Debugging: Confirm label assignment
+logger.info(f"STB label mapping: {stb_label_mapping}")
+logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
+logger.info(f"STB labels assigned: {len(stb_labels)}")
+
+
 # Step 3: Identify common columns AFTER imputation
 if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
     common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
@@ -475,6 +504,9 @@ else:
 logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
 columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+
+
+
 
 # Step 4: Ensure both datasets retain only common columns AFTER imputation
 if experiment_numeric_imputed is not None:
