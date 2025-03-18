@@ -375,23 +375,39 @@ stb_cpd_id_map = stb_data['cpd_id'].copy()
 
 
 # Extract numerical features
-experiment_numeric = experiment_data.select_dtypes(include=[np.number])
-stb_numeric = stb_data.select_dtypes(include=[np.number])
+# Extract numerical features (only if data exists)
+stb_numeric = stb_data.select_dtypes(include=[np.number]) if stb_data is not None else None
+experiment_numeric = experiment_data.select_dtypes(include=[np.number]) if experiment_data is not None else None  # ✅ Fix: Skip if None
+
 
 # **Drop columns that are entirely NaN in either dataset BEFORE imputation**
-experiment_numeric = experiment_numeric.dropna(axis=1, how='all')
-stb_numeric = stb_numeric.dropna(axis=1, how='all')
+# Drop columns that are entirely NaN in either dataset BEFORE imputation
+if experiment_numeric is not None:
+    experiment_numeric = experiment_numeric.dropna(axis=1, how='all')
+
+if stb_numeric is not None:
+    stb_numeric = stb_numeric.dropna(axis=1, how='all')
 
 # Identify initial common columns BEFORE imputation
 common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
 logger.info(f"Common numerical columns BEFORE imputation: {list(common_columns_before)}")
 
+
 # Retain only common columns
-experiment_numeric = experiment_numeric[common_columns_before]
-stb_numeric = stb_numeric[common_columns_before]
+if experiment_numeric is not None:
+    experiment_numeric = experiment_numeric[common_columns_before]
+
+if stb_numeric is not None:
+    stb_numeric = stb_numeric[common_columns_before]
 
 # **Handle missing values with median imputation**
 # NOTE: should imputation be done during the feature selection stage??
+
+
+# **Identify columns lost during imputation**
+common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
+columns_lost = set(common_columns_before) - set(common_columns_after)
+logger.info(f"Columns lost during imputation: {list(columns_lost)}")
 
 
 if args.impute:
@@ -402,34 +418,42 @@ if args.impute:
     elif args.impute_method == "knn":
         imputer = KNNImputer(n_neighbors=args.knn_neighbors)
 
-    # Apply imputation
-    experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns_before)
-    stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns_before)
+    # Apply imputation only if data exists
+    if experiment_numeric is not None:
+        experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns_before)
+    else:
+        experiment_numeric_imputed = None  # ✅ Prevents NoneType errors
 
-    # Identify columns lost during imputation
-    common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
-    columns_lost = set(common_columns_before) - set(common_columns_after)
-    logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+    if stb_numeric is not None:
+        stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns_before)
+    else:
+        stb_numeric_imputed = None  # ✅ Prevents NoneType errors
+
+    # Identify columns lost during imputation (only if both datasets exist)
+    if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
+        common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
+        columns_lost = set(common_columns_before) - set(common_columns_after)
+        logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+    else:
+        common_columns_after = common_columns_before  # Keep previous common columns if only one dataset is available
 
 else:
     logger.info("Skipping imputation as per default command-line argument.")
     logger.info("Imputation should have been done at the feature selection stage....")
     
-    # Assign original numerical datasets (no imputation)
-    experiment_numeric_imputed = experiment_numeric[common_columns_before]
-    stb_numeric_imputed = stb_numeric[common_columns_before]
-
-
-# **Identify columns lost during imputation**
-common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
-columns_lost = set(common_columns_before) - set(common_columns_after)
-logger.info(f"Columns lost during imputation: {list(columns_lost)}")
-
+    # Assign original numerical datasets (no imputation), checking for None
+    experiment_numeric_imputed = experiment_numeric[common_columns_before] if experiment_numeric is not None else None
+    stb_numeric_imputed = stb_numeric[common_columns_before] if stb_numeric is not None else None
 
 
 # Ensure both datasets retain only these common columns AFTER imputation
-experiment_numeric_imputed = experiment_numeric_imputed[common_columns_after]
-stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
+# Ensure both datasets retain only these common columns AFTER imputation
+if experiment_numeric_imputed is not None:
+    experiment_numeric_imputed = experiment_numeric_imputed[common_columns_after]
+
+if stb_numeric_imputed is not None:
+    stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
+
 
 logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
 logger.info(f"experiment data shape after imputation: {experiment_numeric_imputed.shape}")
@@ -442,43 +466,76 @@ dataset_labels = {0: "experiment Assay", 1: "STB"}
 experiment_cpd_id_map = {}
 stb_cpd_id_map = {}
 
-# **Handle labels (assuming 'cpd_type' exists)**
-if 'cpd_type' in experiment_data.columns:
+# Handle labels (assuming 'cpd_type' exists)
+if experiment_data is not None and 'cpd_type' in experiment_data.columns:
     label_encoder = LabelEncoder()
     experiment_labels = label_encoder.fit_transform(experiment_data['cpd_type'])
     experiment_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
-    
+
     # Store mapping of encoded label to cpd_id
-    experiment_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(experiment_data['cpd_id'].values)}
+    if 'cpd_id' in experiment_data.columns:
+        experiment_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(experiment_data['cpd_id'].values)}
+    else:
+        experiment_cpd_id_map = {}
+        logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
 
 else:
-    experiment_labels = np.zeros(experiment_numeric_imputed.shape[0])
+    experiment_labels = np.zeros(experiment_numeric_imputed.shape[0]) if experiment_numeric_imputed is not None else np.array([])
     experiment_label_mapping = {"unknown": 0}
-    experiment_cpd_id_map = {i: None for i in range(len(experiment_numeric_imputed))}  # Empty mapping
+    experiment_cpd_id_map = {}
 
-if 'cpd_type' in stb_data.columns:
+if stb_data is not None and 'cpd_type' in stb_data.columns:
     label_encoder = LabelEncoder()
     stb_labels = label_encoder.fit_transform(stb_data['cpd_type'])
     stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
-    
+
     # Store mapping of encoded label to cpd_id
-    stb_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(stb_data['cpd_id'].values)}
+    if 'cpd_id' in stb_data.columns:
+        stb_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(stb_data['cpd_id'].values)}
+    else:
+        stb_cpd_id_map = {}
+        logger.warning("Warning: 'cpd_id' column is missing from STB data!")
 
 else:
-    stb_labels = np.zeros(stb_numeric_imputed.shape[0])
+    stb_labels = np.zeros(stb_numeric_imputed.shape[0]) if stb_numeric_imputed is not None else np.array([])
     stb_label_mapping = {"unknown": 0}
-    stb_cpd_id_map = {i: None for i in range(len(stb_numeric_imputed))}  # Empty mapping
+    stb_cpd_id_map = {}
 
 
-# **Convert dataset names to numerical indices using LabelEncoder**
-dataset_names = ["experiment_assay_combined", "STB_combined"]
+# Convert dataset names to numerical indices using LabelEncoder
+dataset_names = []
+if experiment_numeric_imputed is not None:
+    dataset_names.append("experiment_assay_combined")
+if stb_numeric_imputed is not None:
+    dataset_names.append("STB_combined")
+
+# Ensure at least one dataset exists before proceeding
+if not dataset_names:
+    raise ValueError("Error: No valid datasets available for CLIPn analysis.")
+
 dataset_encoder = LabelEncoder()
 dataset_indices = dataset_encoder.fit_transform(dataset_names)
 
+
 dataset_mapping = dict(zip(dataset_indices, dataset_names))
-X = {dataset_indices[0]: experiment_numeric_imputed.values, dataset_indices[1]: stb_numeric_imputed.values}
-y = {dataset_indices[0]: experiment_labels, dataset_indices[1]: stb_labels}
-label_mappings = {dataset_indices[0]: experiment_label_mapping, dataset_indices[1]: stb_label_mapping}
+
+# Initialize empty dictionaries for CLIPn input
+X, y, label_mappings = {}, {}, {}
+
+# Add datasets dynamically if they exist
+if experiment_numeric_imputed is not None:
+    X[dataset_encoder.transform(["experiment_assay_combined"])[0]] = experiment_numeric_imputed.values
+    y[dataset_encoder.transform(["experiment_assay_combined"])[0]] = experiment_labels
+    label_mappings[dataset_encoder.transform(["experiment_assay_combined"])[0]] = experiment_label_mapping
+
+if stb_numeric_imputed is not None:
+    X[dataset_encoder.transform(["STB_combined"])[0]] = stb_numeric_imputed.values
+    y[dataset_encoder.transform(["STB_combined"])[0]] = stb_labels
+    label_mappings[dataset_encoder.transform(["STB_combined"])[0]] = stb_label_mapping
+
+# Ensure that at least one dataset is available
+if not X:
+    raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
 logger.info("Datasets successfully structured for CLIPn.")
 logger.info(f"Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
@@ -603,22 +660,50 @@ logger.info(f"Index and label mappings saved successfully in {output_folder}/")
 
 logger.info("Index and label mappings saved.")
 
+# Convert latent representations to DataFrame (only if available)
+experiment_latent_df, stb_latent_df = None, None
 
-# Convert latent representations to DataFrame and restore cpd_id
-experiment_latent_df = pd.DataFrame(Z[0])
-stb_latent_df = pd.DataFrame(Z[1])
+if 0 in Z:  # Check if experiment data exists in Z
+    experiment_latent_df = pd.DataFrame(Z[0])
+    if experiment_cpd_id_map is not None:
+        experiment_latent_df.index = [experiment_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(experiment_latent_df))]
+    else:
+        logger.warning("Warning: experiment_cpd_id_map is None, using default index.")
 
-# Restore original cpd_id values
-experiment_latent_df.index = [experiment_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(experiment_latent_df))]
-stb_latent_df.index = [stb_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(stb_latent_df))]
+if 1 in Z:  # Check if STB data exists in Z
+    stb_latent_df = pd.DataFrame(Z[1])
+    if stb_cpd_id_map is not None:
+        stb_latent_df.index = [stb_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(stb_latent_df))]
+    else:
+        logger.warning("Warning: stb_cpd_id_map is None, using default index.")
 
+# Ensure at least one DataFrame exists before concatenation
+if experiment_latent_df is not None and stb_latent_df is not None:
+    combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
+elif experiment_latent_df is not None:
+    combined_latent_df = experiment_latent_df
+elif stb_latent_df is not None:
+    combined_latent_df = stb_latent_df
+else:
+    raise ValueError("Error: No latent representations available!")
 
+logger.info("Latent representations processed successfully.")
 
-# Save combined file with cpd_id as index
-combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
-combined_latent_df.to_csv(os.path.join(output_folder, f"{output_folder}_CLIPn_latent_representations_with_cpd_id.csv"))
+# Ensure at least one DataFrame is available before concatenation
+if experiment_latent_df is not None and stb_latent_df is not None:
+    combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
+elif experiment_latent_df is not None:
+    combined_latent_df = experiment_latent_df
+elif stb_latent_df is not None:
+    combined_latent_df = stb_latent_df
+else:
+    raise ValueError("Error: No latent representations available to save!")
 
-logger.info("Latent representations saved successfully with cpd_id as index.")
+# Save the combined file if there is data
+combined_output_file = os.path.join(output_folder, f"{output_folder}_CLIPn_latent_representations_with_cpd_id.csv")
+combined_latent_df.to_csv(combined_output_file)
+
+logger.info(f"Latent representations saved successfully with cpd_id as index to {combined_output_file}.")
 
 
 #####################################################################
