@@ -324,8 +324,11 @@ default_experiment_files = [
 ]
 
 # Determine dataset selection based on command-line input
-stb_files = args.stb if args.stb else default_stb_files  # Use provided STB files or default ones
-experiment_files = args.experiment if args.experiment else default_experiment_files  # Use provided Experiment files or default ones
+# Determine dataset selection based on command-line input
+stb_files = args.stb if args.stb else default_stb_files  
+experiment_files = args.experiment if args.experiment else []  # No default experiment files
+
+
 
 # Ensure that at least one dataset is provided
 if not stb_files and not experiment_files:
