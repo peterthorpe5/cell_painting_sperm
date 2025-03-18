@@ -364,7 +364,13 @@ else:
 
 
 # Store a direct mapping from the original indices to cpd_id
-experiment_cpd_id_map = experiment_data['cpd_id'].copy()
+# Create cpd_id Mapping Dictionary ---
+if experiment_data is not None and 'cpd_id' in experiment_data.columns:
+    experiment_cpd_id_map = dict(enumerate(experiment_data['cpd_id']))  # Store index -> cpd_id mapping
+else:
+    experiment_cpd_id_map = None
+    logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
+
 stb_cpd_id_map = stb_data['cpd_id'].copy()
 
 
