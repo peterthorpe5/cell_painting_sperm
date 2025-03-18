@@ -410,29 +410,34 @@ if experiment_numeric is not None:
 if stb_numeric is not None:
     stb_numeric = stb_numeric[common_columns_before]
 
-# **Handle missing values with median imputation**
-# NOTE: should imputation be done during the feature selection stage??
+# Step 1: Ensure numerical datasets exist
+experiment_numeric_imputed, stb_numeric_imputed = None, None  
 
+# Drop columns that are entirely NaN before imputation
+if experiment_numeric is not None:
+    experiment_numeric = experiment_numeric.dropna(axis=1, how='all')
+if stb_numeric is not None:
+    stb_numeric = stb_numeric.dropna(axis=1, how='all')
 
-# **Identify columns lost during imputation**
-# Identify common columns AFTER imputation (only if both datasets exist)
-if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
-    common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
-elif experiment_numeric_imputed is not None:
-    common_columns_after = experiment_numeric_imputed.columns  # Use only experiment columns
-elif stb_numeric_imputed is not None:
-    common_columns_after = stb_numeric_imputed.columns  # Use only STB columns
+# Identify initial common columns BEFORE imputation
+if experiment_numeric is not None and stb_numeric is not None:
+    common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
+elif experiment_numeric is not None:
+    common_columns_before = experiment_numeric.columns
+elif stb_numeric is not None:
+    common_columns_before = stb_numeric.columns
 else:
-    raise ValueError("Error: No numerical data available after imputation!")
+    raise ValueError("Error: No valid numerical data available!")
 
+logger.info(f"Common numerical columns BEFORE imputation: {list(common_columns_before)}")
 
-logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
-columns_lost = set(common_columns_before) - set(common_columns_after)
-logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+# Retain only common columns
+if experiment_numeric is not None:
+    experiment_numeric = experiment_numeric[common_columns_before]
+if stb_numeric is not None:
+    stb_numeric = stb_numeric[common_columns_before]
 
-
-# Initialize imputed datasets to None
-experiment_numeric_imputed, stb_numeric_imputed = None, None
+# Step 2: Perform imputation
 if args.impute:
     logger.info(f"Performing imputation for missing values using {args.impute_method} strategy.")
 
@@ -442,34 +447,43 @@ if args.impute:
         imputer = KNNImputer(n_neighbors=args.knn_neighbors)
 
     # Apply imputation only if data exists
-    if experiment_numeric is not None:
-        experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), columns=common_columns_before)
-    else:
-        experiment_numeric_imputed = None  
+    if experiment_numeric is not None and not experiment_numeric.empty:
+        experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), 
+                                                  columns=common_columns_before)
+    if stb_numeric is not None and not stb_numeric.empty:
+        stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), 
+                                           columns=common_columns_before)
 
-    if stb_numeric is not None:
-        stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), columns=common_columns_before)
-    else:
-        stb_numeric_imputed = None  # Prevents NoneType errors
-
-    # Identify columns lost during imputation (only if both datasets exist)
-    if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
-        common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
-        columns_lost = set(common_columns_before) - set(common_columns_after)
-        logger.info(f"Columns lost during imputation: {list(columns_lost)}")
-    else:
-        common_columns_after = common_columns_before  # Keep previous common columns if only one dataset is available
+    logger.info(f"Imputation complete. Experiment shape: {experiment_numeric_imputed.shape if experiment_numeric_imputed is not None else 'None'}, "
+                f"STB shape: {stb_numeric_imputed.shape if stb_numeric_imputed is not None else 'None'}")
 
 else:
-    logger.info("Skipping imputation as per default command-line argument.")
-    logger.info("Imputation should have been done at the feature selection stage....")
-    
-    # Assign original numerical datasets (no imputation), checking for None
-    experiment_numeric_imputed = experiment_numeric[common_columns_before] if experiment_numeric is not None else None
-    stb_numeric_imputed = stb_numeric[common_columns_before] if stb_numeric is not None else None
+    logger.info("Skipping imputation as per command-line argument.")
+    experiment_numeric_imputed = experiment_numeric if experiment_numeric is not None else None
+    stb_numeric_imputed = stb_numeric if stb_numeric is not None else None
+
+# Step 3: Identify common columns AFTER imputation
+if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
+    common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
+elif experiment_numeric_imputed is not None:
+    common_columns_after = experiment_numeric_imputed.columns
+elif stb_numeric_imputed is not None:
+    common_columns_after = stb_numeric_imputed.columns
+else:
+    raise ValueError("Error: No numerical data available after imputation!")
+
+logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
+columns_lost = set(common_columns_before) - set(common_columns_after)
+logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+
+# Step 4: Ensure both datasets retain only common columns AFTER imputation
+if experiment_numeric_imputed is not None:
+    experiment_numeric_imputed = experiment_numeric_imputed[common_columns_after]
+if stb_numeric_imputed is not None:
+    stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
 
 
-# Ensure both datasets retain only these common columns AFTER imputation
+
 # Ensure both datasets retain only these common columns AFTER imputation
 if experiment_numeric_imputed is not None:
     experiment_numeric_imputed = experiment_numeric_imputed[common_columns_after]
