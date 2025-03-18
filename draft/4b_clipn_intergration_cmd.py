@@ -613,7 +613,7 @@ if experiment_numeric_imputed is not None and not experiment_numeric_imputed.emp
     label_mappings[exp_index] = experiment_label_mapping
     logger.info(f"  Added Experiment Data to X with shape: {experiment_numeric_imputed.shape}")
 else:
-    logger.warning("⚠️ No valid experiment data for CLIPn.")
+    logger.warning(" No valid experiment data for CLIPn.")
 
 if stb_numeric_imputed is not None and not stb_numeric_imputed.empty:
     stb_index = dataset_encoder.transform(["STB_combined"])[0]
@@ -717,7 +717,7 @@ np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_e
 Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
 
 # Save latent representations in NPZ format
-np.savez("CLIPn_latent_representations.npz", **Z_named)
+np.savez(os.path.join(output_folder, "CLIPn_latent_representations.npz"), **Z_named)  # ✅ Save to the correct folder
 logger.info("Latent representations saved successfully.")
 
 
@@ -743,8 +743,10 @@ plt.close()
 logger.info(f"UMAP visualization saved to '{output_folder}/clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf'.")
 
 # Define the output folder dynamically based on hyperparameters
-output_folder = f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}"
-Path(output_folder).mkdir(parents=True, exist_ok=True)  # Create folder if it doesn't exist
+# Ensure all outputs go into the correct location
+output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}")
+os.makedirs(output_folder, exist_ok=True)
+
 
 # Save each dataset's latent representations separately with the correct prefix
 for dataset, values in Z_named.items():
@@ -888,7 +890,9 @@ dist_matrix = cdist(latent_df.values, latent_df.values, metric="euclidean")
 dist_df = pd.DataFrame(dist_matrix, index=latent_df.index, columns=latent_df.index)
 
 # Save full distance matrix for further analysis
-dist_df.to_csv("pairwise_compound_distances.csv")
+dist_df.to_csv(os.path.join(output_folder, "pairwise_compound_distances.csv"))  
+
+
 
 print("Pairwise distance matrix saved as 'pairwise_compound_distances.csv'.")
 
