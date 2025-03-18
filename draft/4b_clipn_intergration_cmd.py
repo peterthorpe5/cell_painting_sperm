@@ -389,8 +389,18 @@ if stb_numeric is not None:
     stb_numeric = stb_numeric.dropna(axis=1, how='all')
 
 # Identify initial common columns BEFORE imputation
-common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
+# Identify initial common columns BEFORE imputation
+if experiment_numeric is not None and stb_numeric is not None:
+    common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
+elif experiment_numeric is not None:
+    common_columns_before = experiment_numeric.columns  # No STB data, use only experiment columns
+elif stb_numeric is not None:
+    common_columns_before = stb_numeric.columns  # No experiment data, use only STB columns
+else:
+    raise ValueError("Error: No valid numerical data available!")
+
 logger.info(f"Common numerical columns BEFORE imputation: {list(common_columns_before)}")
+
 
 
 # Retain only common columns
