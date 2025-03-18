@@ -30,12 +30,12 @@ CLIPn Output:
     
 The automated hyperparameter optimisation process in this script uses Bayesian 
 Optimisation to fine-tune the CLIPn model’s key parameters: latent dimension, 
-learning rate, and number of epochs. If no pre-optimized parameters are provided, 
+learning rate, and number of epochs. If no pre-optimised parameters are provided, 
 the script runs multiple trials (n_trials=20 by default) to find the best 
 combination of these hyperparameters based on the model’s training loss. 
 Once the optimisation is complete, the best parameters are saved to a 
 JSON file inside the output directory, which is dynamically named based on 
-the optimized values (e.g., clipn_ldim10_lr0.0001_epoch500/best_hyperparameters.json).
+the optimised values (e.g., clipn_ldim10_lr0.0001_epoch500/best_hyperparameters.json).
  If the user wishes to skip retraining, they can pass the --use_optimised_params 
  argument with the path to this JSON file, allowing the script to 
  load the best parameters, initialize the model, and proceed directly 
@@ -164,11 +164,11 @@ def objective(trial):
     return final_loss
 
 
-def optimize_clipn(n_trials=20):
+def optimise_clipn(n_trials=20):
     """
     Runs Bayesian optimisation for CLIPn hyperparameter tuning.
 
-    This function optimizes `latent_dim`, `lr`, and `epochs` using Optuna
+    This function optimises `latent_dim`, `lr`, and `epochs` using Optuna
     to find the best combination that minimizes the final loss.
 
     Parameters
@@ -184,7 +184,7 @@ def optimize_clipn(n_trials=20):
     logger.info(f"Starting Bayesian optimisation with {n_trials} trials.")
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=n_trials)
+    study.optimise(objective, n_trials=n_trials)
 
     best_params = study.best_params
     best_loss = study.best_value
@@ -216,18 +216,6 @@ if "--version" in sys.argv:
 
 # Define the main output directory for this experiment
 # Determine the experiment name from the argument or infer from file names
-if args.experiment_name:
-    experiment_name = args.experiment_name
-else:
-    # Default: extract from first experiment file (assuming it's structured as 'experiment_assay_...')
-    experiment_name = os.path.basename(args.experiment[0]).split("_")[0]
-
-# Ensure experiment_name is defined from command-line arguments
-experiment_name = args.experiment_name if hasattr(args, "experiment_name") else "test"
-
-main_output_folder = f"{experiment_name}_clipn_output"
-os.makedirs(main_output_folder, exist_ok=True)
-
 ##################################################################
 # Log file name includes the experiment name
 
@@ -287,7 +275,7 @@ logger.info(f"Logging initialized at {time.asctime()}")
 
 ##################################################################
 #  Step 3: Setup Per-Run Output Folder for Different Hyperparameters
-output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}")
+output_folder = os.path.join(main_output_folder, "parameters_log")
 os.makedirs(output_folder, exist_ok=True)
 
 # **5. Reinitialize logging inside per-run folder**
@@ -676,7 +664,7 @@ if args.use_optimised_params:
 else:
     # Run Hyperparameter Optimisation
     logger.info("Running Hyperparameter Optimisation")
-    best_params = optimize_clipn(n_trials=20)  # Bayesian Optimisation
+    best_params = optimise_clipn(n_trials=20)  # Bayesian Optimisation
 
     # Save optimised parameters
     with open(hyperparam_file, "w") as f:
@@ -770,16 +758,16 @@ logger.info(f"UMAP visualization with clusters saved as '{umap_clustered_plot_fi
 # Save each dataset's latent representations separately with the correct prefix
 for dataset, values in Z_named.items():
     df = pd.DataFrame(values)
-    df.to_csv(os.path.join(output_folder, f"{output_folder}_latent_representations_{dataset}.csv"), index=False)
+    df.to_csv(os.path.join(output_folder, f"latent_representations_{dataset}.csv"), index=False)
 
 logger.info(f"Latent representations saved successfully in {output_folder}/")
 
 # Save index and label mappings
 pd.Series({"experiment_assay_combined": 0, "STB_combined": 1}).to_csv(
-    os.path.join(output_folder, f"{output_folder}_dataset_index_mapping.csv")
+    os.path.join(output_folder, f"dataset_index_mapping.csv")
 )
 pd.DataFrame(label_mappings).to_csv(
-    os.path.join(output_folder, f"{output_folder}_label_mappings.csv")
+    os.path.join(output_folder, f"label_mappings.csv")
 )
 
 logger.info(f"Index and label mappings saved successfully in {output_folder}/")
