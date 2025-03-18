@@ -415,7 +415,18 @@ if stb_numeric is not None:
 
 
 # **Identify columns lost during imputation**
-common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
+# Identify common columns AFTER imputation (only if both datasets exist)
+if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
+    common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
+elif experiment_numeric_imputed is not None:
+    common_columns_after = experiment_numeric_imputed.columns  # Use only experiment columns
+elif stb_numeric_imputed is not None:
+    common_columns_after = stb_numeric_imputed.columns  # Use only STB columns
+else:
+    raise ValueError("Error: No numerical data available after imputation!")
+
+
+logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
 columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {list(columns_lost)}")
 
