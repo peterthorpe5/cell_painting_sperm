@@ -85,7 +85,7 @@ parser.add_argument("--impute",
 parser.add_argument("--impute-method", 
                     type=str, 
                     choices=["median", "knn"], 
-                    default="median", 
+                    default="knn", 
                     help="Imputation method: 'median' (default) or 'knn'.")
 parser.add_argument("--knn-neighbors", 
                     type=int, 
@@ -339,9 +339,10 @@ elif stb_files:
 elif experiment_files:
     logger.info("Running with only Experiment dataset.")
 
-# Load and merge datasets
-stb_dfs = [pd.read_csv(f) for f in stb_files]  
-experiment_dfs = [pd.read_csv(f) for f in experiment_files]
+# Load and merge datasets (only if they exist)
+stb_dfs = [pd.read_csv(f) for f in stb_files] if stb_files else []
+experiment_dfs = [pd.read_csv(f) for f in experiment_files] if experiment_files else []
+
 
 # Only concatenate if there are datasets provided
 stb_data = pd.concat(stb_dfs, axis=0, ignore_index=True) if stb_files else None
