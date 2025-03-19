@@ -259,6 +259,47 @@ def map_latent_representations(Z, cpd_id_map, dataset_name):
 
     return None
 
+def restore_cpd_id(imputed_df, cpd_id_map):
+    """
+    Restore the 'cpd_id' and 'Library' columns after data processing.
+    
+    Parameters:
+    -----------
+    imputed_df : pd.DataFrame
+        The DataFrame with transformed numerical features.
+    cpd_id_map : dict
+        A dictionary mapping original row indices to 'cpd_id' values.
+
+    Returns:
+    --------
+    pd.DataFrame
+        The DataFrame with 'cpd_id' restored as an index.
+    """
+    if imputed_df is None or imputed_df.empty:
+        logger.warning("Imputed data is empty. Returning unchanged.")
+        return imputed_df
+
+    if cpd_id_map is None:
+        logger.error("cpd_id_map is missing! Cannot restore 'cpd_id'. Returning unchanged.")
+        return imputed_df
+
+    # Ensure that the imputed DataFrame has the correct number of rows
+    expected_rows = len(imputed_df)
+    actual_mapped_rows = min(expected_rows, len(cpd_id_map))
+
+    # Assign `cpd_id` based on the stored mapping, filling missing values with "Unknown"
+    restored_cpd_ids = [cpd_id_map.get(i, f"Unknown_{i}") for i in range(expected_rows)]
+
+    # Set `cpd_id` as the index
+    imputed_df.index = restored_cpd_ids
+
+    # Log any mismatches
+    missing_count = sum(1 for cpd in restored_cpd_ids if cpd.startswith("Unknown"))
+    if missing_count > 0:
+        logger.warning(f"Warning: {missing_count} missing 'cpd_id' values were replaced with 'Unknown_X'.")
+
+    return imputed_df
+
 
 
 def restore_non_numeric(imputed_df, mappings):
@@ -578,17 +619,17 @@ if stb_data is not None and "Library" not in stb_data.columns:
     stb_data["Library"] = "STB"
 
 # Create cpd_id Mapping Dictionary ---
-if experiment_data is not None and 'cpd_id' in experiment_data.columns and 'Library' in experiment_data.columns:
-    experiment_mappings = experiment_data[['cpd_id', 'Library']].to_dict(orient="index")  # Store index -> {'cpd_id': value, 'Library': value}
+# Store a persistent mapping of original `cpd_id` before processing
+if experiment_data is not None and 'cpd_id' in experiment_data.columns:
+    experiment_cpd_id_map = experiment_data[['cpd_id']].reset_index().set_index('index')['cpd_id'].to_dict()
 else:
-    experiment_mappings = None
-    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from experiment data!")
+    experiment_cpd_id_map = {}
 
-if stb_data is not None and 'cpd_id' in stb_data.columns and 'Library' in stb_data.columns:
-    stb_mappings = stb_data[['cpd_id', 'Library']].to_dict(orient="index")
+if stb_data is not None and 'cpd_id' in stb_data.columns:
+    stb_cpd_id_map = stb_data[['cpd_id']].reset_index().set_index('index')['cpd_id'].to_dict()
 else:
-    stb_mappings = None
-    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from STB data!")
+    stb_cpd_id_map = {}
+
 
 # Log the first few rows after extracting numerical features
 if experiment_numeric is not None:
@@ -1081,6 +1122,10 @@ experiment_latent_df, stb_latent_df = None, None
 # call function
 experiment_latent_df = map_latent_representations(Z, experiment_cpd_id_map, 0)
 stb_latent_df = map_latent_representations(Z, stb_cpd_id_map, 1)
+# get the proper cpd_id
+experiment_latent_df = restore_cpd_id(experiment_latent_df, experiment_cpd_id_map)
+stb_latent_df = restore_cpd_id(stb_latent_df, stb_cpd_id_map)
+
 
 
 # Log the latent representations before UMAP
