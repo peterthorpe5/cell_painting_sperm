@@ -1169,12 +1169,15 @@ logger.info(f"Compound similarity summary saved to '{summary_file}'.")
 ###########
 # Generate a clustered heatmap
 plt.figure(figsize=(12, 10))
-htmap = sns.clustermap(dist_df, cmap="viridis", method="ward", figsize=(12, 10),
+htmap = sns.clustermap(dist_df, cmap="viridis", method="ward", 
+                       sfigsize=(12, 10),
                 xticklabels=True,  # Show compound names on x-axis
                 yticklabels=True)   # Show compound names on y-axis
 # Rotate x-axis labels for better readability
-plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90)
-plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0)
+plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, 
+         fontsize=4)
+plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, 
+         fontsize=6)
 
 plt.title("Pairwise Distance Heatmap of Compounds")
 
