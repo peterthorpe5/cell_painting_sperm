@@ -410,12 +410,10 @@ default_experiment_files = [
     "data/Mitotox_assay_NPSCDD0004023_25102024_normalised.csv"
 ]
 
-# Determine dataset selection based on command-line input
+
 # Determine dataset selection based on command-line input
 stb_files = args.stb if args.stb else default_stb_files  
 experiment_files = args.experiment if args.experiment else []  # No default experiment files
-
-
 
 # Ensure that at least one dataset is provided
 if not stb_files and not experiment_files:
@@ -464,6 +462,36 @@ if experiment_numeric is not None:
     logger.info("First few rows of experiment_numeric:\n" + experiment_numeric.head().to_string())
 if stb_numeric is not None:
     logger.info("First few rows of stb_numeric:\n" + stb_numeric.head().to_string())
+
+
+# Ensure 'Library' column exists and assign based on dataset origin
+if experiment_data is not None and "Library" not in experiment_data.columns:
+    logger.warning("'Library' column is missing in experiment_data. Assigning 'Experiment'.")
+    experiment_data["Library"] = "Experiment"
+
+if stb_data is not None and "Library" not in stb_data.columns:
+    logger.warning("'Library' column is missing in stb_data. Assigning 'STB'.")
+    stb_data["Library"] = "STB"
+
+# Create cpd_id Mapping Dictionary ---
+if experiment_data is not None and 'cpd_id' in experiment_data.columns and 'Library' in experiment_data.columns:
+    experiment_mappings = experiment_data[['cpd_id', 'Library']].to_dict(orient="index")  # Store index -> {'cpd_id': value, 'Library': value}
+else:
+    experiment_mappings = None
+    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from experiment data!")
+
+if stb_data is not None and 'cpd_id' in stb_data.columns and 'Library' in stb_data.columns:
+    stb_mappings = stb_data[['cpd_id', 'Library']].to_dict(orient="index")
+else:
+    stb_mappings = None
+    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from STB data!")
+
+# Log the first few rows after extracting numerical features
+if experiment_numeric is not None:
+    logger.info("First few rows of experiment_numeric:\n" + experiment_numeric.head().to_string())
+if stb_numeric is not None:
+    logger.info("First few rows of stb_numeric:\n" + stb_numeric.head().to_string())
+
 
 
 # Create cpd_id Mapping Dictionary ---
