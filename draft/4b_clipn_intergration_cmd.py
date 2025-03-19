@@ -733,14 +733,6 @@ np.savez(os.path.join(output_folder, "CLIPn_latent_representations.npz"), **Z_na
 logger.info("Latent representations saved successfully.")
 
 
-# Log the latent representations before UMAP
-if experiment_latent_df is not None:
-    logger.info("First few rows of experiment_latent_df (latent representations):\n" + experiment_latent_df.head().to_string())
-if stb_latent_df is not None:
-    logger.info("First few rows of stb_latent_df (latent representations):\n" + stb_latent_df.head().to_string())
-
-
-
 # Perform UMAP
 logger.info("Generating UMAP visualization.")
 umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
@@ -816,6 +808,14 @@ if 1 in Z:  # Check if STB data exists in Z
         stb_latent_df.index = [stb_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(stb_latent_df))]
     else:
         logger.warning("Warning: stb_cpd_id_map is None, using default index.")
+
+
+# Log the latent representations before UMAP
+if experiment_latent_df is not None:
+    logger.info("First few rows of experiment_latent_df (latent representations):\n" + experiment_latent_df.head().to_string())
+if stb_latent_df is not None:
+    logger.info("First few rows of stb_latent_df (latent representations):\n" + stb_latent_df.head().to_string())
+
 
 
 logger.info("Expected experiment_cpd_id_map length:", len(experiment_cpd_id_map))
