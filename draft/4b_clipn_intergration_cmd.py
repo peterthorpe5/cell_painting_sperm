@@ -292,6 +292,98 @@ def restore_non_numeric(imputed_df, mappings):
     return pd.concat([non_numeric_df, imputed_df], axis=1)
 
 
+def compute_pairwise_distances(latent_df):
+    """
+    Compute the pairwise Euclidean distance between compounds in latent space.
+
+    Parameters:
+    -----------
+    latent_df : pd.DataFrame
+        DataFrame containing latent representations indexed by `cpd_id`.
+
+    Returns:
+    --------
+    pd.DataFrame
+        Distance matrix with `cpd_id` as row and column labels.
+    """
+    dist_matrix = cdist(latent_df.values, latent_df.values, metric="euclidean")
+    dist_df = pd.DataFrame(dist_matrix, index=latent_df.index, columns=latent_df.index)
+    return dist_df
+
+def generate_similarity_summary(dist_df):
+    """
+    Generate a summary of the closest and farthest compounds.
+
+    Parameters:
+    -----------
+    dist_df : pd.DataFrame
+        Pairwise distance matrix with `cpd_id` as row and column labels.
+
+    Returns:
+    --------
+    pd.DataFrame
+        Summary DataFrame with closest and farthest compounds.
+    """
+    closest_compounds = dist_df.replace(0, np.nan).idxmin(axis=1)  # Ignore self-comparison
+    farthest_compounds = dist_df.idxmax(axis=1)
+
+    summary_df = pd.DataFrame({
+        "Compound": dist_df.index,  # Preserve cpd_id
+        "Closest Compound": closest_compounds,
+        "Distance to Closest": dist_df.min(axis=1),
+        "Farthest Compound": farthest_compounds,
+        "Distance to Farthest": dist_df.max(axis=1)
+    })
+
+    return summary_df
+
+def plot_distance_heatmap(dist_df, output_path):
+    """
+    Generate and save a heatmap of pairwise compound distances.
+
+    Parameters:
+    -----------
+    dist_df : pd.DataFrame
+        Pairwise distance matrix with `cpd_id` as row and column labels.
+    output_path : str
+        Path to save the heatmap PDF file.
+    """
+    plt.figure(figsize=(12, 10))
+    htmap = sns.clustermap(dist_df, cmap="viridis", method="ward",
+                           figsize=(12, 10),
+                           xticklabels=True,
+                           yticklabels=True)
+
+    # Rotate labels for better readability
+    plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, fontsize=4)
+    plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, fontsize=6)
+
+    plt.title("Pairwise Distance Heatmap of Compounds")
+    plt.savefig(output_path, dpi=1200, bbox_inches="tight")
+    plt.close()
+
+def plot_dendrogram(dist_df, output_path):
+    """
+    Generate and save a dendrogram based on hierarchical clustering.
+
+    Parameters:
+    -----------
+    dist_df : pd.DataFrame
+        Pairwise distance matrix with `cpd_id` as row and column labels.
+    output_path : str
+        Path to save the dendrogram PDF file.
+    """
+    linkage_matrix = linkage(squareform(dist_df), method="ward")
+
+    plt.figure(figsize=(12, 6))
+    dendrogram(linkage_matrix, labels=list(dist_df.index), leaf_rotation=90, leaf_font_size=8)
+    plt.title("Hierarchical Clustering of Compounds")
+    plt.xlabel("Compound")
+    plt.ylabel("Distance")
+
+    plt.savefig(output_path)
+    plt.close()
+
 if sys.version_info[:1] != (3,):
     # e.g. sys.version_info(major=3, minor=9, micro=7,
     # releaselevel='final', serial=0)
@@ -1122,92 +1214,59 @@ logger.info(f"UMAP visualization (experiment vs. STB) saved as '{umap_colored_pl
 # Generate Summary of Closest & Farthest Compounds
 
 
+#  **Restore `cpd_id` and `Library` Before Distance Computation**
+logger.info("Restoring `cpd_id` and `Library` columns in latent representations...")
 
-# Load the latent representation CSV
-latent_df = combined_latent_df
+# Ensure mappings exist
+if experiment_mappings and stb_mappings:
+    combined_mappings = {**experiment_mappings, **stb_mappings}  # Merge mappings
 
-# Compute pairwise Euclidean distances
-dist_matrix = cdist(latent_df.values, latent_df.values, metric="euclidean")
+    # Restore `cpd_id` and `Library`
+    combined_latent_df = restore_non_numeric(combined_latent_df, combined_mappings)
 
-# Convert to DataFrame for easy analysis
-dist_df = pd.DataFrame(dist_matrix, index=latent_df.index, columns=latent_df.index)
+    # Ensure `cpd_id` is set as the index
+    combined_latent_df.set_index("cpd_id", inplace=True)
 
-# Save full distance matrix for further analysis
-dist_df.to_csv(os.path.join(output_folder, "pairwise_compound_distances.csv"))  
-
-
-
-print("Pairwise distance matrix saved as 'pairwise_compound_distances.csv'.")
-
-
-# Find closest compounds (excluding self-comparison)
-closest_compounds = dist_df.replace(0, np.nan).idxmin(axis=1)
-
-# Find farthest compounds
-farthest_compounds = dist_df.idxmax(axis=1)
-
-# Create a summary DataFrame
-summary_df = pd.DataFrame({
-    "Closest Compound": closest_compounds,
-    "Distance to Closest": dist_df.min(axis=1),
-    "Farthest Compound": farthest_compounds,
-    "Distance to Farthest": dist_df.max(axis=1)
-})
+    logger.info("Successfully restored `cpd_id` and `Library` columns.")
+else:
+    logger.warning("Missing mappings for `cpd_id` restoration!")
 
 
-# Ensure that the index and columns of dist_df are compound names
-dist_df.index = latent_df.index  # Assign compound names as row labels
-dist_df.columns = latent_df.index  # Assign compound names as column labels
+#  **Generate and Save Similarity Summary**
+logger.info("Generating compound similarity summary...")
 
+summary_df = generate_similarity_summary(dist_df)
 
-# Save summary file
+# Ensure `cpd_id` is correctly assigned
+summary_df["Compound"] = summary_df["Compound"].astype(str)
+summary_df["Closest Compound"] = summary_df["Closest Compound"].astype(str)
+summary_df["Farthest Compound"] = summary_df["Farthest Compound"].astype(str)
+
 summary_file = os.path.join(output_folder, "compound_similarity_summary.csv")
-summary_df.to_csv(summary_file)
+summary_df.to_csv(summary_file, index=False)
 logger.info(f"Compound similarity summary saved to '{summary_file}'.")
 
+#  **Compute Pairwise Distances with `cpd_id` as Index**
+logger.info("Computing pairwise compound distances...")
 
-###########
-# Generate a clustered heatmap
-plt.figure(figsize=(12, 10))
-htmap = sns.clustermap(dist_df, cmap="viridis", method="ward", 
-                       figsize=(12, 10),
-                xticklabels=True,  # Show compound names on x-axis
-                yticklabels=True)   # Show compound names on y-axis
-# Rotate x-axis labels for better readability
-plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, 
-         fontsize=4)
-plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, 
-         fontsize=6)
+dist_df = compute_pairwise_distances(combined_latent_df.drop(columns=["Library"], errors="ignore"))  # Exclude non-numeric
+dist_df.index = combined_latent_df.index  # Ensure correct row names
+dist_df.columns = combined_latent_df.index  # Ensure correct column names
 
-plt.title("Pairwise Distance Heatmap of Compounds")
+#  **Save Full Distance Matrix**
+distance_matrix_file = os.path.join(output_folder, "pairwise_compound_distances.csv")
+dist_df.to_csv(distance_matrix_file)
+logger.info(f"Pairwise distance matrix saved to '{distance_matrix_file}'.")
 
+
+#  **Generate and Save Heatmap**
 heatmap_file = os.path.join(output_folder, "compound_distance_heatmap.pdf")
-plt.savefig(heatmap_file, dpi=1200, bbox_inches="tight")
-plt.close()
+plot_distance_heatmap(dist_df, heatmap_file)
 logger.info(f"Pairwise distance heatmap saved to '{heatmap_file}'.")
 
-
-###########
-# Perform hierarchical clustering
-linkage_matrix = linkage(squareform(dist_matrix), method="ward")
-
-# Create and save dendrogram
-plt.figure(figsize=(12, 6))
-dendrogram(linkage_matrix, labels=latent_df.index, leaf_rotation=90, leaf_font_size=8)
-plt.title("Hierarchical Clustering of Compounds")
-plt.xlabel("Compound")
-plt.ylabel("Distance")
-
+# **Generate and Save Dendrogram**
 dendrogram_file = os.path.join(output_folder, "compound_clustering_dendrogram.pdf")
-plt.savefig(dendrogram_file)
-plt.close()
+plot_dendrogram(dist_df, dendrogram_file)
 logger.info(f"Hierarchical clustering dendrogram saved to '{dendrogram_file}'.")
 
-# Save linkage matrix for further reference
-linkage_matrix_file = os.path.join(output_folder, "compound_clustering_linkage_matrix.csv")
-np.savetxt(linkage_matrix_file, linkage_matrix, delimiter="\t")
-logger.info(f"Linkage matrix saved to '{linkage_matrix_file}'.")
-
-# Final completion message
-logger.info("SCP data analysis with CLIPn completed successfully!")
 
