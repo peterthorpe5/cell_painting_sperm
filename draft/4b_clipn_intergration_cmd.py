@@ -347,9 +347,17 @@ if stb_data is not None:
     logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
 
 
-# Extract numerical features
-stb_numeric = stb_data.select_dtypes(include=[np.number]) if stb_data is not None else None
-experiment_numeric = experiment_data.select_dtypes(include=[np.number]) if experiment_data is not None else None
+# Extract numerical features ... retain non numeric too ...
+# Store non-numeric columns separately to reattach later
+non_numeric_cols = ['cpd_id', 'Library']  # Explicitly list columns to keep
+if experiment_data is not None:
+    experiment_non_numeric = experiment_data[non_numeric_cols]
+    experiment_numeric = experiment_data.select_dtypes(include=[np.number])
+
+if stb_data is not None:
+    stb_non_numeric = stb_data[non_numeric_cols]
+    stb_numeric = stb_data.select_dtypes(include=[np.number])
+
 
 # Log the first few rows after extracting numerical features
 if experiment_numeric is not None:
@@ -375,12 +383,6 @@ else:
     logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
 
 stb_cpd_id_map = stb_data['cpd_id'].copy()
-
-
-# Extract numerical features
-# Extract numerical features (only if data exists)
-stb_numeric = stb_data.select_dtypes(include=[np.number]) if stb_data is not None else None
-experiment_numeric = experiment_data.select_dtypes(include=[np.number]) if experiment_data is not None else None  # Fix: Skip if None
 
 
 # **Drop columns that are entirely NaN in either dataset BEFORE imputation**
@@ -599,8 +601,6 @@ dataset_mapping = dict(zip(dataset_indices, dataset_names))
 logger.info(f"Dataset Mapping: {dataset_mapping}")
 
 
-
-
 # Ensure data is aggregated at the compound level
 logger.info("Grouping by cpd_id and Library...")
 logger.info("Grouping by cpd_id and Library with filtering of unnecessary columns...")
@@ -619,22 +619,38 @@ for dataset_name, dataset in datasets.items():
         logger.info(f"Processing {dataset_name} dataset...")
         logger.info(f"Before filtering & aggregation: {dataset.shape}")
 
+        # Ensure `cpd_id` and `Library` exist before filtering
+        required_cols = ['cpd_id', 'Library']
+        if not all(col in dataset.columns for col in required_cols):
+            logger.error(f"Missing required columns in {dataset_name}! Available columns: {list(dataset.columns)}")
+            sys.exit(1)
+
+        # Preserve non-numeric columns before dropping unnecessary ones
+        dataset_non_numeric = dataset[required_cols]  
+        
         # Identify columns to drop (if they exist)
         filter_cols = dataset.columns.str.contains(filter_pattern, regex=True)
         columns_to_drop = dataset.columns[filter_cols]
 
         if len(columns_to_drop) > 0:
             logger.info(f"Dropping {len(columns_to_drop)} unnecessary columns: {list(columns_to_drop)}")
-            dataset = dataset.drop(columns=columns_to_drop)
+            dataset_numeric = dataset.drop(columns=columns_to_drop, errors='ignore')  # Drop only if they exist
         else:
             logger.info("No unnecessary columns found for removal.")
+            dataset_numeric = dataset.copy()  # If nothing to drop, retain all
 
-        # Ensure non-numeric columns are excluded from mean calculations
-        non_numeric_cols = ['cpd_id', 'Library']
-        numeric_cols = dataset.select_dtypes(include=[np.number]).columns  # Select only numeric features
+        # Ensure only numeric columns are aggregated
+        numeric_cols = dataset_numeric.select_dtypes(include=[np.number]).columns
 
-        # Perform safe aggregation: group only numeric features
-        aggregated_data = dataset.groupby(non_numeric_cols)[numeric_cols].mean().reset_index()
+        if len(numeric_cols) == 0:
+            logger.error(f"No numeric columns found in {dataset_name} after filtering!")
+            sys.exit(1)
+
+        # Perform safe aggregation: group only numeric features, then merge back non-numeric columns
+        aggregated_data = dataset_numeric.groupby(required_cols)[numeric_cols].mean().reset_index()
+
+        # Merge back non-numeric columns to ensure `cpd_id` and `Library` are retained
+        aggregated_data = dataset_non_numeric.merge(aggregated_data, on=required_cols, how='right')
 
         # Assign back the processed dataset
         datasets[dataset_name] = aggregated_data
@@ -647,7 +663,6 @@ for dataset_name, dataset in datasets.items():
 # Reassign the updated datasets
 experiment_numeric_imputed = datasets["experiment"]
 stb_numeric_imputed = datasets["stb"]
-
 
 
 
