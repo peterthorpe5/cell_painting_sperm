@@ -1041,7 +1041,7 @@ logger.info(f"Latent representations saved successfully with cpd_id as index to 
 
 #####################################################################
 # Perform UMAP dimensionality reduction
-logger.info("Generating UMAP visualization with cpd_id labels.")
+logger.info("Generating UMAP visualization with clustering.")
 umap_model = umap.UMAP(n_neighbors=25, min_dist=0.1, n_components=2, random_state=42)
 latent_umap = umap_model.fit_transform(combined_latent_df)
 
@@ -1054,11 +1054,26 @@ umap_file = os.path.join(output_folder, "UMAP_coordinates.csv")
 umap_df.to_csv(umap_file)
 logger.info(f"UMAP coordinates saved to '{umap_file}'.")
 
+# -------------------------------
+# Clustering using KMeans
+# -------------------------------
+num_clusters = 10  # Adjust based on expected clusters
+kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+cluster_labels = kmeans.fit_predict(latent_umap)
+
+# Add cluster labels to DataFrame
+umap_df["Cluster"] = cluster_labels
+
+# Save cluster assignments
+cluster_file = os.path.join(output_folder, "UMAP_clusters.csv")
+umap_df.to_csv(cluster_file)
+logger.info(f"UMAP cluster assignments saved to '{cluster_file}'.")
+
 # -----------------------------------------------
-# UMAP 1: Scatter Plot with `cpd_id` Labels
+# UMAP Scatter Plot with Cluster Colors
 # -----------------------------------------------
 plt.figure(figsize=(12, 8))
-plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c="blue")  # Fix: Set explicit color
+plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=cluster_labels, cmap="tab10")
 
 # Add small text labels for `cpd_id`
 for i, cpd in enumerate(cpd_id_list):
@@ -1066,12 +1081,14 @@ for i, cpd in enumerate(cpd_id_list):
 
 plt.xlabel("UMAP 1")
 plt.ylabel("UMAP 2")
-plt.title("UMAP Visualization with cpd_id Labels")
+plt.title("UMAP Visualization with Cluster Colors")
 
-umap_plot_file = os.path.join(output_folder, "UMAP_latent_visualization_cpd_id.pdf")
-plt.savefig(umap_plot_file, dpi=300)
+umap_clustered_plot_file = os.path.join(output_folder, "UMAP_latent_visualization_clusters.pdf")
+plt.savefig(umap_clustered_plot_file, dpi=300)
 plt.close()
-logger.info(f"UMAP visualization saved as '{umap_plot_file}'.")
+
+logger.info(f"UMAP visualization with clusters saved as '{umap_clustered_plot_file}'.")
+
 
 # -----------------------------------------------
 # UMAP 2: Colour-coded by Dataset (Experiment vs. STB)
