@@ -600,17 +600,56 @@ logger.info(f"Dataset Mapping: {dataset_mapping}")
 
 
 
-logger.info("group by cpd_id and Library")
-# Ensure data is aggregated at the compound level
-if experiment_numeric_imputed is not None:
-    logger.info(f"Before aggregation: {experiment_numeric_imputed.shape}")
-    experiment_numeric_imputed = experiment_numeric_imputed.groupby(['cpd_id', 'Library']).mean().reset_index()
-    logger.info(f"After aggregation: {experiment_numeric_imputed.shape}")
 
-if stb_numeric_imputed is not None:
-    logger.info(f"Before aggregation: {stb_numeric_imputed.shape}")
-    stb_numeric_imputed = stb_numeric_imputed.groupby(['cpd_id', 'Library']).mean().reset_index()
-    logger.info(f"After aggregation: {stb_numeric_imputed.shape}")
+# Ensure data is aggregated at the compound level
+logger.info("Grouping by cpd_id and Library...")
+logger.info("Grouping by cpd_id and Library with filtering of unnecessary columns...")
+
+# Define datasets to process
+datasets = {
+    "experiment": experiment_numeric_imputed,
+    "stb": stb_numeric_imputed
+}
+
+# Define the pattern for columns to drop
+filter_pattern = 'Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|Child|Paren|Location_[X,Y,Z]|ZernikePhase|Euler|Plate|Well|Field|Center_Z|Center_X|Center_Y|no_|fn_'
+
+for dataset_name, dataset in datasets.items():
+    if dataset is not None:
+        logger.info(f"Processing {dataset_name} dataset...")
+        logger.info(f"Before filtering & aggregation: {dataset.shape}")
+
+        # Identify columns to drop (if they exist)
+        filter_cols = dataset.columns.str.contains(filter_pattern, regex=True)
+        columns_to_drop = dataset.columns[filter_cols]
+
+        if len(columns_to_drop) > 0:
+            logger.info(f"Dropping {len(columns_to_drop)} unnecessary columns: {list(columns_to_drop)}")
+            dataset = dataset.drop(columns=columns_to_drop)
+        else:
+            logger.info("No unnecessary columns found for removal.")
+
+        # Ensure non-numeric columns are excluded from mean calculations
+        non_numeric_cols = ['cpd_id', 'Library']
+        numeric_cols = dataset.select_dtypes(include=[np.number]).columns  # Select only numeric features
+
+        # Perform safe aggregation: group only numeric features
+        aggregated_data = dataset.groupby(non_numeric_cols)[numeric_cols].mean().reset_index()
+
+        # Assign back the processed dataset
+        datasets[dataset_name] = aggregated_data
+
+        # Log after aggregation
+        logger.info(f"After filtering & aggregation: {aggregated_data.shape}")
+    else:
+        logger.warning(f"{dataset_name} dataset is None, skipping aggregation.")
+
+# Reassign the updated datasets
+experiment_numeric_imputed = datasets["experiment"]
+stb_numeric_imputed = datasets["stb"]
+
+
+
 
 
 #######################################################
