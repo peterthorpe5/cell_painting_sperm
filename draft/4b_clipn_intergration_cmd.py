@@ -340,9 +340,23 @@ experiment_dfs = [pd.read_csv(f) for f in experiment_files] if experiment_files 
 stb_data = pd.concat(stb_dfs, axis=0, ignore_index=True) if stb_files else None
 experiment_data = pd.concat(experiment_dfs, axis=0, ignore_index=True) if experiment_files else None
 
+# Log the first few rows of the data before processing
+if experiment_data is not None:
+    logger.info("First few rows of experiment_data:\n" + experiment_data.head().to_string())
+if stb_data is not None:
+    logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
+
+
 # Extract numerical features
 stb_numeric = stb_data.select_dtypes(include=[np.number]) if stb_data is not None else None
 experiment_numeric = experiment_data.select_dtypes(include=[np.number]) if experiment_data is not None else None
+
+# Log the first few rows after extracting numerical features
+if experiment_numeric is not None:
+    logger.info("First few rows of experiment_numeric:\n" + experiment_numeric.head().to_string())
+if stb_numeric is not None:
+    logger.info("First few rows of stb_numeric:\n" + stb_numeric.head().to_string())
+
 
 # Create cpd_id Mapping Dictionary ---
 if experiment_data is not None and 'cpd_id' in experiment_data.columns:
@@ -377,7 +391,7 @@ if experiment_numeric is not None:
 if stb_numeric is not None:
     stb_numeric = stb_numeric.dropna(axis=1, how='all')
 
-# Identify initial common columns BEFORE imputation
+
 # Identify initial common columns BEFORE imputation
 if experiment_numeric is not None and stb_numeric is not None:
     common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
@@ -479,6 +493,11 @@ logger.info(f"STB label mapping: {stb_label_mapping}")
 logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
 logger.info(f"STB labels assigned: {len(stb_labels)}")
 
+# Log the first few rows after imputation
+if experiment_numeric_imputed is not None:
+    logger.info("First few rows of experiment_numeric_imputed:\n" + experiment_numeric_imputed.head().to_string())
+if stb_numeric_imputed is not None:
+    logger.info("First few rows of stb_numeric_imputed:\n" + stb_numeric_imputed.head().to_string())
 
 # Step 3: Identify common columns AFTER imputation
 if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
@@ -714,6 +733,13 @@ np.savez(os.path.join(output_folder, "CLIPn_latent_representations.npz"), **Z_na
 logger.info("Latent representations saved successfully.")
 
 
+# Log the latent representations before UMAP
+if experiment_latent_df is not None:
+    logger.info("First few rows of experiment_latent_df (latent representations):\n" + experiment_latent_df.head().to_string())
+if stb_latent_df is not None:
+    logger.info("First few rows of stb_latent_df (latent representations):\n" + stb_latent_df.head().to_string())
+
+
 
 # Perform UMAP
 logger.info("Generating UMAP visualization.")
@@ -791,6 +817,13 @@ if 1 in Z:  # Check if STB data exists in Z
     else:
         logger.warning("Warning: stb_cpd_id_map is None, using default index.")
 
+
+logger.info("Expected experiment_cpd_id_map length:", len(experiment_cpd_id_map))
+logger.info("Expected stb_cpd_id_map length:", len(stb_cpd_id_map))
+logger.info("Observed experiment_latent_df index length:", len(experiment_latent_df.index))
+logger.info("Observed stb_latent_df index length:", len(stb_latent_df.index))
+
+
 # Ensure at least one DataFrame exists before concatenation
 if experiment_latent_df is not None and stb_latent_df is not None:
     combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
@@ -802,6 +835,11 @@ else:
     raise ValueError("Error: No latent representations available!")
 
 logger.info("Latent representations processed successfully.")
+
+# Log the combined latent representation DataFrame
+if combined_latent_df is not None:
+    logger.info("First few rows of combined_latent_df (final merged latent space):\n" + combined_latent_df.head().to_string())
+
 
 # Ensure at least one DataFrame is available before concatenation
 if experiment_latent_df is not None and stb_latent_df is not None:
