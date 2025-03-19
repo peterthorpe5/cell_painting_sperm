@@ -443,6 +443,18 @@ if stb_data is not None:
     logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
 
 
+# Ensure 'Library' column exists and assign based on dataset origin
+if experiment_data is not None:
+    if "Library" not in experiment_data.columns:
+        logger.warning("'Library' column is missing in experiment_data. Assigning 'Experiment'.")
+        experiment_data["Library"] = "Experiment"
+
+if stb_data is not None:
+    if "Library" not in stb_data.columns:
+        logger.warning("'Library' column is missing in stb_data. Assigning 'STB'.")
+        stb_data["Library"] = "STB"
+
+
 # Extract numerical features ... retain non numeric too ...
 # Store non-numeric columns separately to reattach later
 non_numeric_cols = ['cpd_id', 'Library']
