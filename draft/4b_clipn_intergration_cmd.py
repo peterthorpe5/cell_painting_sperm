@@ -50,6 +50,7 @@ import sys
 import json
 import time
 import argparse
+import re
 import pandas as pd
 import numpy as np
 import logging
@@ -190,8 +191,105 @@ def optimize_clipn(n_trials=20):
     best_loss = study.best_value
 
     logger.info(f"Best hyperparameters found: {best_params} with final loss {best_loss:.6f}")
-
     return best_params
+
+
+def group_and_filter_data(df, mappings):
+    """
+    Restores non-numeric columns, groups by `cpd_id` and `Library`, 
+    and drops unwanted columns based on `filter_pattern`.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The imputed dataset to process.
+    mappings : dict
+        A dictionary mapping row indices to `{'cpd_id': value, 'Library': value}`.
+
+    Returns
+    -------
+    pd.DataFrame
+        The grouped and cleaned DataFrame.
+    """
+    if df is None or df.empty:
+        return df  # Return as-is if empty or None
+
+    # Restore 'cpd_id' and 'Library' after imputation
+    df = restore_non_numeric(df, mappings)
+
+    # Group by `cpd_id` and `Library` (taking the mean for numeric values)
+    df = df.groupby(["cpd_id", "Library"], as_index=False).mean()
+
+    # Drop columns matching `filter_pattern`
+    columns_to_drop = [col for col in df.columns if filter_pattern.search(col)]
+    df = df.drop(columns=columns_to_drop, errors="ignore")
+
+    return df
+
+def map_latent_representations(Z, cpd_id_map, dataset_name):
+    """
+    Maps latent representation indices back to their original 'cpd_id'.
+
+    Parameters
+    ----------
+    Z : dict
+        Dictionary containing latent representations from CLIPn.
+    cpd_id_map : dict
+        Mapping of indices to original 'cpd_id'.
+    dataset_name : str
+        Name of the dataset being mapped (for logging).
+
+    Returns
+    -------
+    pd.DataFrame
+        Dataframe of latent representations indexed by 'cpd_id'.
+    """
+    if dataset_name in Z:
+        latent_df = pd.DataFrame(Z[dataset_name])
+
+        if cpd_id_map is not None:
+            if len(latent_df) == len(cpd_id_map):
+                latent_df.index = [cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(latent_df))]
+            else:
+                logger.warning(f"Mismatch: {dataset_name} latent_df rows ({len(latent_df)}) != cpd_id map ({len(cpd_id_map)})")
+        else:
+            logger.warning(f"Warning: {dataset_name} cpd_id_map is None, using default index.")
+
+        return latent_df
+
+    return None
+
+
+
+def restore_non_numeric(imputed_df, mappings):
+    """
+    Restore the 'cpd_id' and 'Library' columns after imputation.
+
+    Parameters:
+    -----------
+    imputed_df : pd.DataFrame
+        The DataFrame with numeric values imputed.
+    mappings : dict
+        A dictionary mapping row indices to {'cpd_id': value, 'Library': value}.
+
+    Returns:
+    --------
+    pd.DataFrame
+        The DataFrame with 'cpd_id' and 'Library' restored.
+    """
+    if mappings is None:
+        logger.warning("No mappings found. Returning data unchanged.")
+        return imputed_df
+
+    # Convert mappings back to DataFrame
+    non_numeric_df = pd.DataFrame.from_dict(mappings, orient="index")
+    
+    # Ensure both DataFrames have the same index
+    if len(non_numeric_df) != len(imputed_df):
+        logger.error("Mismatch in row counts after imputation. Check data integrity.")
+        sys.exit(1)
+
+    return pd.concat([non_numeric_df, imputed_df], axis=1)
 
 
 if sys.version_info[:1] != (3,):
@@ -349,7 +447,9 @@ if stb_data is not None:
 
 # Extract numerical features ... retain non numeric too ...
 # Store non-numeric columns separately to reattach later
-non_numeric_cols = ['cpd_id', 'Library']  # Explicitly list columns to keep
+non_numeric_cols = ['cpd_id', 'Library']
+experiment_non_numeric, stb_non_numeric = None, None  # Initialize
+
 if experiment_data is not None:
     experiment_non_numeric = experiment_data[non_numeric_cols]
     experiment_numeric = experiment_data.select_dtypes(include=[np.number])
@@ -367,11 +467,17 @@ if stb_numeric is not None:
 
 
 # Create cpd_id Mapping Dictionary ---
-if experiment_data is not None and 'cpd_id' in experiment_data.columns:
-    experiment_cpd_id_map = dict(enumerate(experiment_data['cpd_id']))  # Store index -> cpd_id mapping
+if experiment_data is not None and 'cpd_id' in experiment_data.columns and 'Library' in experiment_data.columns:
+    experiment_mappings = experiment_data[['cpd_id', 'Library']].to_dict(orient="index")  # Store index -> {'cpd_id': value, 'Library': value}
 else:
-    experiment_cpd_id_map = None  # Handle missing case gracefully
-    logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
+    experiment_mappings = None
+    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from experiment data!")
+
+if stb_data is not None and 'cpd_id' in stb_data.columns and 'Library' in stb_data.columns:
+    stb_mappings = stb_data[['cpd_id', 'Library']].to_dict(orient="index")
+else:
+    stb_mappings = None
+    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from STB data!")
 
 
 # Store a direct mapping from the original indices to cpd_id
@@ -611,60 +717,27 @@ datasets = {
     "stb": stb_numeric_imputed
 }
 
+
 # Define the pattern for columns to drop
-filter_pattern = 'Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|Child|Paren|Location_[X,Y,Z]|ZernikePhase|Euler|Plate|Well|Field|Center_Z|Center_X|Center_Y|no_|fn_'
-
-for dataset_name, dataset in datasets.items():
-    if dataset is not None:
-        logger.info(f"Processing {dataset_name} dataset...")
-        logger.info(f"Before filtering & aggregation: {dataset.shape}")
-
-        # Ensure `cpd_id` and `Library` exist before filtering
-        required_cols = ['cpd_id', 'Library']
-        if not all(col in dataset.columns for col in required_cols):
-            logger.error(f"Missing required columns in {dataset_name}! Available columns: {list(dataset.columns)}")
-            sys.exit(1)
-
-        # Preserve non-numeric columns before dropping unnecessary ones
-        dataset_non_numeric = dataset[required_cols]  
-        
-        # Identify columns to drop (if they exist)
-        filter_cols = dataset.columns.str.contains(filter_pattern, regex=True)
-        columns_to_drop = dataset.columns[filter_cols]
-
-        if len(columns_to_drop) > 0:
-            logger.info(f"Dropping {len(columns_to_drop)} unnecessary columns: {list(columns_to_drop)}")
-            dataset_numeric = dataset.drop(columns=columns_to_drop, errors='ignore')  # Drop only if they exist
-        else:
-            logger.info("No unnecessary columns found for removal.")
-            dataset_numeric = dataset.copy()  # If nothing to drop, retain all
-
-        # Ensure only numeric columns are aggregated
-        numeric_cols = dataset_numeric.select_dtypes(include=[np.number]).columns
-
-        if len(numeric_cols) == 0:
-            logger.error(f"No numeric columns found in {dataset_name} after filtering!")
-            sys.exit(1)
-
-        # Perform safe aggregation: group only numeric features, then merge back non-numeric columns
-        aggregated_data = dataset_numeric.groupby(required_cols)[numeric_cols].mean().reset_index()
-
-        # Merge back non-numeric columns to ensure `cpd_id` and `Library` are retained
-        aggregated_data = dataset_non_numeric.merge(aggregated_data, on=required_cols, how='right')
-
-        # Assign back the processed dataset
-        datasets[dataset_name] = aggregated_data
-
-        # Log after aggregation
-        logger.info(f"After filtering & aggregation: {aggregated_data.shape}")
-    else:
-        logger.warning(f"{dataset_name} dataset is None, skipping aggregation.")
+filter_pattern = re.compile(
+    r"Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
+    r"Child|Paren|Location_[X,Y,Z]|ZernikePhase|Euler|Plate|Well|Field|"
+    r"Center_Z|Center_X|Center_Y|no_|fn_"
+)
 
 # Reassign the updated datasets
 experiment_numeric_imputed = datasets["experiment"]
 stb_numeric_imputed = datasets["stb"]
 
 
+
+# Apply grouping and filtering to both datasets
+experiment_numeric_imputed = group_and_filter_data(experiment_numeric_imputed, experiment_mappings)
+stb_numeric_imputed = group_and_filter_data(stb_numeric_imputed, stb_mappings)
+
+# Log results
+logger.info("Grouped and filtered experiment data shape: {}".format(experiment_numeric_imputed.shape if experiment_numeric_imputed is not None else "None"))
+logger.info("Grouped and filtered STB data shape: {}".format(stb_numeric_imputed.shape if stb_numeric_imputed is not None else "None"))
 
 
 #######################################################
@@ -682,8 +755,14 @@ else:
 
 logger.info(f"Dataset Mapping: {dataset_mapping}")
 
+# Remove non-numeric columns ('cpd_id', 'Library') before passing to CLIPn
+non_numeric_cols = ["cpd_id", "Library"]
+
 # Add datasets dynamically if they exist
 if experiment_numeric_imputed is not None and not experiment_numeric_imputed.empty:
+    # remove non numeric data AGAIN
+    experiment_numeric_imputed = experiment_numeric_imputed.drop(columns=[col for col in non_numeric_cols if col in experiment_numeric_imputed], errors="ignore")
+
     exp_index = dataset_encoder.transform(["experiment_assay_combined"])[0]
     X[exp_index] = experiment_numeric_imputed.values
     y[exp_index] = experiment_labels
@@ -693,6 +772,8 @@ else:
     logger.warning(" No valid experiment data for CLIPn.")
 
 if stb_numeric_imputed is not None and not stb_numeric_imputed.empty:
+    stb_numeric_imputed = stb_numeric_imputed.drop(columns=[col for col in non_numeric_cols if col in stb_numeric_imputed], errors="ignore")
+
     stb_index = dataset_encoder.transform(["STB_combined"])[0]
     X[stb_index] = stb_numeric_imputed.values
     y[stb_index] = stb_labels
@@ -864,19 +945,10 @@ logger.info("Index and label mappings saved.")
 # Convert latent representations to DataFrame (only if available)
 experiment_latent_df, stb_latent_df = None, None
 
-if 0 in Z:  # Check if experiment data exists in Z
-    experiment_latent_df = pd.DataFrame(Z[0])
-    if experiment_cpd_id_map is not None:
-        experiment_latent_df.index = [experiment_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(experiment_latent_df))]
-    else:
-        logger.warning("Warning: experiment_cpd_id_map is None, using default index.")
 
-if 1 in Z:  # Check if STB data exists in Z
-    stb_latent_df = pd.DataFrame(Z[1])
-    if stb_cpd_id_map is not None:
-        stb_latent_df.index = [stb_cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(stb_latent_df))]
-    else:
-        logger.warning("Warning: stb_cpd_id_map is None, using default index.")
+# call function
+experiment_latent_df = map_latent_representations(Z, experiment_cpd_id_map, 0)
+stb_latent_df = map_latent_representations(Z, stb_cpd_id_map, 1)
 
 
 # Log the latent representations before UMAP
