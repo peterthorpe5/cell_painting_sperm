@@ -1155,6 +1155,10 @@ summary_df = pd.DataFrame({
 })
 
 
+# Ensure that the index and columns of dist_df are compound names
+dist_df.index = latent_df.index  # Assign compound names as row labels
+dist_df.columns = latent_df.index  # Assign compound names as column labels
+
 
 # Save summary file
 summary_file = os.path.join(output_folder, "compound_similarity_summary.csv")
@@ -1165,11 +1169,17 @@ logger.info(f"Compound similarity summary saved to '{summary_file}'.")
 ###########
 # Generate a clustered heatmap
 plt.figure(figsize=(12, 10))
-sns.clustermap(dist_df, cmap="viridis", method="ward", figsize=(12, 10))
+sns.clustermap(dist_df, cmap="viridis", method="ward", figsize=(12, 10),
+                xticklabels=True,  # Show compound names on x-axis
+                yticklabels=True)   # Show compound names on y-axis
+# Rotate x-axis labels for better readability
+plt.setp(g.ax_heatmap.get_xticklabels(), rotation=90)
+plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0)
+
 plt.title("Pairwise Distance Heatmap of Compounds")
 
 heatmap_file = os.path.join(output_folder, "compound_distance_heatmap.pdf")
-plt.savefig(heatmap_file)
+plt.savefig(heatmap_file, dpi=1200, bbox_inches="tight")
 plt.close()
 logger.info(f"Pairwise distance heatmap saved to '{heatmap_file}'.")
 
