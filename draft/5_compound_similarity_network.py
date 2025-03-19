@@ -150,6 +150,16 @@ logging.info(f"Loading distance matrix from {args.input}")
 logging.info("... this takes a long time ... go and have a beer")
 dist_df = pd.read_csv(args.input, index_col=0)
 
+
+
+# SAFEGUARD: Ensure data is aggregated before processing
+if "cpd_id" in dist_df.columns and "Library" in dist_df.columns:
+    logging.info("Data appears to be at the cell level. Aggregating by compound...")
+    dist_df = dist_df.groupby(["cpd_id", "Library"]).mean().reset_index()
+    logging.info(f"Data aggregated. New shape: {dist_df.shape}")
+else:
+    logging.info("Data is already at the compound level. Proceeding with analysis.")
+
 compound_prefix = args.compound_prefix
 distance_threshold = args.similarity
 disable_prefix_filtering = args.no_prefix_filtering

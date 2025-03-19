@@ -599,23 +599,8 @@ dataset_mapping = dict(zip(dataset_indices, dataset_names))
 logger.info(f"Dataset Mapping: {dataset_mapping}")
 
 
-
-logger.info("group by cpd_id and Library")
-# Ensure data is aggregated at the compound level
-if experiment_numeric_imputed is not None:
-    logger.info(f"Before aggregation: {experiment_numeric_imputed.shape}")
-    experiment_numeric_imputed = experiment_numeric_imputed.groupby(['cpd_id', 'Library']).mean().reset_index()
-    logger.info(f"After aggregation: {experiment_numeric_imputed.shape}")
-
-if stb_numeric_imputed is not None:
-    logger.info(f"Before aggregation: {stb_numeric_imputed.shape}")
-    stb_numeric_imputed = stb_numeric_imputed.groupby(['cpd_id', 'Library']).mean().reset_index()
-    logger.info(f"After aggregation: {stb_numeric_imputed.shape}")
-
-
 #######################################################
 # Initialize empty dictionaries for CLIPn input
-# 
 X, y, label_mappings = {}, {}, {}
 
 # Ensure dataset_encoder exists before using transform
