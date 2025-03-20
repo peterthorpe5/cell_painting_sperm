@@ -193,18 +193,14 @@ def optimize_clipn(n_trials=20):
     logger.info(f"Best hyperparameters found: {best_params} with final loss {best_loss:.6f}")
     return best_params
 
-
-def group_and_filter_data(df, mappings):
+def group_and_filter_data(df):
     """
-    Restores non-numeric columns, groups by `cpd_id` and `Library`, 
-    and drops unwanted columns based on `filter_pattern`.
+    Groups data by `cpd_id` and `Library`, then drops unwanted columns.
 
     Parameters
     ----------
     df : pd.DataFrame
         The imputed dataset to process.
-    mappings : dict
-        A dictionary mapping row indices to `{'cpd_id': value, 'Library': value}`.
 
     Returns
     -------
@@ -214,18 +210,18 @@ def group_and_filter_data(df, mappings):
     if df is None or df.empty:
         return df  # Return as-is if empty or None
 
-    # Restore 'cpd_id' and 'Library' after imputation
-    df = restore_non_numeric(df, mappings)
+    # Ensure 'cpd_id' and 'Library' are in the MultiIndex
+    if not isinstance(df.index, pd.MultiIndex):
+        raise ValueError("Expected a MultiIndex DataFrame with ['cpd_id', 'Library', 'cpd_type'].")
 
     # Group by `cpd_id` and `Library` (taking the mean for numeric values)
-    df = df.groupby(["cpd_id", "Library"], as_index=False).mean()
+    df = df.groupby(["cpd_id", "Library"], as_index=True).mean()
 
     # Drop columns matching `filter_pattern`
     columns_to_drop = [col for col in df.columns if filter_pattern.search(col)]
     df = df.drop(columns=columns_to_drop, errors="ignore")
 
     return df
-
 
 
 
@@ -1340,8 +1336,8 @@ stb_data_imputed = datasets["stb"]
 
 
 # Apply grouping and filtering to both datasets
-experiment_data_imputed = group_and_filter_data(experiment_data_imputed, experiment_mappings)
-stb_data_imputed = group_and_filter_data(stb_data_imputed, stb_mappings)
+experiment_data_imputed = group_and_filter_data(experiment_data_imputed)
+stb_data_imputed = group_and_filter_data(stb_data_imputed)
 
 # Log results
 logger.info("Grouped and filtered experiment data shape: {}".format(experiment_data_imputed.shape if experiment_data_imputed is not None else "None"))
