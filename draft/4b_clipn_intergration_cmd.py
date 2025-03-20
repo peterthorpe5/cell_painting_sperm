@@ -1088,6 +1088,28 @@ if stb_data is not None:
 # **Drop columns that are entirely NaN in either dataset BEFORE imputation**
 # Drop columns that are entirely NaN in either dataset BEFORE imputation
 
+# Debug: Print actual column names before calling dropna
+logger.info(f"Columns in experiment_data before dropping NaNs: {list(experiment_data.columns)}")
+logger.info(f"Columns in STB_data before dropping NaNs: {list(stb_data.columns)}")
+
+# Check if protected columns exist before applying dropna
+missing_experiment_cols = [col for col in ["cpd_id", "cpd_type", "Library"] if col not in experiment_data.columns]
+missing_stb_cols = [col for col in ["cpd_id", "cpd_type", "Library"] if col not in stb_data.columns]
+
+if missing_experiment_cols:
+    logger.warning(f"Missing columns in experiment_data: {missing_experiment_cols}")
+
+if missing_stb_cols:
+    logger.warning(f"Missing columns in stb_data: {missing_stb_cols}")
+
+# Only apply dropna if all required columns exist
+if not missing_experiment_cols:
+    experiment_data = experiment_data.dropna(subset=["cpd_id", "cpd_type", "Library"], how="any")
+
+if not missing_stb_cols:
+    stb_data = stb_data.dropna(subset=["cpd_id", "cpd_type", "Library"], how="any")
+
+
 protected_columns = ["cpd_id", "cpd_type", "Library"]
 
 if experiment_data is not None:
