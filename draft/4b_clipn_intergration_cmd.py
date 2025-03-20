@@ -1200,6 +1200,34 @@ columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {len(columns_lost)}")
 logger.info(f"Lost columns: {columns_lost}")  # Add this line
 
+# Ensure original data exists
+if experiment_data is not None and stb_data is not None:
+
+    # Restore 'cpd_id', 'Library', and 'cpd_type' before setting MultiIndex
+    experiment_data_imputed = experiment_data_imputed.copy()
+    stb_data_imputed = stb_data_imputed.copy()
+
+    for col in ["cpd_id", "Library", "cpd_type"]:
+        if col in experiment_data.index.names:
+            experiment_data_imputed[col] = experiment_data.index.get_level_values(col)
+        elif col in experiment_data.columns:
+            experiment_data_imputed[col] = experiment_data[col]
+        else:
+            logger.warning(f"Warning: {col} not found in experiment_data!")
+
+        if col in stb_data.index.names:
+            stb_data_imputed[col] = stb_data.index.get_level_values(col)
+        elif col in stb_data.columns:
+            stb_data_imputed[col] = stb_data[col]
+        else:
+            logger.warning(f"Warning: {col} not found in stb_data!")
+
+    logger.info("Restored 'cpd_id', 'Library', and 'cpd_type' to imputed datasets.")
+
+# Now check if columns exist before setting MultiIndex
+missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(ex
+
+
 
 #   Check if experiment_data_imputed is None before accessing .shape
 if experiment_data_imputed is not None:
