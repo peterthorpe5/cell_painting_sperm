@@ -1217,11 +1217,35 @@ logger.info(f"Common numerical columns BEFORE imputation: {len(common_columns_be
 
 
 # Backup the full MultiIndex as a DataFrame
+
+# ✅ Ensure full MultiIndex is backed up as a proper DataFrame
 if experiment_data is not None:
-    experiment_index_backup = experiment_data.index.to_frame().reset_index(drop=True)  # Force reset index
+    experiment_index_backup = experiment_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
+    experiment_index_backup.columns = ["cpd_id", "Library", "cpd_type"]  # Explicitly name columns
 
 if stb_data is not None:
-    stb_index_backup = stb_data.index.to_frame().reset_index(drop=True)  # Force reset index
+    stb_index_backup = stb_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
+    stb_index_backup.columns = ["cpd_id", "Library", "cpd_type"]  # Explicitly name columns
+
+# ✅ Confirm backup is correct
+logger.info(f"Backed up index before imputation. Experiment index shape: {experiment_index_backup.shape}")
+logger.info(f"Backed up index before imputation. STB index shape: {stb_index_backup.shape}")
+logger.info(f"Experiment index backup preview:\n{experiment_index_backup.head()}")
+logger.info(f"STB index backup preview:\n{stb_index_backup.head()}")
+
+# 🚨 Check if backup contains the required columns
+missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(experiment_index_backup.columns)
+if missing_exp_cols:
+    logger.error(f"Missing columns in index_backup for experiment: {missing_exp_cols}")
+else:
+    logger.info(" experiment_index_backup contains all required columns.")
+
+missing_stb_cols = {"cpd_id", "Library", "cpd_type"} - set(stb_index_backup.columns)
+if missing_stb_cols:
+    logger.error(f" Missing columns in index_backup for stb: {missing_stb_cols}")
+else:
+    logger.info(" stb_index_backup contains all required columns.")
+
 
 logger.info(f"Backed up index before imputation. Experiment index shape: {experiment_index_backup.shape if experiment_index_backup is not None else 'None'}")
 logger.info(f"Backed up index before imputation. STB index shape: {stb_index_backup.shape if stb_index_backup is not None else 'None'}")
