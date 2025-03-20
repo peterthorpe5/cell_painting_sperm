@@ -1142,11 +1142,6 @@ experiment_data_imputed, stb_data_imputed, stb_labels, \
                                            knn_neighbors=args.knn_neighbors)
 
 
-# Debugging: Confirm label assignment
-logger.info(f"STB label mapping: {stb_label_mapping}")
-logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
-logger.info(f"STB labels assigned: {len(stb_labels)}")
-
 # Log the first few rows after imputation
 if experiment_data_imputed is not None:
     logger.info("First few rows of experiment_data_imputed:\n" + experiment_data_imputed.head().to_string())
