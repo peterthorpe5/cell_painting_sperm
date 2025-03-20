@@ -1214,6 +1214,22 @@ else:
     logger.info("STB data is None after imputation.")
 
 
+# Check if MultiIndex still exists after imputation
+logger.info(f"Experiment MultiIndex after imputation: {experiment_data_imputed.index.names}")
+logger.info(f"STB MultiIndex after imputation: {stb_data_imputed.index.names}")
+
+# Check if cpd_id and Library are present in columns (if MultiIndex was reset)
+missing_cols_experiment = {"cpd_id", "Library"} - set(experiment_data_imputed.columns)
+missing_cols_stb = {"cpd_id", "Library"} - set(stb_data_imputed.columns)
+
+if missing_cols_experiment:
+    logger.warning(f"Experiment data is missing: {missing_cols_experiment}")
+
+if missing_cols_stb:
+    logger.warning(f"STB data is missing: {missing_cols_stb}")
+
+
+
 # If imputation removed MultiIndex, restore it!
 
 # Ensure MultiIndex is restored
