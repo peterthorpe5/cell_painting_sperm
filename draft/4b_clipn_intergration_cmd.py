@@ -890,6 +890,56 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
 
     return umap_df
 
+# Ensure index backup is not empty and restore MultiIndex properly
+def restore_multiindex(imputed_df, index_backup, dataset_name):
+    """
+    Restores the MultiIndex after imputation by aligning and joining with the backup.
+
+    Parameters
+    ----------
+    imputed_df : pd.DataFrame
+        The imputed dataset where the MultiIndex needs to be restored.
+    index_backup : pd.DataFrame
+        Backup of the original MultiIndex (must contain 'cpd_id', 'Library', 'cpd_type').
+    dataset_name : str
+        Name of the dataset for logging (e.g., "experiment", "stb").
+
+    Returns
+    -------
+    pd.DataFrame
+        The dataset with the MultiIndex properly restored.
+    """
+    if index_backup is not None and imputed_df is not None:
+        # Ensure index_backup is a DataFrame with the necessary columns
+        if isinstance(index_backup, pd.MultiIndex):
+            index_backup = index_backup.to_frame(index=False)
+
+        # Ensure the backup contains the required columns
+        required_cols = {"cpd_id", "Library", "cpd_type"}
+        missing_cols = required_cols - set(index_backup.columns)
+        if missing_cols:
+            logger.error(f"Missing columns in index_backup for {dataset_name}: {missing_cols}")
+            return imputed_df  # Return unchanged if we can't restore properly
+
+        # Ensure alignment: Trim to the number of available rows
+        common_rows = min(len(imputed_df), len(index_backup))
+        if common_rows == 0:
+            logger.warning(f"⚠️ No overlapping rows found between imputation and original index for {dataset_name}_data_imputed!")
+        else:
+            # Trim both DataFrames to ensure correct row count
+            index_backup = index_backup.iloc[:common_rows].reset_index(drop=True)
+            imputed_df = imputed_df.reset_index(drop=True)
+
+            # Join safely, ensuring all three index columns are restored
+            imputed_df = index_backup.join(imputed_df)
+            imputed_df = imputed_df.set_index(["cpd_id", "Library", "cpd_type"])
+
+            logger.info(f"Successfully restored MultiIndex for {dataset_name}_data_imputed. Final shape: {imputed_df.shape}")
+
+        return imputed_df
+    else:
+        logger.error(f"Failed to restore MultiIndex for {dataset_name}_data_imputed! Check backup index.")
+        return imputed_df  # Return unchanged if restoration fails
 
 
 
@@ -1166,9 +1216,13 @@ experiment_data, stb_data, common_columns_before = process_common_columns(experi
 logger.info(f"Common numerical columns BEFORE imputation: {len(common_columns_before)}")
 
 
-# Backup the original index before imputation
-experiment_index_backup = experiment_data.index.to_frame() if experiment_data is not None else None
-stb_index_backup = stb_data.index.to_frame() if stb_data is not None else None
+# Backup the full MultiIndex as a DataFrame
+if experiment_data is not None:
+    experiment_index_backup = experiment_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
+
+if stb_data is not None:
+    stb_index_backup = stb_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
+
 
 logger.info(f"Backed up index before imputation. Experiment index shape: {experiment_index_backup.shape if experiment_index_backup is not None else 'None'}")
 logger.info(f"Backed up index before imputation. STB index shape: {stb_index_backup.shape if stb_index_backup is not None else 'None'}")
@@ -1185,39 +1239,11 @@ experiment_data_imputed, stb_data_imputed, stb_labels, \
 
 # Restore the original MultiIndex after imputation
 # Ensure index backup is not empty
-if experiment_index_backup is not None and experiment_data_imputed is not None:
-    # Align index: Keep only rows that exist in the imputed dataset
-    common_rows = experiment_data_imputed.index.intersection(experiment_index_backup.index)
-    
-    if common_rows.empty:
-        logger.warning("Warning: No overlapping rows found between imputation and original index for experiment_data_imputed!")
-    else:
-        experiment_index_backup = experiment_index_backup.loc[common_rows]
 
-        # Join safely, keeping only matching rows
-        experiment_data_imputed = experiment_index_backup.join(experiment_data_imputed, how="inner")
-        experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-        
-        logger.info(f" Successfully restored MultiIndex for experiment_data_imputed. Final shape: {experiment_data_imputed.shape}")
-else:
-    logger.error(" Failed to restore MultiIndex for experiment_data_imputed! Check backup index.")
+# Restore MultiIndex for both datasets
+experiment_data_imputed = restore_multiindex(experiment_data_imputed, experiment_index_backup, "experiment")
+stb_data_imputed = restore_multiindex(stb_data_imputed, stb_index_backup, "stb")
 
-if stb_index_backup is not None and stb_data_imputed is not None:
-    # Align index: Keep only rows that exist in the imputed dataset
-    common_rows = stb_data_imputed.index.intersection(stb_index_backup.index)
-
-    if common_rows.empty:
-        logger.warning("Warning: No overlapping rows found between imputation and original index for stb_data_imputed!")
-    else:
-        stb_index_backup = stb_index_backup.loc[common_rows]
-
-        # Join safely, keeping only matching rows
-        stb_data_imputed = stb_index_backup.join(stb_data_imputed, how="inner")
-        stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-        
-        logger.info(f" Successfully restored MultiIndex for stb_data_imputed. Final shape: {stb_data_imputed.shape}")
-else:
-    logger.error(" Failed to restore MultiIndex for stb_data_imputed! Check backup index.")
 
 
 
