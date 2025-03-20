@@ -1214,21 +1214,20 @@ else:
     logger.info("STB data is None after imputation.")
 
 
-# 🚨 If imputation removed MultiIndex, restore it!
-if {"cpd_id", "Library", "cpd_type"}.issubset(experiment_data.columns):
-    experiment_data_imputed = restore_non_numeric(experiment_data_imputed, experiment_data)
+# If imputation removed MultiIndex, restore it!
+
+# Ensure MultiIndex is restored
+if not isinstance(experiment_data_imputed.index, pd.MultiIndex):
     experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-    logger.info("Restored MultiIndex after imputation for experiment_data_imputed.")
-else:
-    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
+    logger.info("Restored MultiIndex for experiment_data_imputed.")
 
-if {"cpd_id", "Library", "cpd_type"}.issubset(stb_data.columns):
-    stb_data_imputed = restore_non_numeric(stb_data_imputed, stb_data)
+if not isinstance(stb_data_imputed.index, pd.MultiIndex):
     stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-    logger.info("Restored MultiIndex after imputation for stb_data_imputed.")
-else:
-    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
+    logger.info("Restored MultiIndex for stb_data_imputed.")
 
+# Debugging AFTER restoring MultiIndex
+logger.info(f"After restoring - Experiment index levels: {experiment_data_imputed.index.names}")
+logger.info(f"After restoring - STB index levels: {stb_data_imputed.index.names}")
 
 # Create dataset labels
 dataset_labels = {0: "experiment Assay", 1: "STB"}
