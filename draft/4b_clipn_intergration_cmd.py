@@ -622,15 +622,17 @@ def encode_cpd_data(dataframes, encode=False):
 
             # Encode 'cpd_id' and 'cpd_type' if requested
             if encode:
-                label_enc_cpd_id = LabelEncoder()
-                label_enc_cpd_type = LabelEncoder()
+                df = df.copy()  # Ensure we don't modify the original dataframe
+                df["cpd_id_encoded"] = LabelEncoder().fit_transform(df.index.get_level_values("cpd_id"))
+                df["cpd_type_encoded"] = LabelEncoder().fit_transform(df.index.get_level_values("cpd_type"))
 
-                df["cpd_id_encoded"] = label_enc_cpd_id.fit_transform(df.index.get_level_values("cpd_id"))
-                df["cpd_type_encoded"] = label_enc_cpd_type.fit_transform(df.index.get_level_values("cpd_type"))
+                # Restore MultiIndex after encoding
+                df = df.reset_index().set_index(["cpd_id", "Library", "cpd_type"])
 
             processed_dfs[name] = df
 
     return processed_dfs
+
 
 
 def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experiment_label_mapping,
@@ -1212,6 +1214,22 @@ else:
     logger.info("STB data is None after imputation.")
 
 
+# 🚨 If imputation removed MultiIndex, restore it!
+if {"cpd_id", "Library", "cpd_type"}.issubset(experiment_data.columns):
+    experiment_data_imputed = restore_non_numeric(experiment_data_imputed, experiment_data)
+    experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+    logger.info("Restored MultiIndex after imputation for experiment_data_imputed.")
+else:
+    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
+
+if {"cpd_id", "Library", "cpd_type"}.issubset(stb_data.columns):
+    stb_data_imputed = restore_non_numeric(stb_data_imputed, stb_data)
+    stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+    logger.info("Restored MultiIndex after imputation for stb_data_imputed.")
+else:
+    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
+
+
 # Create dataset labels
 dataset_labels = {0: "experiment Assay", 1: "STB"}
 
@@ -1255,6 +1273,10 @@ stb_data = processed_data.get("stb")
 # Extract encoded datasets if needed
 experiment_data_encoded = encoded_data.get("experiment")
 stb_data_encoded = encoded_data.get("stb")
+
+#  Ensure MultiIndex is not lost
+logger.info(f"After encoding - Experiment index levels: {experiment_data.index.names}")
+logger.info(f"After encoding - STB index levels: {stb_data.index.names}")
 
 # Debugging logs
 logger.info(f"Experiment DataFrame after MultiIndexing:\n{experiment_data.head()}")
@@ -1333,6 +1355,24 @@ filter_pattern = re.compile(
 # Reassign the updated datasets
 experiment_data_imputed = datasets["experiment"]
 stb_data_imputed = datasets["stb"]
+
+
+
+# 🚨 If imputation removed MultiIndex, restore it!
+if {"cpd_id", "Library", "cpd_type"}.issubset(experiment_data.columns):
+    experiment_data_imputed = restore_non_numeric(experiment_data_imputed, experiment_data)
+    experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+    logger.info("Restored MultiIndex after imputation for experiment_data_imputed.")
+else:
+    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
+
+if {"cpd_id", "Library", "cpd_type"}.issubset(stb_data.columns):
+    stb_data_imputed = restore_non_numeric(stb_data_imputed, stb_data)
+    stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+    logger.info("Restored MultiIndex after imputation for stb_data_imputed.")
+else:
+    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
+
 
 
 # Apply grouping and filtering to both datasets
