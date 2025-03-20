@@ -811,14 +811,8 @@ import os
 import pandas as pd
 from sklearn.cluster import KMeans
 
-def generate_umap(
-    combined_latent_df, 
-    output_folder, 
-    umap_plot_file, 
-    args, 
-    n_neighbors=15, 
-    num_clusters=10, 
-    add_labels=False
+def generate_umap(combined_latent_df, output_folder, umap_plot_file, args, 
+                  n_neighbors=15, num_clusters=10, add_labels=False
 ):
     """
     Generates UMAP embeddings, performs KMeans clustering, and saves the results.
@@ -1058,20 +1052,6 @@ if stb_data is not None:
     logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
 
 
-# Ensure 'Library' column exists and assign based on dataset origin
-if experiment_data is not None:
-    if "Library" not in experiment_data.columns:
-        logger.warning("'Library' column is missing in experiment_data. Assigning 'Experiment'.")
-        experiment_data["Library"] = "Experiment"
-
-if stb_data is not None:
-    if "Library" not in stb_data.columns:
-        logger.warning("'Library' column is missing in stb_data. Assigning 'STB'.")
-        stb_data["Library"] = "STB"
-
-
-
-
 # Multiindex
 # Ensure 'cpd_id', 'Library', and 'cpd_type' exist before setting as index
 if {"cpd_id", "Library", "cpd_type"}.issubset(experiment_data.columns):
@@ -1081,6 +1061,23 @@ if {"cpd_id", "Library", "cpd_type"}.issubset(stb_data.columns):
     stb_data = stb_data.set_index(["cpd_id", "Library", "cpd_type"])
 
 
+
+    # Check if MultiIndex contains these columns
+if isinstance(experiment_data.index, pd.MultiIndex):
+    index_levels = experiment_data.index.names  # Get MultiIndex level names
+else:
+    index_levels = []
+
+if isinstance(stb_data.index, pd.MultiIndex):
+    stb_index_levels = stb_data.index.names  # Get MultiIndex level names
+else:
+    stb_index_levels = []
+
+logger.info(f"Experiment MultiIndex levels: {index_levels}")
+logger.info(f"STB MultiIndex levels: {stb_index_levels}")
+
+
+
 # Log the first few rows after extracting numerical features
 if experiment_data is not None:
     logger.info("First few rows of experiment_data:\n" + experiment_data.head().to_string())
@@ -1088,24 +1085,20 @@ if stb_data is not None:
     logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
 
 
-# Ensure 'Library' column exists and assign based on dataset origin
-if experiment_data is not None and "Library" not in experiment_data.columns:
-    logger.warning("'Library' column is missing in experiment_data. Assigning 'Experiment'.")
-    experiment_data["Library"] = "Experiment"
-
-if stb_data is not None and "Library" not in stb_data.columns:
-    logger.warning("'Library' column is missing in stb_data. Assigning 'STB'.")
-    stb_data["Library"] = "STB"
-
-
-
 # **Drop columns that are entirely NaN in either dataset BEFORE imputation**
 # Drop columns that are entirely NaN in either dataset BEFORE imputation
+
+protected_columns = ["cpd_id", "cpd_type", "Library"]
+
 if experiment_data is not None:
-    experiment_data = experiment_data.dropna(axis=1, how='all')
+    experiment_data = experiment_data.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    experiment_data = experiment_data.dropna(subset=protected_columns, how="any")  # Ensure IDs are not lost
 
 if stb_data is not None:
-    stb_data = stb_data.dropna(axis=1, how='all')
+    stb_data = stb_data.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    stb_data = stb_data.dropna(subset=protected_columns, how="any")  # Ensure IDs are not lost
+
+
 
 # remove unexpected empty rows too (remove the NaNs for these)
 if experiment_data is not None:
