@@ -1175,6 +1175,47 @@ experiment_data_imputed, stb_data_imputed, stb_labels, \
                                            knn_neighbors=args.knn_neighbors)
 
 
+
+# Step 1: Ensure MultiIndex restoration BEFORE checking for missing columns
+for df_name, original_df, imputed_df in [("experiment", experiment_data, experiment_data_imputed),
+                                         ("stb", stb_data, stb_data_imputed)]:
+    if original_df is not None and imputed_df is not None:
+        # Convert to DataFrame if needed
+        imputed_df = imputed_df.copy()
+
+        # Restore 'cpd_id', 'Library', and 'cpd_type' from original index
+        for col in ["cpd_id", "Library", "cpd_type"]:
+            if col in original_df.index.names:  
+                imputed_df[col] = original_df.index.get_level_values(col)
+            elif col in original_df.columns:
+                imputed_df[col] = original_df[col]
+            else:
+                logger.warning(f"{col} not found in {df_name} dataset!")
+
+        # Set MultiIndex
+        try:
+            imputed_df = imputed_df.set_index(["cpd_id", "Library", "cpd_type"])
+            logger.info(f" Successfully restored MultiIndex for {df_name}_data_imputed.")
+        except KeyError as e:
+            logger.error(f"Failed to set MultiIndex for {df_name}_data_imputed. Missing columns: {e}")
+            raise ValueError(f"Critical columns missing in {df_name}_data_imputed!")
+
+        # Update the imputed dataset
+        if df_name == "experiment":
+            experiment_data_imputed = imputed_df
+        else:
+            stb_data_imputed = imputed_df
+
+# Step 2: Now it's safe to check for missing columns
+missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(experiment_data_imputed.columns)
+missing_stb_cols = {"cpd_id", "Library", "cpd_type"} - set(stb_data_imputed.columns)
+
+if missing_exp_cols:
+    raise ValueError(f"Missing restored columns in experiment_data_imputed: {missing_exp_cols}")
+if missing_stb_cols:
+    raise ValueError(f"Missing restored columns in stb_data_imputed: {missing_stb_cols}")
+
+
 # Log the first few rows after imputation
 if experiment_data_imputed is not None:
     logger.info("First few rows of experiment_data_imputed:\n" + experiment_data_imputed.head().to_string())
@@ -1416,7 +1457,7 @@ stb_data_imputed = datasets["stb"]
 
 
 
-# 🚨 If imputation removed MultiIndex, restore it!
+# If imputation removed MultiIndex, restore it!
 if {"cpd_id", "Library", "cpd_type"}.issubset(experiment_data.columns):
     experiment_data_imputed = restore_non_numeric(experiment_data_imputed, experiment_data)
     experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
