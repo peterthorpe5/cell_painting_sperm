@@ -1148,9 +1148,7 @@ if experiment_data_imputed is not None:
 if stb_data_imputed is not None:
     logger.info("First few rows of stb_data_imputed:\n" + stb_data_imputed.head().to_string())
 
-columns_lost = set(common_columns_before) - set(common_columns_after)
-logger.info(f"Columns lost during imputation: {len(columns_lost)}")
-logger.info(f"Lost columns: {columns_lost}")  # Add this line
+
 
 
 # Step 3: Identify common columns AFTER imputation
@@ -1163,6 +1161,10 @@ experiment_data_imputed, stb_data_imputed, \
 logger.info(f"Common numerical columns AFTER imputation: {len(common_columns_after)}")
 columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {len(columns_lost)}")
+
+columns_lost = set(common_columns_before) - set(common_columns_after)
+logger.info(f"Columns lost during imputation: {len(columns_lost)}")
+logger.info(f"Lost columns: {columns_lost}")  # Add this line
 
 
 #   Check if experiment_data_imputed is None before accessing .shape
