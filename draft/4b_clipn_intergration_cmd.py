@@ -1336,8 +1336,26 @@ stb_data_imputed = datasets["stb"]
 
 
 # Apply grouping and filtering to both datasets
-logger.info("Before grouping: Experiment Data Index:", experiment_data_imputed.index.names)
-logger.info("Before grouping: STB Data Index:", stb_data_imputed.index.names)
+# Ensure 'cpd_id', 'Library', and 'cpd_type' exist before setting MultiIndex
+required_cols = {"cpd_id", "Library", "cpd_type"}
+
+if not required_cols.issubset(experiment_data_imputed.columns):
+    raise ValueError(f"Missing columns in experiment_data_imputed: {required_cols - set(experiment_data_imputed.columns)}")
+
+if not required_cols.issubset(stb_data_imputed.columns):
+    raise ValueError(f"Missing columns in stb_data_imputed: {required_cols - set(stb_data_imputed.columns)}")
+
+# Set MultiIndex
+experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+
+logger.info(f"After setting MultiIndex: Experiment Data Index: {experiment_data_imputed.index.names}")
+logger.info(f"After setting MultiIndex: STB Data Index: {stb_data_imputed.index.names}")
+
+logger.info(f"Before grouping: STB Data Index:", {stb_data_imputed.index.names})
+logger.info(f"Before grouping: Experiment Data Index:", _{experiment_data_imputed.index.names})
+
+
 
 experiment_data_imputed = group_and_filter_data(experiment_data_imputed)
 stb_data_imputed = group_and_filter_data(stb_data_imputed)
