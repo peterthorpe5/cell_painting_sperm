@@ -1200,6 +1200,7 @@ columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {len(columns_lost)}")
 logger.info(f"Lost columns: {columns_lost}")  # Add this line
 
+
 # Ensure original data exists
 if experiment_data is not None and stb_data is not None:
 
@@ -1225,7 +1226,21 @@ if experiment_data is not None and stb_data is not None:
     logger.info("Restored 'cpd_id', 'Library', and 'cpd_type' to imputed datasets.")
 
 # Now check if columns exist before setting MultiIndex
-missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(ex
+missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(experiment_data_imputed.columns)
+missing_stb_cols = {"cpd_id", "Library", "cpd_type"} - set(stb_data_imputed.columns)
+
+if missing_exp_cols:
+    raise ValueError(f"Missing restored columns in experiment_data_imputed: {missing_exp_cols}")
+
+if missing_stb_cols:
+    raise ValueError(f"Missing restored columns in stb_data_imputed: {missing_stb_cols}")
+
+# Now, we can safely set MultiIndex
+experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+
+logger.info(f"Successfully restored MultiIndex: {experiment_data_imputed.index.names}")
+logger.info(f"Successfully restored MultiIndex: {stb_data_imputed.index.names}")
 
 
 
