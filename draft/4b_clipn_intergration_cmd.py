@@ -805,11 +805,6 @@ def run_clipn(X, y, output_folder, args):
 
     return Z
 
-import umap
-import matplotlib.pyplot as plt
-import os
-import pandas as pd
-from sklearn.cluster import KMeans
 
 def generate_umap(combined_latent_df, output_folder, umap_plot_file, args, 
                   n_neighbors=15, num_clusters=10, add_labels=False
@@ -1050,6 +1045,17 @@ if experiment_data is not None:
     logger.info("First few rows of experiment_data:\n" + experiment_data.head().to_string())
 if stb_data is not None:
     logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
+
+
+
+# Ensure 'Library' column exists and assign based on dataset origin
+if "Library" not in experiment_data.columns:
+    logger.warning("'Library' column is missing in experiment_data. Assigning 'Experiment'.")
+    experiment_data["Library"] = "Experiment"
+
+if "Library" not in stb_data.columns:
+    logger.warning("'Library' column is missing in stb_data. Assigning 'STB'.")
+    stb_data["Library"] = "STB"
 
 
 # Multiindex
