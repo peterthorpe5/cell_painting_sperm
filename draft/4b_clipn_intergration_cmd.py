@@ -1336,6 +1336,9 @@ stb_data_imputed = datasets["stb"]
 
 
 # Apply grouping and filtering to both datasets
+logger.info("Before grouping: Experiment Data Index:", experiment_data_imputed.index.names)
+logger.info("Before grouping: STB Data Index:", stb_data_imputed.index.names)
+
 experiment_data_imputed = group_and_filter_data(experiment_data_imputed)
 stb_data_imputed = group_and_filter_data(stb_data_imputed)
 
