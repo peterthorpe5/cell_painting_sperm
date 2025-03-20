@@ -226,38 +226,8 @@ def group_and_filter_data(df, mappings):
 
     return df
 
-def map_latent_representations(Z, cpd_id_map, dataset_name):
-    """
-    Maps latent representation indices back to their original 'cpd_id'.
 
-    Parameters
-    ----------
-    Z : dict
-        Dictionary containing latent representations from CLIPn.
-    cpd_id_map : dict
-        Mapping of indices to original 'cpd_id'.
-    dataset_name : str
-        Name of the dataset being mapped (for logging).
 
-    Returns
-    -------
-    pd.DataFrame
-        Dataframe of latent representations indexed by 'cpd_id'.
-    """
-    if dataset_name in Z:
-        latent_df = pd.DataFrame(Z[dataset_name])
-
-        if cpd_id_map is not None:
-            if len(latent_df) == len(cpd_id_map):
-                latent_df.index = [cpd_id_map.get(i, f"Unknown_{i}") for i in range(len(latent_df))]
-            else:
-                logger.warning(f"Mismatch: {dataset_name} latent_df rows ({len(latent_df)}) != cpd_id map ({len(cpd_id_map)})")
-        else:
-            logger.warning(f"Warning: {dataset_name} cpd_id_map is None, using default index.")
-
-        return latent_df
-
-    return None
 
 def restore_cpd_id(imputed_df, cpd_id_map):
     """
@@ -378,6 +348,62 @@ def generate_similarity_summary(dist_df):
 
     return summary_df
 
+
+def plot_umap_colored_by_experiment(umap_df, output_file, color_map=None):
+    """
+    Generates a UMAP visualization colored by experiment vs. STB.
+
+    Parameters
+    ----------
+    umap_df : pd.DataFrame
+        DataFrame containing UMAP coordinates with a MultiIndex (`cpd_id`, `Library`).
+    output_file : str
+        Path to save the UMAP plot.
+    color_map : dict, optional
+        A dictionary mapping dataset types (e.g., "Experiment", "STB") to colors.
+        Default is {"Experiment": "red", "STB": "blue"}.
+
+    Returns
+    -------
+    None
+    """
+    try:
+        logger.info("Generating UMAP visualization highlighting Experiment vs. STB data.")
+
+        # Default color map if none provided
+        if color_map is None:
+            color_map = {"Experiment": "red", "STB": "blue"}
+
+        # Ensure 'Library' exists in MultiIndex
+        if "Library" not in umap_df.index.names:
+            logger.warning("Warning: 'Library' not found in MultiIndex! Attempting to use column instead.")
+            if "Library" in umap_df.columns:
+                umap_df = umap_df.set_index("Library")
+            else:
+                logger.error("Error: 'Library' column not found! Skipping UMAP experiment coloring.")
+                return
+
+        # Map colors based on 'Library'
+        dataset_labels = umap_df.index.get_level_values("Library")  # Extract library info
+        dataset_colors = [color_map.get(label, "gray") for label in dataset_labels]  # Assign colors
+
+        # Create scatter plot
+        plt.figure(figsize=(12, 8))
+        plt.scatter(umap_df["UMAP1"], umap_df["UMAP2"], s=5, alpha=0.7, c=dataset_colors)
+        plt.xlabel("UMAP 1")
+        plt.ylabel("UMAP 2")
+        plt.title("UMAP Visualization: Experiment (Red) vs. STB (Blue)")
+
+        # Save plot
+        plt.savefig(output_file, dpi=300)
+        plt.close()
+        logger.info(f"UMAP visualization (experiment vs. STB) saved as '{output_file}'.")
+
+    except Exception as e:
+        logger.error(f"Error generating UMAP experiment visualization: {e}. Continuing script execution.")
+
+
+
 def plot_distance_heatmap(dist_df, output_path):
     """
     Generate and save a heatmap of pairwise compound distances.
@@ -425,6 +451,462 @@ def plot_dendrogram(dist_df, output_path):
     plt.savefig(output_path)
     plt.close()
 
+
+def reconstruct_combined_latent_df(Z, experiment_data_imputed, stb_data_imputed):
+    """
+    Reconstructs a DataFrame of latent representations with MultiIndex.
+
+    Parameters
+    ----------
+    Z : dict
+        Dictionary containing CLIPn latent representations.
+
+    experiment_data_imputed : pd.DataFrame
+        Imputed experiment dataset with MultiIndex (cpd_id, Library, cpd_type).
+
+    stb_data_imputed : pd.DataFrame
+        Imputed STB dataset with MultiIndex (cpd_id, Library, cpd_type).
+
+    Returns
+    -------
+    pd.DataFrame
+        Combined latent representations indexed by (cpd_id, Library, cpd_type).
+    """
+
+    # Convert experiment latent representations
+    experiment_latent_df = pd.DataFrame(Z[0], index=experiment_data_imputed.index)
+
+    # Convert STB latent representations
+    stb_latent_df = pd.DataFrame(Z[1], index=stb_data_imputed.index)
+
+    # Concatenate both datasets
+    combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
+
+    return combined_latent_df
+
+
+def impute_missing_values(experiment_data, stb_data, impute_method="median", knn_neighbors=5):
+    """
+    Perform missing value imputation while preserving MultiIndex (cpd_id, Library).
+
+    Parameters:
+    -----------
+    experiment_data : pd.DataFrame or None
+        Experiment dataset with `cpd_id` and `Library` as MultiIndex.
+    stb_data : pd.DataFrame or None
+        STB dataset with `cpd_id` and `Library` as MultiIndex.
+    impute_method : str, optional
+        Imputation method: "median" (default) or "knn".
+    knn_neighbors : int, optional
+        Number of neighbors for KNN imputation (default is 5).
+
+    Returns:
+    --------
+    tuple:
+        - experiment_data_imputed : pd.DataFrame or None
+        - stb_data_imputed : pd.DataFrame or None
+        - stb_labels : np.array
+        - stb_cpd_id_map : dict
+    """
+    logger.info(f"Performing imputation using {impute_method} strategy.")
+
+    # Choose imputer based on method
+    if impute_method == "median":
+        imputer = SimpleImputer(strategy="median")
+    elif impute_method == "knn":
+        imputer = KNNImputer(n_neighbors=knn_neighbors)
+    else:
+        raise ValueError("Invalid imputation method. Choose 'median' or 'knn'.")
+
+    # Function to apply imputation and restore MultiIndex
+    def impute_dataframe(df):
+        if df is None or df.empty:
+            return df
+        index_cols = df.index  # Preserve MultiIndex (cpd_id, Library)
+        numeric_df = df.select_dtypes(include=[np.number])  # Extract numeric columns
+        imputed_array = imputer.fit_transform(numeric_df)  # Perform imputation
+        return pd.DataFrame(imputed_array, index=index_cols, columns=numeric_df.columns)  # Restore index
+
+    # Apply imputation to each dataset
+    experiment_data_imputed = impute_dataframe(experiment_data)
+    stb_data_imputed = impute_dataframe(stb_data)
+
+    logger.info(f"Imputation complete. Experiment shape: {experiment_data_imputed.shape if experiment_data_imputed is not None else 'None'}, "
+                f"STB shape: {stb_data_imputed.shape if stb_data_imputed is not None else 'None'}")
+
+    # Handle STB labels
+    if stb_data is not None and "cpd_type" in stb_data.columns:
+        label_encoder = LabelEncoder()
+        stb_labels = label_encoder.fit_transform(stb_data["cpd_type"])
+        stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+
+        # Store mapping of encoded label to cpd_id
+        if "cpd_id" in stb_data.index.get_level_values(0):
+            stb_cpd_id_map = dict(zip(stb_data.index.get_level_values(0), stb_labels))
+        else:
+            stb_cpd_id_map = {}
+            logger.warning("Warning: 'cpd_id' is missing from STB data index!")
+
+    else:
+        stb_labels = np.zeros(stb_data_imputed.shape[0]) if stb_data_imputed is not None else np.array([])
+        stb_label_mapping = {"unknown": 0}
+        stb_cpd_id_map = {}
+
+        logger.warning("Warning: No STB labels available!")
+
+    return experiment_data_imputed, stb_data_imputed, stb_labels, stb_cpd_id_map
+
+
+def process_common_columns(df1, df2, step="before"):
+    """
+    Identify and apply common numerical columns between two datasets.
+
+    Parameters:
+    -----------
+    df1 : pd.DataFrame or None
+        First dataset (e.g., experiment data).
+    df2 : pd.DataFrame or None
+        Second dataset (e.g., STB data).
+    step : str, optional
+        Whether this is executed "before" or "after" imputation (default: "before").
+
+    Returns:
+    --------
+    df1_filtered : pd.DataFrame or None
+        First dataset filtered to keep only common columns.
+    df2_filtered : pd.DataFrame or None
+        Second dataset filtered to keep only common columns.
+    common_columns : Index
+        The set of common columns between the two datasets.
+    """
+    if df1 is not None and df2 is not None:
+        common_columns = df1.columns.intersection(df2.columns)
+    elif df1 is not None:
+        common_columns = df1.columns
+    elif df2 is not None:
+        common_columns = df2.columns
+    else:
+        raise ValueError(f"Error: No valid numerical data available at step '{step}'!")
+
+    logger.info(f"Common numerical columns {step} imputation: {list(common_columns)}")
+
+    # Filter datasets to keep only common columns
+    df1_filtered = df1[common_columns] if df1 is not None else None
+    df2_filtered = df2[common_columns] if df2 is not None else None
+
+    return df1_filtered, df2_filtered, common_columns
+
+
+def encode_cpd_data(dataframes, encode=False):
+    """
+    Ensures 'cpd_id', 'Library', and 'cpd_type' are set as a MultiIndex
+    and optionally encodes them for machine learning.
+
+    Parameters
+    ----------
+    dataframes : dict
+        Dictionary where keys are dataset names and values are DataFrames.
+    encode : bool, optional
+        If True, encodes 'cpd_id' and 'cpd_type' numerically (default is False).
+
+    Returns
+    -------
+    dict
+        Dictionary of processed DataFrames with MultiIndex applied.
+    """
+    processed_dfs = {}
+
+    for name, df in dataframes.items():
+        if df is not None and not df.empty:
+            # Ensure 'cpd_id', 'Library', and 'cpd_type' exist before indexing
+            if {"cpd_id", "Library", "cpd_type"}.issubset(df.columns):
+                df = df.set_index(["cpd_id", "Library", "cpd_type"])
+            else:
+                raise ValueError(f"Missing required columns in {name} dataset: {df.columns}")
+
+            # Encode 'cpd_id' and 'cpd_type' if requested
+            if encode:
+                label_enc_cpd_id = LabelEncoder()
+                label_enc_cpd_type = LabelEncoder()
+
+                df["cpd_id_encoded"] = label_enc_cpd_id.fit_transform(df.index.get_level_values("cpd_id"))
+                df["cpd_type_encoded"] = label_enc_cpd_type.fit_transform(df.index.get_level_values("cpd_type"))
+
+            processed_dfs[name] = df
+
+    return processed_dfs
+
+
+def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experiment_label_mapping,
+                           stb_data_imputed, stb_labels, stb_label_mapping):
+    """
+    Prepare data for CLIPn clustering by encoding datasets, removing non-numeric columns,
+    and structuring inputs for training.
+
+    Parameters
+    ----------
+    experiment_data_imputed : pd.DataFrame or None
+        The imputed experimental dataset.
+    experiment_labels : np.array
+        Encoded labels for experiment compounds.
+    experiment_label_mapping : dict
+        Mapping of encoded labels to original experiment cpd_type.
+    stb_data_imputed : pd.DataFrame or None
+        The imputed STB dataset.
+    stb_labels : np.array
+        Encoded labels for STB compounds.
+    stb_label_mapping : dict
+        Mapping of encoded labels to original STB cpd_type.
+
+    Returns
+    -------
+    tuple
+        X (dict): Dictionary containing dataset arrays for CLIPn.
+        y (dict): Dictionary of corresponding labels.
+        label_mappings (dict): Mapping of dataset indices to original labels.
+    """
+    X, y, label_mappings = {}, {}, {}
+
+    # Ensure at least one dataset exists
+    dataset_names = []
+    if experiment_data_imputed is not None and not experiment_data_imputed.empty:
+        dataset_names.append("experiment_assay_combined")
+    if stb_data_imputed is not None and not stb_data_imputed.empty:
+        dataset_names.append("STB_combined")
+
+    if not dataset_names:
+        logger.error("No valid datasets available for CLIPn analysis.")
+        raise ValueError("Error: No valid datasets available for CLIPn analysis.")
+
+    # Encode dataset names
+    dataset_encoder = LabelEncoder()
+    dataset_indices = dataset_encoder.fit_transform(dataset_names)
+    dataset_mapping = dict(zip(dataset_indices, dataset_names))
+
+    logger.info(f"Dataset Mapping: {dataset_mapping}")
+
+    # Define non-numeric columns to drop before passing to CLIPn
+    non_numeric_cols = ["cpd_id", "Library", "cpd_type"]
+
+    # Process experiment data
+    if experiment_data_imputed is not None and not experiment_data_imputed.empty:
+        experiment_data_imputed = experiment_data_imputed.drop(columns=[col for col in non_numeric_cols if col in experiment_data_imputed], errors="ignore")
+        
+        exp_index = dataset_encoder.transform(["experiment_assay_combined"])[0]
+        X[exp_index] = experiment_data_imputed.values
+        y[exp_index] = experiment_labels
+        label_mappings[exp_index] = experiment_label_mapping
+
+        logger.info(f"  Added Experiment Data to X with shape: {experiment_data_imputed.shape}")
+    else:
+        logger.warning(" No valid experiment data for CLIPn.")
+
+    # Process STB data
+    if stb_data_imputed is not None and not stb_data_imputed.empty:
+        stb_data_imputed = stb_data_imputed.drop(columns=[col for col in non_numeric_cols if col in stb_data_imputed], errors="ignore")
+
+        stb_index = dataset_encoder.transform(["STB_combined"])[0]
+        X[stb_index] = stb_data_imputed.values
+        y[stb_index] = stb_labels
+        label_mappings[stb_index] = stb_label_mapping
+
+        logger.info(f"  Added STB Data to X with shape: {stb_data_imputed.shape}")
+    else:
+        logger.warning(" No valid STB data for CLIPn.")
+
+    # Debugging: Log dataset keys before passing to CLIPn
+    logger.info(f" X dataset keys before CLIPn: {list(X.keys())}")
+    logger.info(f" y dataset keys before CLIPn: {list(y.keys())}")
+
+    # Ensure at least one dataset is available
+    if not X:
+        logger.error(" No valid datasets available for CLIPn analysis. Aborting!")
+        raise ValueError("Error: No valid datasets available for CLIPn analysis.")
+
+    logger.info(" Datasets successfully structured for CLIPn.")
+    logger.info(f" Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
+
+    return X, y, label_mappings
+
+
+def run_clipn(X, y, output_folder, args):
+    """
+    Runs CLIPn clustering with optional hyperparameter optimization.
+
+    Parameters
+    ----------
+    X : dict
+        Dictionary containing dataset arrays for CLIPn.
+    y : dict
+        Dictionary of corresponding labels.
+    output_folder : str
+        Directory to save CLIPn output files.
+    args : argparse.Namespace
+        Command-line arguments, including latent_dim, learning rate, and epoch count.
+
+    Returns
+    -------
+    dict
+        Dictionary containing latent representations from CLIPn.
+    """
+    hyperparam_file = os.path.join(output_folder, "best_hyperparameters.json")
+
+    # Check if optimized hyperparameters should be used
+    if args.use_optimized_params:
+        try:
+            logger.info(f"Loading optimized hyperparameters from {args.use_optimized_params}")
+            with open(args.use_optimized_params, "r") as f:
+                best_params = json.load(f)
+            
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to load optimized parameters: {e}")
+            raise ValueError("Invalid or missing hyperparameter JSON file.")
+
+        # Update args with loaded parameters
+        args.latent_dim = best_params["latent_dim"]
+        args.lr = best_params["lr"]
+        args.epoch = best_params["epochs"]
+
+        logger.info(f"Using pre-trained parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+
+        # Initialize model and directly run prediction
+        clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
+        logger.info("Skipping training. Generating latent representations using pre-trained parameters.")
+        Z = clipn_model.predict(X)
+
+    else:
+        # Run Hyperparameter Optimization
+        logger.info("Running Hyperparameter Optimization")
+        best_params = optimize_clipn(n_trials=20)  # Bayesian Optimization
+
+        # Save optimized parameters
+        with open(hyperparam_file, "w") as f:
+            json.dump(best_params, f, indent=4)
+
+        logger.info(f"Optimized hyperparameters saved to {hyperparam_file}")
+
+        # Update args with best parameters
+        args.latent_dim = best_params["latent_dim"]
+        args.lr = best_params["lr"]
+        args.epoch = best_params["epochs"]
+
+        logger.info(f"Using optimized parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+
+        # Train the model with the optimized parameters
+        logger.info(f"Running CLIPn with optimized latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
+        clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
+        logger.info("Fitting CLIPn model...")
+        loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
+        logger.info(f"CLIPn training completed. Final loss: {loss[-1]:.6f}")
+
+        # Generate latent representations
+        logger.info("Generating latent representations.")
+        Z = clipn_model.predict(X)
+
+    return Z
+
+import umap
+import matplotlib.pyplot as plt
+import os
+import pandas as pd
+from sklearn.cluster import KMeans
+
+def generate_umap(
+    combined_latent_df, 
+    output_folder, 
+    umap_plot_file, 
+    args, 
+    n_neighbors=15, 
+    num_clusters=10, 
+    add_labels=False
+):
+    """
+    Generates UMAP embeddings, performs KMeans clustering, and saves the results.
+
+    Parameters
+    ----------
+    combined_latent_df : pd.DataFrame
+        Latent representations indexed by (cpd_id, Library, cpd_type).
+    
+    output_folder : str
+        Path to save the UMAP outputs.
+
+    umap_plot_file : str
+        Full file path to save the UMAP plot (PDF).
+
+    args : argparse.Namespace
+        Parsed command-line arguments containing hyperparameters (latent_dim, lr, epoch).
+
+    n_neighbors : int, optional
+        Number of neighbors for UMAP (default: 15).
+    
+    num_clusters : int, optional
+        Number of clusters for KMeans clustering (default: 10).
+
+    add_labels : bool, optional
+        Whether to label points with `cpd_id` on the UMAP plot (default: False).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing UMAP coordinates and cluster labels, indexed by (cpd_id, Library, cpd_type).
+    """
+
+    logger.info(f"Generating UMAP visualization with n_neighbors={n_neighbors} and {num_clusters} clusters.")
+
+    # Perform UMAP dimensionality reduction
+    umap_model = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.1, n_components=2, random_state=42)
+    latent_umap = umap_model.fit_transform(combined_latent_df)
+
+    # Create DataFrame with MultiIndex
+    umap_df = pd.DataFrame(latent_umap, columns=["UMAP1", "UMAP2"], index=combined_latent_df.index)
+
+    # Perform clustering
+    logger.info(f"Running KMeans clustering with {num_clusters} clusters.")
+    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(latent_umap)
+    
+    # Add cluster labels to DataFrame
+    umap_df["Cluster"] = cluster_labels
+
+    # Save UMAP results
+    umap_file = os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.csv")
+    umap_df.to_csv(umap_file)
+    logger.info(f"UMAP coordinates saved to '{umap_file}'.")
+
+    # Generate and save UMAP plot with cluster colors
+    plt.figure(figsize=(12, 8))
+    scatter = plt.scatter(umap_df["UMAP1"], umap_df["UMAP2"], alpha=0.7, s=5, c=cluster_labels, cmap="tab10")
+    plt.xlabel("UMAP 1")
+    plt.ylabel("UMAP 2")
+    plt.title("CLIPn UMAP Visualization (Colored by Cluster)")
+    plt.colorbar(scatter, label="Cluster ID")
+
+    # Add `cpd_id` labels if enabled
+    if add_labels:
+        logger.info("Adding `cpd_id` labels to UMAP plot.")
+        for (cpd_id, _), (x, y) in zip(umap_df.index, latent_umap):
+            plt.text(x, y, str(cpd_id), fontsize=6, alpha=0.7)
+
+    # Adjust filename if labels are included
+    if add_labels:
+        umap_plot_file = umap_plot_file.replace(".pdf", "_labeled.pdf")
+
+    # Save plot
+    plt.savefig(umap_plot_file, dpi=1200)
+    plt.close()
+
+    logger.info(f"UMAP visualization with clusters saved to '{umap_plot_file}'.")
+
+    return umap_df
+
+
+
+
+
+#################################################################
+#################################################################
+#################################################################
 if sys.version_info[:1] != (3,):
     # e.g. sys.version_info(major=3, minor=9, micro=7,
     # releaselevel='final', serial=0)
@@ -588,25 +1070,22 @@ if stb_data is not None:
         stb_data["Library"] = "STB"
 
 
-# Extract numerical features ... retain non numeric too ...
-# Store non-numeric columns separately to reattach later
-non_numeric_cols = ['cpd_id', 'Library']
-experiment_non_numeric, stb_non_numeric = None, None  # Initialize
 
-if experiment_data is not None:
-    experiment_non_numeric = experiment_data[non_numeric_cols]
-    experiment_numeric = experiment_data.select_dtypes(include=[np.number])
 
-if stb_data is not None:
-    stb_non_numeric = stb_data[non_numeric_cols]
-    stb_numeric = stb_data.select_dtypes(include=[np.number])
+# Multiindex
+# Ensure 'cpd_id', 'Library', and 'cpd_type' exist before setting as index
+if {"cpd_id", "Library", "cpd_type"}.issubset(experiment_data.columns):
+    experiment_data = experiment_data.set_index(["cpd_id", "Library", "cpd_type"])
+
+if {"cpd_id", "Library", "cpd_type"}.issubset(stb_data.columns):
+    stb_data = stb_data.set_index(["cpd_id", "Library", "cpd_type"])
 
 
 # Log the first few rows after extracting numerical features
-if experiment_numeric is not None:
-    logger.info("First few rows of experiment_numeric:\n" + experiment_numeric.head().to_string())
-if stb_numeric is not None:
-    logger.info("First few rows of stb_numeric:\n" + stb_numeric.head().to_string())
+if experiment_data is not None:
+    logger.info("First few rows of experiment_data:\n" + experiment_data.head().to_string())
+if stb_data is not None:
+    logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
 
 
 # Ensure 'Library' column exists and assign based on dataset origin
@@ -618,156 +1097,50 @@ if stb_data is not None and "Library" not in stb_data.columns:
     logger.warning("'Library' column is missing in stb_data. Assigning 'STB'.")
     stb_data["Library"] = "STB"
 
-# Create cpd_id Mapping Dictionary ---
-# Store a persistent mapping of original `cpd_id` before processing
-if experiment_data is not None and 'cpd_id' in experiment_data.columns:
-    experiment_cpd_id_map = experiment_data[['cpd_id']].reset_index().set_index('index')['cpd_id'].to_dict()
-else:
-    experiment_cpd_id_map = {}
-
-if stb_data is not None and 'cpd_id' in stb_data.columns:
-    stb_cpd_id_map = stb_data[['cpd_id']].reset_index().set_index('index')['cpd_id'].to_dict()
-else:
-    stb_cpd_id_map = {}
-
-
-# Log the first few rows after extracting numerical features
-if experiment_numeric is not None:
-    logger.info("First few rows of experiment_numeric:\n" + experiment_numeric.head().to_string())
-if stb_numeric is not None:
-    logger.info("First few rows of stb_numeric:\n" + stb_numeric.head().to_string())
-
-
-
-# Create cpd_id Mapping Dictionary ---
-if experiment_data is not None and 'cpd_id' in experiment_data.columns and 'Library' in experiment_data.columns:
-    experiment_mappings = experiment_data[['cpd_id', 'Library']].to_dict(orient="index")  # Store index -> {'cpd_id': value, 'Library': value}
-else:
-    experiment_mappings = None
-    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from experiment data!")
-
-if stb_data is not None and 'cpd_id' in stb_data.columns and 'Library' in stb_data.columns:
-    stb_mappings = stb_data[['cpd_id', 'Library']].to_dict(orient="index")
-else:
-    stb_mappings = None
-    logger.warning("Warning: 'cpd_id' or 'Library' column is missing from STB data!")
-
-
-# Store a direct mapping from the original indices to cpd_id
-# Create cpd_id Mapping Dictionary ---
-if experiment_data is not None and 'cpd_id' in experiment_data.columns:
-    experiment_cpd_id_map = dict(enumerate(experiment_data['cpd_id']))  # Store index -> cpd_id mapping
-else:
-    experiment_cpd_id_map = None
-    logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
-
-stb_cpd_id_map = stb_data['cpd_id'].copy()
 
 
 # **Drop columns that are entirely NaN in either dataset BEFORE imputation**
 # Drop columns that are entirely NaN in either dataset BEFORE imputation
-if experiment_numeric is not None:
-    experiment_numeric = experiment_numeric.dropna(axis=1, how='all')
+if experiment_data is not None:
+    experiment_data = experiment_data.dropna(axis=1, how='all')
 
-if stb_numeric is not None:
-    stb_numeric = stb_numeric.dropna(axis=1, how='all')
+if stb_data is not None:
+    stb_data = stb_data.dropna(axis=1, how='all')
 
+# remove unexpected empty rows too (remove the NaNs for these)
+if experiment_data is not None:
+    experiment_data = experiment_data.dropna(axis=0, how='all')
 
-# Identify initial common columns BEFORE imputation
-if experiment_numeric is not None and stb_numeric is not None:
-    common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
-elif experiment_numeric is not None:
-    common_columns_before = experiment_numeric.columns  # No STB data, use only experiment columns
-elif stb_numeric is not None:
-    common_columns_before = stb_numeric.columns  # No experiment data, use only STB columns
-else:
-    raise ValueError("Error: No valid numerical data available!")
-
-logger.info(f"Common numerical columns BEFORE imputation: {list(common_columns_before)}")
+if stb_data is not None:
+    stb_data = stb_data.dropna(axis=0, how='all')
 
 
+original_experiment_columns = experiment_data.columns if experiment_data is not None else []
+original_stb_columns = stb_data.columns if stb_data is not None else []
 
-# Retain only common columns
-if experiment_numeric is not None:
-    experiment_numeric = experiment_numeric[common_columns_before]
 
-if stb_numeric is not None:
-    stb_numeric = stb_numeric[common_columns_before]
-
-# Step 1: Ensure numerical datasets exist
-experiment_numeric_imputed, stb_numeric_imputed = None, None  
-
-# Drop columns that are entirely NaN before imputation
-if experiment_numeric is not None:
-    experiment_numeric = experiment_numeric.dropna(axis=1, how='all')
-if stb_numeric is not None:
-    stb_numeric = stb_numeric.dropna(axis=1, how='all')
+dropped_experiment_cols = set(original_experiment_columns) - set(experiment_data.columns)
+dropped_stb_cols = set(original_stb_columns) - set(stb_data.columns)
+logger.info(f"Dropped experiment columns: {dropped_experiment_cols}")
+logger.info(f"Dropped STB columns: {dropped_stb_cols}")
 
 # Identify initial common columns BEFORE imputation
-if experiment_numeric is not None and stb_numeric is not None:
-    common_columns_before = experiment_numeric.columns.intersection(stb_numeric.columns)
-elif experiment_numeric is not None:
-    common_columns_before = experiment_numeric.columns
-elif stb_numeric is not None:
-    common_columns_before = stb_numeric.columns
-else:
-    raise ValueError("Error: No valid numerical data available!")
+# retain only common columns
+experiment_data, stb_data, common_columns_before = process_common_columns(experiment_data, stb_data, step="before")
+logger.info(f"Common numerical columns BEFORE imputation: {len(common_columns_before)}")
 
-logger.info(f"Common numerical columns BEFORE imputation: {list(common_columns_before)}")
 
-# Retain only common columns
-if experiment_numeric is not None:
-    experiment_numeric = experiment_numeric[common_columns_before]
-if stb_numeric is not None:
-    stb_numeric = stb_numeric[common_columns_before]
 
-# Step 2: Perform imputation
-if args.impute:
-    logger.info(f"Performing imputation for missing values using {args.impute_method} strategy.")
 
-    if args.impute_method == "median":
-        imputer = SimpleImputer(strategy="median")
-    elif args.impute_method == "knn":
-        imputer = KNNImputer(n_neighbors=args.knn_neighbors)
+####################
+# Perform imputation
+# Ensure numerical datasets
+experiment_data_imputed, stb_data_imputed = None, None  
+experiment_data_imputed, stb_data_imputed, stb_labels, \
+    stb_cpd_id_map = impute_missing_values(experiment_data, stb_data, 
+                                           impute_method=args.impute_method, 
+                                           knn_neighbors=args.knn_neighbors)
 
-    # Apply imputation only if data exists
-    if experiment_numeric is not None and not experiment_numeric.empty:
-        experiment_numeric_imputed = pd.DataFrame(imputer.fit_transform(experiment_numeric), 
-                                                  columns=common_columns_before)
-    if stb_numeric is not None and not stb_numeric.empty:
-        stb_numeric_imputed = pd.DataFrame(imputer.fit_transform(stb_numeric), 
-                                           columns=common_columns_before)
-
-    logger.info(f"Imputation complete. Experiment shape: {experiment_numeric_imputed.shape if experiment_numeric_imputed is not None else 'None'}, "
-                f"STB shape: {stb_numeric_imputed.shape if stb_numeric_imputed is not None else 'None'}")
-
-else:
-    logger.info("Skipping imputation as per command-line argument.")
-    experiment_numeric_imputed = experiment_numeric if experiment_numeric is not None else None
-    stb_numeric_imputed = stb_numeric if stb_numeric is not None else None
-
-if stb_data is not None and 'cpd_type' in stb_data.columns:
-    label_encoder = LabelEncoder()
-    stb_labels = label_encoder.fit_transform(stb_data['cpd_type'])
-    stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
-
-    # Store mapping of encoded label to cpd_id
-    if 'cpd_id' in stb_data.columns:
-        stb_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(stb_data['cpd_id'].values)}
-    else:
-        stb_cpd_id_map = {}
-        logger.warning("Warning: 'cpd_id' column is missing from STB data!")
-
-else:
-    # Ensure stb_labels is always assigned a valid array
-    if stb_numeric_imputed is not None:
-        stb_labels = np.zeros(stb_numeric_imputed.shape[0])
-    else:
-        stb_labels = np.array([])  # Ensure an empty array instead of unassigned variable
-        logger.warning("Warning: No STB labels available!")
-
-    stb_label_mapping = {"unknown": 0}
-    stb_cpd_id_map = {}
 
 # Debugging: Confirm label assignment
 logger.info(f"STB label mapping: {stb_label_mapping}")
@@ -775,54 +1148,32 @@ logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
 logger.info(f"STB labels assigned: {len(stb_labels)}")
 
 # Log the first few rows after imputation
-if experiment_numeric_imputed is not None:
-    logger.info("First few rows of experiment_numeric_imputed:\n" + experiment_numeric_imputed.head().to_string())
-if stb_numeric_imputed is not None:
-    logger.info("First few rows of stb_numeric_imputed:\n" + stb_numeric_imputed.head().to_string())
+if experiment_data_imputed is not None:
+    logger.info("First few rows of experiment_data_imputed:\n" + experiment_data_imputed.head().to_string())
+if stb_data_imputed is not None:
+    logger.info("First few rows of stb_data_imputed:\n" + stb_data_imputed.head().to_string())
 
 # Step 3: Identify common columns AFTER imputation
-if experiment_numeric_imputed is not None and stb_numeric_imputed is not None:
-    common_columns_after = experiment_numeric_imputed.columns.intersection(stb_numeric_imputed.columns)
-elif experiment_numeric_imputed is not None:
-    common_columns_after = experiment_numeric_imputed.columns
-elif stb_numeric_imputed is not None:
-    common_columns_after = stb_numeric_imputed.columns
-else:
-    raise ValueError("Error: No numerical data available after imputation!")
+# retain only those coloumns
+experiment_data_imputed, stb_data_imputed, \
+    common_columns_after = process_common_columns(experiment_data_imputed, 
+                                                  stb_data_imputed, step="after")
 
-logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
+
+logger.info(f"Common numerical columns AFTER imputation: {len(common_columns_after)}")
 columns_lost = set(common_columns_before) - set(common_columns_after)
-logger.info(f"Columns lost during imputation: {list(columns_lost)}")
+logger.info(f"Columns lost during imputation: {len(columns_lost)}")
 
 
-
-
-# Step 4: Ensure both datasets retain only common columns AFTER imputation
-if experiment_numeric_imputed is not None:
-    experiment_numeric_imputed = experiment_numeric_imputed[common_columns_after]
-if stb_numeric_imputed is not None:
-    stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
-
-
-
-# Ensure both datasets retain only these common columns AFTER imputation
-if experiment_numeric_imputed is not None:
-    experiment_numeric_imputed = experiment_numeric_imputed[common_columns_after]
-
-if stb_numeric_imputed is not None:
-    stb_numeric_imputed = stb_numeric_imputed[common_columns_after]
-
-logger.info(f"Common numerical columns AFTER imputation: {list(common_columns_after)}")
-
-#   Check if experiment_numeric_imputed is None before accessing .shape
-if experiment_numeric_imputed is not None:
-    logger.info(f"Experiment data shape after imputation: {experiment_numeric_imputed.shape}")
+#   Check if experiment_data_imputed is None before accessing .shape
+if experiment_data_imputed is not None:
+    logger.info(f"Experiment data shape after imputation: {experiment_data_imputed.shape}")
 else:
     logger.info("Experiment data is None after imputation.")
 
-#   Check if stb_numeric_imputed is None before accessing .shape
-if stb_numeric_imputed is not None:
-    logger.info(f"STB data shape after imputation: {stb_numeric_imputed.shape}")
+#   Check if stb_data_imputed is None before accessing .shape
+if stb_data_imputed is not None:
+    logger.info(f"STB data shape after imputation: {stb_data_imputed.shape}")
 else:
     logger.info("STB data is None after imputation.")
 
@@ -835,60 +1186,92 @@ experiment_cpd_id_map = {}
 stb_cpd_id_map = {}
 
 # Handle labels (assuming 'cpd_type' exists)
-if experiment_data is not None and 'cpd_type' in experiment_data.columns:
-    label_encoder = LabelEncoder()
-    experiment_labels = label_encoder.fit_transform(experiment_data['cpd_type'])
-    experiment_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+# Labelencoder as cmp_id and type have to be numeric. 
+# Prepare DataFrames for encoding
+dataframes = {
+    "experiment": experiment_data,
+    "stb": stb_data
+}
 
-    # Store mapping of encoded label to cpd_id
-    if 'cpd_id' in experiment_data.columns:
-        experiment_cpd_id_map = {i: cpd_id for i, cpd_id in enumerate(experiment_data['cpd_id'].values)}
-    else:
-        experiment_cpd_id_map = {}
-        logger.warning("Warning: 'cpd_id' column is missing from experiment data!")
+# Apply MultiIndex without encoding
+processed_data = encode_cpd_data(dataframes, encode=False)
 
+# If encoding is required (for ML models), apply encoding
+encoded_data = encode_cpd_data(dataframes, encode=True)
+
+# Extract processed datasets
+experiment_data = processed_data.get("experiment")
+stb_data = processed_data.get("stb")
+
+# Extract encoded datasets if needed
+experiment_data_encoded = encoded_data.get("experiment")
+stb_data_encoded = encoded_data.get("stb")
+
+# Debugging logs
+logger.info(f"Experiment DataFrame after MultiIndexing:\n{experiment_data.head()}")
+logger.info(f"STB DataFrame after MultiIndexing:\n{stb_data.head()}")
+
+# Handle encoded labels for downstream ML tasks
+if experiment_data_encoded is not None:
+    experiment_labels = experiment_data_encoded["cpd_type_encoded"].values
+    experiment_cpd_id_map = dict(zip(experiment_data_encoded.index.get_level_values("cpd_id"),
+                                     experiment_data_encoded["cpd_id_encoded"]))
+    experiment_label_mapping = dict(zip(experiment_data_encoded.index.get_level_values("cpd_type"),
+                                        experiment_data_encoded["cpd_type_encoded"]))
 else:
-    # Handle NoneType properly before creating labels
-    if experiment_numeric_imputed is not None:
-        experiment_labels = np.zeros(experiment_numeric_imputed.shape[0])
-    else:
-        experiment_labels = np.array([])  # Empty array if no data exists
-
-    experiment_label_mapping = {"unknown": 0}
+    experiment_labels = np.array([])
     experiment_cpd_id_map = {}
+    experiment_label_mapping = {}
+
+if stb_data_encoded is not None:
+    stb_labels = stb_data_encoded["cpd_type_encoded"].values
+    stb_cpd_id_map = dict(zip(stb_data_encoded.index.get_level_values("cpd_id"),
+                              stb_data_encoded["cpd_id_encoded"]))
+    stb_label_mapping = dict(zip(stb_data_encoded.index.get_level_values("cpd_type"),
+                                 stb_data_encoded["cpd_type_encoded"]))
+else:
+    stb_labels = np.array([])
+    stb_cpd_id_map = {}
+    stb_label_mapping = {}
+
+# Log outputs
+logger.info(f"Encoded Experiment Labels: {experiment_labels[:5] if len(experiment_labels) > 5 else experiment_labels}")
+logger.info(f"Encoded STB Labels: {stb_labels[:5] if len(stb_labels) > 5 else stb_labels}")
+logger.info(f"Experiment cpd_id mapping size: {len(experiment_cpd_id_map)}")
+logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
+logger.info(f"Experiment label mapping: {experiment_label_mapping}")
+logger.info(f"STB label mapping: {stb_label_mapping}")
+
+
 
 logger.info(f"Experiment label mapping: {experiment_label_mapping}")
 logger.info(f"Experiment cpd_id mapping size: {len(experiment_cpd_id_map)}")
 
-# Convert dataset names to numerical indices using LabelEncoder
-dataset_names = []
-if experiment_numeric_imputed is not None and len(experiment_numeric_imputed) > 0:
-    dataset_names.append("experiment_assay_combined")
-if stb_numeric_imputed is not None and len(stb_numeric_imputed) > 0:
-    dataset_names.append("STB_combined")
+# Define datasets to process
+datasets = {
+    "experiment": experiment_data_imputed,
+    "stb": stb_data_imputed
+}
 
 # Ensure at least one dataset exists before proceeding
-if not dataset_names:
+if experiment_data_imputed is None and stb_data_imputed is None:
     logger.error("No valid datasets available for CLIPn analysis.")
     raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
-dataset_encoder = LabelEncoder()
-dataset_indices = dataset_encoder.fit_transform(dataset_names)
+# Assign numerical indices for dataset names ONLY if required for CLIPn
+if experiment_data_imputed is not None and not experiment_data_imputed.empty:
+    experiment_data_imputed["dataset_label"] = 0  # Experiment → 0
+if stb_data_imputed is not None and not stb_data_imputed.empty:
+    stb_data_imputed["dataset_label"] = 1  # STB → 1
 
-dataset_mapping = dict(zip(dataset_indices, dataset_names))
+logger.info("Dataset labels assigned: Experiment → 0, STB → 1")
 
-logger.info(f"Dataset Mapping: {dataset_mapping}")
+# Log the updated DataFrames
+if experiment_data_imputed is not None:
+    logger.info(f"First few rows of experiment_data_imputed:\n{experiment_data_imputed.head()}")
+if stb_data_imputed is not None:
+    logger.info(f"First few rows of stb_data_imputed:\n{stb_data_imputed.head()}")
 
-
-# Ensure data is aggregated at the compound level
-logger.info("Grouping by cpd_id and Library...")
-logger.info("Grouping by cpd_id and Library with filtering of unnecessary columns...")
-
-# Define datasets to process
-datasets = {
-    "experiment": experiment_numeric_imputed,
-    "stb": stb_numeric_imputed
-}
 
 
 # Define the pattern for columns to drop
@@ -899,70 +1282,32 @@ filter_pattern = re.compile(
 )
 
 # Reassign the updated datasets
-experiment_numeric_imputed = datasets["experiment"]
-stb_numeric_imputed = datasets["stb"]
-
+experiment_data_imputed = datasets["experiment"]
+stb_data_imputed = datasets["stb"]
 
 
 # Apply grouping and filtering to both datasets
-experiment_numeric_imputed = group_and_filter_data(experiment_numeric_imputed, experiment_mappings)
-stb_numeric_imputed = group_and_filter_data(stb_numeric_imputed, stb_mappings)
+experiment_data_imputed = group_and_filter_data(experiment_data_imputed, experiment_mappings)
+stb_data_imputed = group_and_filter_data(stb_data_imputed, stb_mappings)
 
 # Log results
-logger.info("Grouped and filtered experiment data shape: {}".format(experiment_numeric_imputed.shape if experiment_numeric_imputed is not None else "None"))
-logger.info("Grouped and filtered STB data shape: {}".format(stb_numeric_imputed.shape if stb_numeric_imputed is not None else "None"))
+logger.info("Grouped and filtered experiment data shape: {}".format(experiment_data_imputed.shape if experiment_data_imputed is not None else "None"))
+logger.info("Grouped and filtered STB data shape: {}".format(stb_data_imputed.shape if stb_data_imputed is not None else "None"))
 
 
 #######################################################
 # Initialize empty dictionaries for CLIPn input
 # 
-X, y, label_mappings = {}, {}, {}
 
-# Ensure dataset_encoder exists before using transform
-if dataset_names:
-    dataset_encoder = LabelEncoder()
-    dataset_indices = dataset_encoder.fit_transform(dataset_names)
-    dataset_mapping = dict(zip(dataset_indices, dataset_names))
-else:
-    raise ValueError("Error: No valid datasets available for CLIPn analysis.")
+X, y, label_mappings = prepare_data_for_clipn(
+                experiment_data_imputed=experiment_data_imputed,
+                experiment_labels=experiment_labels,
+                experiment_label_mapping=experiment_label_mapping,
+                stb_data_imputed=stb_data_imputed,
+                stb_labels=stb_labels,
+                stb_label_mapping=stb_label_mapping
+)
 
-logger.info(f"Dataset Mapping: {dataset_mapping}")
-
-# Remove non-numeric columns ('cpd_id', 'Library') before passing to CLIPn
-non_numeric_cols = ["cpd_id", "Library"]
-
-# Add datasets dynamically if they exist
-if experiment_numeric_imputed is not None and not experiment_numeric_imputed.empty:
-    # remove non numeric data AGAIN
-    experiment_numeric_imputed = experiment_numeric_imputed.drop(columns=[col for col in non_numeric_cols if col in experiment_numeric_imputed], errors="ignore")
-
-    exp_index = dataset_encoder.transform(["experiment_assay_combined"])[0]
-    X[exp_index] = experiment_numeric_imputed.values
-    y[exp_index] = experiment_labels
-    label_mappings[exp_index] = experiment_label_mapping
-    logger.info(f"  Added Experiment Data to X with shape: {experiment_numeric_imputed.shape}")
-else:
-    logger.warning(" No valid experiment data for CLIPn.")
-
-if stb_numeric_imputed is not None and not stb_numeric_imputed.empty:
-    stb_numeric_imputed = stb_numeric_imputed.drop(columns=[col for col in non_numeric_cols if col in stb_numeric_imputed], errors="ignore")
-
-    stb_index = dataset_encoder.transform(["STB_combined"])[0]
-    X[stb_index] = stb_numeric_imputed.values
-    y[stb_index] = stb_labels
-    label_mappings[stb_index] = stb_label_mapping
-    logger.info(f"  Added STB Data to X with shape: {stb_numeric_imputed.shape}")
-else:
-    logger.warning(" No valid STB data for CLIPn.")
-
-# Debugging: Log dataset keys before passing to CLIPn
-logger.info(f" X dataset keys before CLIPn: {list(X.keys())}")
-logger.info(f" y dataset keys before CLIPn: {list(y.keys())}")
-
-# Ensure that at least one dataset is available
-if not X:
-    logger.error(" No valid datasets available for CLIPn analysis. Aborting!")
-    raise ValueError("Error: No valid datasets available for CLIPn analysis.")
 
 logger.info(" Datasets successfully structured for CLIPn.")
 logger.info(f" Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
@@ -974,79 +1319,18 @@ logger.info(f" Final dataset shapes being passed to CLIPn: { {k: v.shape for k, 
 logger.info(f"Running CLIPn")
 
 # Define hyperparameter output path
-hyperparam_file = os.path.join(output_folder, "best_hyperparameters.json")
 
-if args.use_optimized_params:
-    try:
-        logger.info(f"Loading optimized hyperparameters from {args.use_optimized_params}")
-        with open(args.use_optimized_params, "r") as f:
-            best_params = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logger.error(f"Failed to load optimized parameters: {e}")
-        raise ValueError("Invalid or missing hyperparameter JSON file.")
+logger.info(f"Arguments passed to run_clipn: latent_dim={args.latent_dim}, lr={args.lr}, epoch={args.epoch}, use_optimized_params={args.use_optimized_params}")
 
-if args.use_optimized_params:
-    # Load pre-trained parameters and skip training
-    logger.info(f"Loading optimized hyperparameters from {args.use_optimized_params}")
-    with open(args.use_optimized_params, "r") as f:
-        best_params = json.load(f)
-
-    # Update args with loaded parameters
-    args.latent_dim = best_params["latent_dim"]
-    args.lr = best_params["lr"]
-    args.epoch = best_params["epochs"]
-
-    logger.info(f"Using pre-trained parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
-
-    # Initialize model and directly run prediction
-    clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
-    logger.info("Skipping training. Generating latent representations using pre-trained parameters.")
-    Z = clipn_model.predict(X)
-
-else:
-    # Run Hyperparameter Optimisation
-    logger.info("Running Hyperparameter Optimisation")
-    best_params = optimize_clipn(n_trials=20)  # Bayesian Optimisation
-
-    # Save optimized parameters
-    with open(hyperparam_file, "w") as f:
-        json.dump(best_params, f, indent=4)
-
-    logger.info(f"optimized hyperparameters saved to {hyperparam_file}")
-
-    # Update args with best parameters
-    args.latent_dim = best_params["latent_dim"]
-    args.lr = best_params["lr"]
-    args.epoch = best_params["epochs"]
-
-    logger.info(f"Using optimized parameters: latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
-
-    # Train the model with the optimized parameters
-    logger.info(f"Running CLIPn with optimized latent_dim={args.latent_dim}, lr={args.lr}, epochs={args.epoch}")
-    clipn_model = CLIPn(X, y, latent_dim=args.latent_dim)
-    logger.info("Fitting CLIPn model...")
-    loss = clipn_model.fit(X, y, lr=args.lr, epochs=args.epoch)
-    logger.info(f"CLIPn training completed. Final loss: {loss[-1]:.6f}")
-
-    # Generate latent representations
-    logger.info("Generating latent representations.")
-    Z = clipn_model.predict(X)
+Z = run_clipn(X, y, output_folder, args)
 
 
 # mk new dir for new params. 
 output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}")
 os.makedirs(output_folder, exist_ok=True)
 
-
-# Convert numerical dataset names back to string names
-Z_named = {str(k): v for k, v in Z.items()}  # Ensure all keys are strings
 # Save latent representations
 np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z_named)
-
-
-# Define the output folder dynamically based on hyperparameters
-# Ensure all outputs go into the correct location
-
 
 # Convert numerical dataset names back to original names
 Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
@@ -1061,39 +1345,21 @@ logger.info("Generating UMAP visualization.")
 umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
 latent_umap = umap_model.fit_transform(np.vstack([Z[0], Z[1]]))
 
+
+combined_latent_df = reconstruct_combined_latent_df(Z, experiment_data_imputed, stb_data_imputed)
+
+
 # Save UMAP results
-umap_df = pd.DataFrame(latent_umap, columns=["UMAP1", "UMAP2"])
-umap_df.to_csv(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.csv"), index=False)
+# Ensure UMAP results keep original MultiIndex (cpd_id, Library, cpd_type)
 
-# Generate and save UMAP plot
-plt.figure(figsize=(8, 6))
-plt.scatter(latent_umap[:, 0], latent_umap[:, 1], alpha=0.7, s=5, c="blue")
-plt.xlabel("UMAP 1")
-plt.ylabel("UMAP 2")
-plt.title("CLIPn UMAP Visualization")
-plt.savefig(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf"), dpi=600)
-plt.close()
+# Define the plot filename outside the function
+umap_plot_file = os.path.join(output_folder, "clipn_ldim_UMAP.pdf")
 
-logger.info(f"UMAP visualization saved to '{output_folder}/clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_UMAP.pdf'.")
-
-
-
-# Perform KMeans clustering to assign colors to different clusters
-num_clusters = 10  # Adjust this based on expected number of clusters
-kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-cluster_labels = kmeans.fit_predict(latent_umap)
-
-plt.figure(figsize=(12, 8))
-plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=cluster_labels, cmap="tab10")
-plt.xlabel("UMAP 1")
-plt.ylabel("UMAP 2")
-plt.title("UMAP Visualization with Cluster Labels")
-
-umap_clustered_plot_file = os.path.join(output_folder, f"clipn_latent_dim_UMAP_clusters.pdf")
-plt.savefig(umap_clustered_plot_file, dpi=600)
-plt.close()
-logger.info(f"UMAP visualization with clusters saved as '{umap_clustered_plot_file}'.")
-
+# Generate UMAP without labels
+umap_df = generate_umap(combined_latent_df, output_folder, umap_plot_file, args, add_labels=False)
+# Generate UMAP with labels
+umap_plot_file = os.path.join(output_folder, "clipn_ldim_UMAP_labels.pdf")
+umap_df = generate_umap(combined_latent_df, output_folder, umap_plot_file, args, add_labels=True)
 
 
 # Save each dataset's latent representations separately with the correct prefix
@@ -1112,174 +1378,59 @@ pd.DataFrame(label_mappings).to_csv(
 )
 
 logger.info(f"Index and label mappings saved successfully in {output_folder}/")
-
 logger.info("Index and label mappings saved.")
 
-# Convert latent representations to DataFrame (only if available)
-experiment_latent_df, stb_latent_df = None, None
 
-
-# call function
-experiment_latent_df = map_latent_representations(Z, experiment_cpd_id_map, 0)
-stb_latent_df = map_latent_representations(Z, stb_cpd_id_map, 1)
-# get the proper cpd_id
-experiment_latent_df = restore_cpd_id(experiment_latent_df, experiment_cpd_id_map)
-stb_latent_df = restore_cpd_id(stb_latent_df, stb_cpd_id_map)
-
-
-
-# Log the latent representations before UMAP
-if experiment_latent_df is not None:
-    logger.info("First few rows of experiment_latent_df (latent representations):\n" + experiment_latent_df.head().to_string())
-if stb_latent_df is not None:
-    logger.info("First few rows of stb_latent_df (latent representations):\n" + stb_latent_df.head().to_string())
-
-
-
-logger.info("Expected experiment_cpd_id_map length:", len(experiment_cpd_id_map))
-logger.info("Expected stb_cpd_id_map length:", len(stb_cpd_id_map))
-logger.info("Observed experiment_latent_df index length:", len(experiment_latent_df.index))
-logger.info("Observed stb_latent_df index length:", len(stb_latent_df.index))
-
-
-# Ensure at least one DataFrame exists before concatenation
-if experiment_latent_df is not None and stb_latent_df is not None:
-    combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
-elif experiment_latent_df is not None:
-    combined_latent_df = experiment_latent_df
-elif stb_latent_df is not None:
-    combined_latent_df = stb_latent_df
+# Ensure `combined_latent_df` retains the MultiIndex before saving
+if isinstance(combined_latent_df.index, pd.MultiIndex):
+    combined_latent_df.to_csv(os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv"))
+    logger.info(f"Latent representations saved successfully with MultiIndex to {combined_output_file}.")
 else:
-    raise ValueError("Error: No latent representations available!")
+    logger.warning("Warning: MultiIndex is missing! Attempting to restore it before saving.")
+    combined_latent_df.reset_index().to_csv(os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv"))
 
-logger.info("Latent representations processed successfully.")
+    # If MultiIndex was lost, reset and restore
+    if "cpd_id" in combined_latent_df.columns and "Library" in combined_latent_df.columns:
+        combined_latent_df = combined_latent_df.set_index(["cpd_id", "Library"])
+        combined_latent_df.to_csv(os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv"))
+        logger.info(f"Restored MultiIndex and saved latent representations to {combined_output_file}.")
+    else:
+        logger.error("Error: Could not restore MultiIndex. `cpd_id` and `Library` missing from columns!")
+
 
 # Log the combined latent representation DataFrame
 if combined_latent_df is not None:
     logger.info("First few rows of combined_latent_df (final merged latent space):\n" + combined_latent_df.head().to_string())
 
 
-# Ensure at least one DataFrame is available before concatenation
-if experiment_latent_df is not None and stb_latent_df is not None:
-    combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
-elif experiment_latent_df is not None:
-    combined_latent_df = experiment_latent_df
-elif stb_latent_df is not None:
-    combined_latent_df = stb_latent_df
-else:
-    raise ValueError("Error: No latent representations available to save!")
 
-# Save the combined file if there is data
-combined_output_file = os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv")
-combined_latent_df.to_csv(combined_output_file)
+# UMAP per experiment
 
-logger.info(f"Latent representations saved successfully with cpd_id as index to {combined_output_file}.")
+# Define the UMAP output file before calling function
+umap_experiment_plot_file = os.path.join(output_folder, "UMAP_experiment_vs_stb.pdf")
 
-
-#####################################################################
-# Perform UMAP dimensionality reduction
-logger.info("Generating UMAP visualization with clustering.")
-umap_model = umap.UMAP(n_neighbors=25, min_dist=0.1, n_components=2, random_state=42)
-latent_umap = umap_model.fit_transform(combined_latent_df)
-
-# Extract `cpd_id` for labeling
-cpd_id_list = list(combined_latent_df.index)
-
-# Save UMAP coordinates
-umap_df = pd.DataFrame(latent_umap, index=combined_latent_df.index, columns=["UMAP1", "UMAP2"])
-umap_file = os.path.join(output_folder, "UMAP_coordinates.csv")
-umap_df.to_csv(umap_file)
-logger.info(f"UMAP coordinates saved to '{umap_file}'.")
-
-# -------------------------------
-# Clustering using KMeans
-# -------------------------------
-num_clusters = 10  # Adjust based on expected clusters
-kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-cluster_labels = kmeans.fit_predict(latent_umap)
-
-# Add cluster labels to DataFrame
-umap_df["Cluster"] = cluster_labels
-
-# Save cluster assignments
-cluster_file = os.path.join(output_folder, "UMAP_clusters.csv")
-umap_df.to_csv(cluster_file)
-logger.info(f"UMAP cluster assignments saved to '{cluster_file}'.")
-
-# -----------------------------------------------
-# UMAP Scatter Plot with Cluster Colors
-# -----------------------------------------------
-plt.figure(figsize=(12, 8))
-plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=cluster_labels, cmap="tab10")
-
-# Add small text labels for `cpd_id`
-for i, cpd in enumerate(cpd_id_list):
-    plt.text(latent_umap[i, 0], latent_umap[i, 1], str(cpd), fontsize=6, alpha=0.7)
-
-plt.xlabel("UMAP 1")
-plt.ylabel("UMAP 2")
-plt.title("UMAP Visualization with Cluster Colors")
-
-umap_clustered_plot_file = os.path.join(output_folder, "UMAP_latent_visualization_clusters.pdf")
-plt.savefig(umap_clustered_plot_file, dpi=300)
-plt.close()
-
-logger.info(f"UMAP visualization with clusters saved as '{umap_clustered_plot_file}'.")
-
-
-# -----------------------------------------------
-# UMAP 2: Colour-coded by Dataset (Experiment vs. STB)
-# -----------------------------------------------
-logger.info("Generating UMAP visualization highlighting Experiment vs. STB data.")
-
-# Convert experiment_cpd_id_map.values to a set to avoid TypeError
-experiment_cpd_id_set = set(experiment_cpd_id_map.values()) 
-
-
-# Create a colour list based on dataset membership
-dataset_labels = ["Experiment" if cpd in experiment_cpd_id_set else "STB" for cpd in cpd_id_list]
-
-# Convert to colour-mapped values
-dataset_colors = ["red" if label == "Experiment" else "blue" for label in dataset_labels]
-
-plt.figure(figsize=(12, 8))
-plt.scatter(latent_umap[:, 0], latent_umap[:, 1], s=5, alpha=0.7, c=dataset_colors)  # Fix: c now correctly maps colors
-
-plt.xlabel("UMAP 1")
-plt.ylabel("UMAP 2")
-plt.title("UMAP Visualization: Experiment (Red) vs. STB (Blue)")
-
-umap_colored_plot_file = os.path.join(output_folder, "UMAP_experiment_vs_stb.pdf")
-plt.savefig(umap_colored_plot_file, dpi=300)
-plt.close()
-logger.info(f"UMAP visualization (experiment vs. STB) saved as '{umap_colored_plot_file}'.")
+# Call the function using the UMAP DataFrame (ensuring MultiIndex)
+plot_umap_colored_by_experiment(umap_df, umap_experiment_plot_file)
 
 
 ###########
 # Generate Summary of Closest & Farthest Compounds
+# Compute pairwise distances **before** using `dist_df`
+logger.info("Computing pairwise compound distances...")
 
+# Drop 'Library' before computing distances (if it exists)
+dist_df = compute_pairwise_distances(combined_latent_df.drop(columns=["Library"], errors="ignore"))
 
-#  **Restore `cpd_id` and `Library` Before Distance Computation**
-logger.info("Restoring `cpd_id` and `Library` columns in latent representations...")
+# Ensure index and columns are correctly assigned
+dist_df.index = combined_latent_df.index  
+dist_df.columns = combined_latent_df.index  
 
-# Ensure mappings exist
-if experiment_mappings and stb_mappings:
-    combined_mappings = {**experiment_mappings, **stb_mappings}  # Merge mappings
+# Save distance matrix
+distance_matrix_file = os.path.join(output_folder, "pairwise_compound_distances.csv")
+dist_df.to_csv(distance_matrix_file)
+logger.info(f"Pairwise distance matrix saved to '{distance_matrix_file}'.")
 
-    # Restore `cpd_id` and `Library`
-    combined_latent_df = restore_non_numeric(combined_latent_df, combined_mappings)
-
-    # Ensure `cpd_id` is set as the index
-    combined_latent_df.set_index("cpd_id", inplace=True)
-
-    logger.info("Successfully restored `cpd_id` and `Library` columns.")
-else:
-    logger.warning("Missing mappings for `cpd_id` restoration!")
-
-
-#  **Generate and Save Similarity Summary**
-logger.info("Generating compound similarity summary...")
-
+# **Now, generate similarity summary**
 summary_df = generate_similarity_summary(dist_df)
 
 # Ensure `cpd_id` is correctly assigned
@@ -1291,17 +1442,6 @@ summary_file = os.path.join(output_folder, "compound_similarity_summary.csv")
 summary_df.to_csv(summary_file, index=False)
 logger.info(f"Compound similarity summary saved to '{summary_file}'.")
 
-#  **Compute Pairwise Distances with `cpd_id` as Index**
-logger.info("Computing pairwise compound distances...")
-
-dist_df = compute_pairwise_distances(combined_latent_df.drop(columns=["Library"], errors="ignore"))  # Exclude non-numeric
-dist_df.index = combined_latent_df.index  # Ensure correct row names
-dist_df.columns = combined_latent_df.index  # Ensure correct column names
-
-#  **Save Full Distance Matrix**
-distance_matrix_file = os.path.join(output_folder, "pairwise_compound_distances.csv")
-dist_df.to_csv(distance_matrix_file)
-logger.info(f"Pairwise distance matrix saved to '{distance_matrix_file}'.")
 
 
 #  **Generate and Save Heatmap**
