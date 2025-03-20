@@ -1148,6 +1148,11 @@ if experiment_data_imputed is not None:
 if stb_data_imputed is not None:
     logger.info("First few rows of stb_data_imputed:\n" + stb_data_imputed.head().to_string())
 
+columns_lost = set(common_columns_before) - set(common_columns_after)
+logger.info(f"Columns lost during imputation: {len(columns_lost)}")
+logger.info(f"Lost columns: {columns_lost}")  # Add this line
+
+
 # Step 3: Identify common columns AFTER imputation
 # retain only those coloumns
 experiment_data_imputed, stb_data_imputed, \
@@ -1179,6 +1184,21 @@ dataset_labels = {0: "experiment Assay", 1: "STB"}
 # Initialize dictionaries to store mappings between LabelEncoder values and cpd_id
 experiment_cpd_id_map = {}
 stb_cpd_id_map = {}
+
+
+
+required_columns = {"cpd_id", "Library", "cpd_type"}
+missing_exp = required_columns - set(experiment_data.columns)
+missing_stb = required_columns - set(stb_data.columns)
+
+if missing_exp:
+    logger.error(f"Missing required columns in experiment dataset: {missing_exp}")
+if missing_stb:
+    logger.error(f"Missing required columns in STB dataset: {missing_stb}")
+
+if missing_exp or missing_stb:
+    raise ValueError("Critical columns are missing after preprocessing. Check logs above.")
+
 
 # Handle labels (assuming 'cpd_type' exists)
 # Labelencoder as cmp_id and type have to be numeric. 
