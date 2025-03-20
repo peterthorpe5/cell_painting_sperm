@@ -1163,6 +1163,12 @@ experiment_data, stb_data, common_columns_before = process_common_columns(experi
 logger.info(f"Common numerical columns BEFORE imputation: {len(common_columns_before)}")
 
 
+# Backup the original index before imputation
+experiment_index_backup = experiment_data.index.to_frame() if experiment_data is not None else None
+stb_index_backup = stb_data.index.to_frame() if stb_data is not None else None
+
+logger.info(f"Backed up index before imputation. Experiment index shape: {experiment_index_backup.shape if experiment_index_backup is not None else 'None'}")
+logger.info(f"Backed up index before imputation. STB index shape: {stb_index_backup.shape if stb_index_backup is not None else 'None'}")
 
 
 ####################
@@ -1174,37 +1180,43 @@ experiment_data_imputed, stb_data_imputed, stb_labels, \
                                            impute_method=args.impute_method, 
                                            knn_neighbors=args.knn_neighbors)
 
+# Restore the original MultiIndex after imputation
+# Ensure index backup is not empty
+if experiment_index_backup is not None and experiment_data_imputed is not None:
+    # Align index: Keep only rows that exist in the imputed dataset
+    common_rows = experiment_data_imputed.index.intersection(experiment_index_backup.index)
+    
+    if common_rows.empty:
+        logger.warning("Warning: No overlapping rows found between imputation and original index for experiment_data_imputed!")
+    else:
+        experiment_index_backup = experiment_index_backup.loc[common_rows]
+
+        # Join safely, keeping only matching rows
+        experiment_data_imputed = experiment_index_backup.join(experiment_data_imputed, how="inner")
+        experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+        
+        logger.info(f" Successfully restored MultiIndex for experiment_data_imputed. Final shape: {experiment_data_imputed.shape}")
+else:
+    logger.error(" Failed to restore MultiIndex for experiment_data_imputed! Check backup index.")
+
+if stb_index_backup is not None and stb_data_imputed is not None:
+    # Align index: Keep only rows that exist in the imputed dataset
+    common_rows = stb_data_imputed.index.intersection(stb_index_backup.index)
+
+    if common_rows.empty:
+        logger.warning("Warning: No overlapping rows found between imputation and original index for stb_data_imputed!")
+    else:
+        stb_index_backup = stb_index_backup.loc[common_rows]
+
+        # Join safely, keeping only matching rows
+        stb_data_imputed = stb_index_backup.join(stb_data_imputed, how="inner")
+        stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+        
+        logger.info(f" Successfully restored MultiIndex for stb_data_imputed. Final shape: {stb_data_imputed.shape}")
+else:
+    logger.error(" Failed to restore MultiIndex for stb_data_imputed! Check backup index.")
 
 
-# Step 1: Ensure MultiIndex restoration BEFORE checking for missing columns
-for df_name, original_df, imputed_df in [("experiment", experiment_data, experiment_data_imputed),
-                                         ("stb", stb_data, stb_data_imputed)]:
-    if original_df is not None and imputed_df is not None:
-        # Convert to DataFrame if needed
-        imputed_df = imputed_df.copy()
-
-        # Restore 'cpd_id', 'Library', and 'cpd_type' from original index
-        for col in ["cpd_id", "Library", "cpd_type"]:
-            if col in original_df.index.names:  
-                imputed_df[col] = original_df.index.get_level_values(col)
-            elif col in original_df.columns:
-                imputed_df[col] = original_df[col]
-            else:
-                logger.warning(f"{col} not found in {df_name} dataset!")
-
-        # Set MultiIndex
-        try:
-            imputed_df = imputed_df.set_index(["cpd_id", "Library", "cpd_type"])
-            logger.info(f" Successfully restored MultiIndex for {df_name}_data_imputed.")
-        except KeyError as e:
-            logger.error(f"Failed to set MultiIndex for {df_name}_data_imputed. Missing columns: {e}")
-            raise ValueError(f"Critical columns missing in {df_name}_data_imputed!")
-
-        # Update the imputed dataset
-        if df_name == "experiment":
-            experiment_data_imputed = imputed_df
-        else:
-            stb_data_imputed = imputed_df
 
 # Step 2: Now it's safe to check for missing columns
 missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(experiment_data_imputed.columns)
