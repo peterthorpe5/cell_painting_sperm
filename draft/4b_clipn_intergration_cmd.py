@@ -518,18 +518,24 @@ def impute_missing_values(experiment_data, stb_data, impute_method="median", knn
     def impute_dataframe(df):
         if df is None or df.empty:
             return df
-        index_cols = df.index  # Preserve MultiIndex (cpd_id, Library)
-        numeric_df = df.select_dtypes(include=[np.number])  # Extract numeric columns
-        imputed_array = imputer.fit_transform(numeric_df)  # Perform imputation
-        return pd.DataFrame(imputed_array, index=index_cols, columns=numeric_df.columns)  # Restore index
+        # Backup original index
+        original_index = df.index
+        # Extract numeric columns
+        numeric_df = df.select_dtypes(include=[np.number])  
+        # Perform imputation
+        imputed_array = imputer.fit_transform(numeric_df)
+        # Convert back to DataFrame
+        imputed_df = pd.DataFrame(imputed_array, index=original_index, columns=numeric_df.columns)
+        # Restore MultiIndex if it was originally present
+        if isinstance(original_index, pd.MultiIndex):
+            imputed_df.index = original_index  # Explicitly reapply MultiIndex
+        return imputed_df
 
     # Apply imputation to each dataset
     experiment_data_imputed = impute_dataframe(experiment_data)
     stb_data_imputed = impute_dataframe(stb_data)
-
     logger.info(f"Imputation complete. Experiment shape: {experiment_data_imputed.shape if experiment_data_imputed is not None else 'None'}, "
                 f"STB shape: {stb_data_imputed.shape if stb_data_imputed is not None else 'None'}")
-
     # Handle STB labels
     if stb_data is not None and "cpd_type" in stb_data.columns:
         label_encoder = LabelEncoder()
@@ -542,14 +548,11 @@ def impute_missing_values(experiment_data, stb_data, impute_method="median", knn
         else:
             stb_cpd_id_map = {}
             logger.warning("Warning: 'cpd_id' is missing from STB data index!")
-
     else:
         stb_labels = np.zeros(stb_data_imputed.shape[0]) if stb_data_imputed is not None else np.array([])
         stb_label_mapping = {"unknown": 0}
         stb_cpd_id_map = {}
-
         logger.warning("Warning: No STB labels available!")
-
     return experiment_data_imputed, stb_data_imputed, stb_labels, stb_cpd_id_map
 
 
