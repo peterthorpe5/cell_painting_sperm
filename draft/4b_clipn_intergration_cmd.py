@@ -1218,15 +1218,16 @@ logger.info(f"Common numerical columns BEFORE imputation: {len(common_columns_be
 
 # Backup the full MultiIndex as a DataFrame
 if experiment_data is not None:
-    experiment_index_backup = experiment_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
+    experiment_index_backup = experiment_data.index.to_frame().reset_index(drop=True)  # Force reset index
 
 if stb_data is not None:
-    stb_index_backup = stb_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
-
+    stb_index_backup = stb_data.index.to_frame().reset_index(drop=True)  # Force reset index
 
 logger.info(f"Backed up index before imputation. Experiment index shape: {experiment_index_backup.shape if experiment_index_backup is not None else 'None'}")
 logger.info(f"Backed up index before imputation. STB index shape: {stb_index_backup.shape if stb_index_backup is not None else 'None'}")
 
+logger.info(f"Experiment index backup preview:\n{experiment_index_backup.head() if experiment_index_backup is not None else 'None'}")
+logger.info(f"STB index backup preview:\n{stb_index_backup.head() if stb_index_backup is not None else 'None'}")
 
 ####################
 # Perform imputation
