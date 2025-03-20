@@ -1162,6 +1162,7 @@ logger.info(f"Common numerical columns AFTER imputation: {len(common_columns_aft
 columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {len(columns_lost)}")
 
+
 columns_lost = set(common_columns_before) - set(common_columns_after)
 logger.info(f"Columns lost during imputation: {len(columns_lost)}")
 logger.info(f"Lost columns: {columns_lost}")  # Add this line
