@@ -141,7 +141,6 @@ All outputs are saved under the specified `output_folder`, organised by CLIPn pa
 - Similarity network clustering (`5_compound_similarity_network.py`)
 - Toxic compound filtering via distance thresholds
 - Latent space analysis for compound mechanism of action
-- Integration with transcriptomic or proteomic embeddings (if available)
 
 
 
