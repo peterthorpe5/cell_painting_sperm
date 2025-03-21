@@ -228,6 +228,41 @@ def group_and_filter_data(df):
     return df
 
 
+from scipy.cluster.hierarchy import linkage, dendrogram
+import matplotlib.pyplot as plt
+
+def plot_dendrogram(dist_df, output_file, method="ward", figsize=(12, 8), label_fontsize=4):
+    """
+    Plots and saves a hierarchical clustering dendrogram.
+
+    Parameters
+    ----------
+    dist_df : pd.DataFrame
+        Pairwise distance matrix.
+    output_file : str
+        Path to save the dendrogram plot.
+    method : str, optional
+        Linkage method to use for clustering. Default is 'ward'.
+    figsize : tuple, optional
+        Size of the figure. Default is (12, 8).
+    label_fontsize : int, optional
+        Font size for axis tick labels. Default is 4.
+    """
+    # Compute linkage
+    linkage_matrix = linkage(dist_df, method=method)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=figsize)
+    dendrogram(linkage_matrix, labels=dist_df.index.tolist(), leaf_rotation=90, leaf_font_size=label_fontsize)
+    ax.tick_params(axis="x", labelsize=label_fontsize)
+    ax.tick_params(axis="y", labelsize=label_fontsize)
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=1200)
+    plt.close()
+
+
+
 def decode_clipn_predictions(predicted_labels, predicted_cpd_ids,
                              cpd_type_encoder, cpd_id_encoder):
     """
@@ -460,27 +495,6 @@ def plot_distance_heatmap(dist_df, output_path):
     plt.savefig(output_path, dpi=1200, bbox_inches="tight")
     plt.close()
 
-def plot_dendrogram(dist_df, output_path):
-    """
-    Generate and save a dendrogram based on hierarchical clustering.
-
-    Parameters:
-    -----------
-    dist_df : pd.DataFrame
-        Pairwise distance matrix with `cpd_id` as row and column labels.
-    output_path : str
-        Path to save the dendrogram PDF file.
-    """
-    linkage_matrix = linkage(squareform(dist_df), method="ward")
-
-    plt.figure(figsize=(12, 6))
-    dendrogram(linkage_matrix, labels=list(dist_df.index), leaf_rotation=90, leaf_font_size=8)
-    plt.title("Hierarchical Clustering of Compounds")
-    plt.xlabel("Compound")
-    plt.ylabel("Distance")
-
-    plt.savefig(output_path)
-    plt.close()
 
 
 def reconstruct_combined_latent_df(Z, dataset_index_map, index_lookup):
@@ -1812,8 +1826,9 @@ plot_distance_heatmap(dist_df, heatmap_file)
 logger.info(f"Pairwise distance heatmap saved to '{heatmap_file}'.")
 
 # **Generate and Save Dendrogram**
-dendrogram_file = os.path.join(output_folder, "compound_clustering_dendrogram.pdf")
-plot_dendrogram(dist_df, dendrogram_file)
+dendrogram_file = os.path.join(plot_files, "compound_clustering_dendrogram.pdf")
+plot_dendrogram(dist_df, dendrogram_file, label_fontsize=4)
+
 logger.info(f"Hierarchical clustering dendrogram saved to '{dendrogram_file}'.")
 
 logger.info("Intergration step finished")
