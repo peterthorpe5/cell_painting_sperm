@@ -115,18 +115,18 @@ def group_and_filter_data(df):
     """
     if df is None or df.empty:
         return df  # Return as-is if empty or None
-
     # Ensure 'cpd_id' and 'Library' are in the MultiIndex
     if not isinstance(df.index, pd.MultiIndex):
         raise ValueError("Expected a MultiIndex DataFrame with ['cpd_id', 'Library', 'cpd_type'].")
-
     # Group by `cpd_id` and `Library` (taking the mean for numeric values)
     df = df.groupby(["cpd_id", "Library"], as_index=True).mean()
-
-    # Drop columns matching `filter_pattern`
-    columns_to_drop = [col for col in df.columns if filter_pattern.search(col)]
-    df = df.drop(columns=columns_to_drop, errors="ignore")
-
+    # Define columns to drop based on known noise patterns
+    filter_cols = df.columns.str.contains(
+        r"Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
+        r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_[XYZ]|"
+        r"no_|fn_"
+    )
+    df = df.loc[:, ~filter_cols]
     return df
 
 
