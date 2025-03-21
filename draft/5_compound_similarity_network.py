@@ -196,8 +196,8 @@ cg = sns.clustermap(
 )
 
 # Set font size for tick labels
-cg.ax_heatmap.tick_params(axis='x', labelsize=4)
-cg.ax_heatmap.tick_params(axis='y', labelsize=4)
+cg.ax_heatmap.tick_params(axis='x', labelsize=2)
+cg.ax_heatmap.tick_params(axis='y', labelsize=2)
 
 plt.suptitle("Clustered Compound Distance Matrix (MCP* highlighted)", y=1.02)
 plt.savefig(clustered_path, bbox_inches="tight")
