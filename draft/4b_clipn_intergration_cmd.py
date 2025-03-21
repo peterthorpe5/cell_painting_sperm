@@ -259,6 +259,57 @@ def decode_clipn_predictions(predicted_labels, predicted_cpd_ids,
     return original_labels, original_cpd_ids
 
 
+def ensure_multiindex(df, required_levels=("cpd_id", "Library", "cpd_type"), logger=None, dataset_name="dataset"):
+    """
+    Ensures the given DataFrame has a MultiIndex on required levels.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to be checked or modified.
+
+    required_levels : tuple of str, optional
+        Columns to use as MultiIndex (default: ('cpd_id', 'Library', 'cpd_type')).
+
+    logger : logging.Logger or None, optional
+        Logger instance for info/warning messages. If None, prints will be used.
+
+    dataset_name : str, optional
+        Name of the dataset (used for logging).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with MultiIndex applied if needed.
+    """
+    if df is None or df.empty:
+        if logger:
+            logger.warning(f"{dataset_name}: DataFrame is empty or None, skipping MultiIndex restoration.")
+        return df
+
+    if isinstance(df.index, pd.MultiIndex) and all(level in df.index.names for level in required_levels):
+        if logger:
+            logger.info(f"{dataset_name}: MultiIndex already present.")
+        return df  # Already has correct MultiIndex
+
+    # Check that all required levels exist as columns
+    missing_cols = set(required_levels) - set(df.columns)
+    if missing_cols:
+        msg = f"{dataset_name}: Cannot restore MultiIndex, missing columns: {missing_cols}"
+        if logger:
+            logger.error(msg)
+        else:
+            print("ERROR:", msg)
+        return df  # Return unchanged to prevent crash
+
+    # Set MultiIndex
+    df = df.set_index(list(required_levels))
+    if logger:
+        logger.info(f"{dataset_name}: MultiIndex restored using columns {required_levels}")
+    return df
+
+
+
 def compute_pairwise_distances(latent_df):
     """
     Compute the pairwise Euclidean distance between compounds in latent space.
@@ -1428,8 +1479,9 @@ if not required_cols.issubset(stb_data_imputed.columns):
     raise ValueError(f"Missing columns in stb_data_imputed: {required_cols - set(stb_data_imputed.columns)}")
 
 # Set MultiIndex
-experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
+experiment_data_imputed = ensure_multiindex(experiment_data_imputed, logger=logger, dataset_name="experiment_data_imputed")
+stb_data_imputed = ensure_multiindex(stb_data_imputed, logger=logger, dataset_name="stb_data_imputed")
+
 
 logger.info(f"After setting MultiIndex: Experiment Data Index: {experiment_data_imputed.index.names}")
 logger.info(f"After setting MultiIndex: STB Data Index: {stb_data_imputed.index.names}")
@@ -1499,6 +1551,7 @@ latent_umap = umap_model.fit_transform(np.vstack([Z[0], Z[1]]))
 
 
 combined_latent_df = reconstruct_combined_latent_df(Z, experiment_data_imputed, stb_data_imputed)
+combined_latent_df = ensure_multiindex(combined_latent_df, logger=logger, dataset_name="combined_latent_df")
 
 
 # Save UMAP results
