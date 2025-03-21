@@ -1733,4 +1733,5 @@ dendrogram_file = os.path.join(output_folder, "compound_clustering_dendrogram.pd
 plot_dendrogram(dist_df, dendrogram_file)
 logger.info(f"Hierarchical clustering dendrogram saved to '{dendrogram_file}'.")
 
+logger.info("Intergration step finished")
 

@@ -171,6 +171,13 @@ logging.info(f"Filtering dataset with threshold {distance_threshold}...")
 dist_long_df = dist_df.stack().reset_index()
 dist_long_df.columns = ["Compound1", "Compound2", "Distance"]
 
+# Ensure Distance is numeric (force errors to NaN)
+dist_long_df["Distance"] = pd.to_numeric(dist_long_df["Distance"], errors="coerce")
+
+# Drop rows where distance could not be converted
+dist_long_df = dist_long_df.dropna(subset=["Distance"])
+
+
 # Remove self-comparisons (Compound1 == Compound2)
 dist_long_df = dist_long_df[dist_long_df["Compound1"] != dist_long_df["Compound2"]]
 
