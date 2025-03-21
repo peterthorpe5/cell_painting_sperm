@@ -70,13 +70,32 @@ import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import squareform
 import optuna
-from cell_painting.plot import plot_dendrogram, plot_umap_coloured_by_experiment, \
-    plot_distance_heatmap, generate_umap
-from cell_painting.process_data import objective, optimise_clipn, group_and_filter_data, \
-    decode_clipn_predictions, ensure_multiindex, \
-        compute_pairwise_distances, generate_similarity_summary, restore_encoded_labels, \
-        reconstruct_combined_latent_df, impute_missing_values, process_common_columns, \
-        encode_cpd_data, prepare_data_for_clipn, run_clipn, restore_multiindex
+from cell_painting.plot import (
+        plot_dendrogram,
+        plot_umap_coloured_by_experiment,
+        plot_distance_heatmap,
+        generate_umap
+)
+
+from cell_painting.process_data import (
+        objective,
+        optimise_clipn,
+        group_and_filter_data,
+        decode_clipn_predictions,
+        ensure_multiindex,
+        compute_pairwise_distances,
+        generate_similarity_summary,
+        restore_encoded_labels,
+        reconstruct_combined_latent_df,
+        impute_missing_values,
+        process_common_columns,
+        encode_cpd_data,
+        prepare_data_for_clipn,
+        run_clipn,
+        restore_multiindex,
+        align_features_and_labels
+)
+
 
 #  Step 1: Command-Line Arguments
 parser = argparse.ArgumentParser(description="Perform CLIPn clustering and UMAP on SCP data.")
@@ -705,7 +724,7 @@ X, y, label_mappings, dataset_mapping = prepare_data_for_clipn(
                                 stb_labels=stb_labels,
                                 stb_label_mapping=stb_label_mapping
 )
-
+X, y = align_features_and_labels(X, y)
 
 logger.info(" Datasets successfully structured for CLIPn.")
 logger.info(f" Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")

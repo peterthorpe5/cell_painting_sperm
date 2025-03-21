@@ -61,6 +61,9 @@ def objective(trial, X, y):
     epochs = trial.suggest_int("epochs", 200, 500)
 
     logger.info(f"Trying CLIPn with latent_dim={latent_dim}, lr={lr:.6f}, epochs={epochs}")
+    for dataset_id in X:
+        logger.info(f"Dataset {dataset_id}: X shape = {X[dataset_id].shape}, y shape = {y[dataset_id].shape}")
+
 
     clipn_model = CLIPn(X, y, latent_dim=latent_dim)
     loss = clipn_model.fit(X, y, lr=lr, epochs=epochs)
@@ -161,6 +164,39 @@ def decode_clipn_predictions(predicted_labels, predicted_cpd_ids,
     original_labels = cpd_type_encoder.inverse_transform(predicted_labels)
     original_cpd_ids = cpd_id_encoder.inverse_transform(predicted_cpd_ids)
     return original_labels, original_cpd_ids
+
+
+def align_features_and_labels(X, y):
+    """
+    Ensures that features and labels for each dataset ID are aligned in length.
+
+    Parameters
+    ----------
+    X : dict
+        Feature arrays for each dataset index.
+    y : dict
+        Label arrays for each dataset index.
+
+    Returns
+    -------
+    tuple
+        Aligned versions of X and y.
+    """
+    X_aligned, y_aligned = {}, {}
+
+    for k in X:
+        x_len = X[k].shape[0]
+        y_len = len(y[k])
+        if x_len != y_len:
+            logger.warning(f"Dataset {k}: Length mismatch (X: {x_len}, y: {y_len}). Truncating to min length.")
+            min_len = min(x_len, y_len)
+            X_aligned[k] = X[k][:min_len]
+            y_aligned[k] = y[k][:min_len]
+        else:
+            X_aligned[k] = X[k]
+            y_aligned[k] = y[k]
+
+    return X_aligned, y_aligned
 
 
 def ensure_multiindex(df, required_levels=("cpd_id", "Library", "cpd_type"), logger=None, dataset_name="dataset"):
