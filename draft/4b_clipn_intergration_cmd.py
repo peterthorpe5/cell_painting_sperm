@@ -357,9 +357,9 @@ def generate_similarity_summary(dist_df):
     return summary_df
 
 
-def plot_umap_colored_by_experiment(umap_df, output_file, color_map=None):
+def plot_umap_coloured_by_experiment(umap_df, output_file, color_map=None):
     """
-    Generates a UMAP visualization colored by experiment vs. STB.
+    Generates a UMAP visualization coloured by experiment vs. STB.
 
     Parameters
     ----------
@@ -955,7 +955,7 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
     scatter = plt.scatter(umap_df["UMAP1"], umap_df["UMAP2"], alpha=0.7, s=5, c=cluster_labels, cmap="tab10")
     plt.xlabel("UMAP 1")
     plt.ylabel("UMAP 2")
-    plt.title("CLIPn UMAP Visualization (Colored by Cluster)")
+    plt.title("CLIPn UMAP Visualization (coloured by Cluster)")
     plt.colorbar(scatter, label="Cluster ID")
 
     # Add `cpd_id` labels if enabled
@@ -1614,20 +1614,18 @@ logger.info("Index and label mappings saved.")
 
 
 # Ensure `combined_latent_df` retains the MultiIndex before saving
-if isinstance(combined_latent_df.index, pd.MultiIndex):
-    combined_latent_df.to_csv(os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv"))
-    logger.info(f"Latent representations saved successfully with MultiIndex to {combined_output_file}.")
-else:
-    logger.warning("Warning: MultiIndex is missing! Attempting to restore it before saving.")
-    combined_latent_df.reset_index().to_csv(os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv"))
+combined_output_file = os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv")
 
-    # If MultiIndex was lost, reset and restore
-    if "cpd_id" in combined_latent_df.columns and "Library" in combined_latent_df.columns:
-        combined_latent_df = combined_latent_df.set_index(["cpd_id", "Library"])
-        combined_latent_df.to_csv(os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv"))
-        logger.info(f"Restored MultiIndex and saved latent representations to {combined_output_file}.")
-    else:
-        logger.error("Error: Could not restore MultiIndex. `cpd_id` and `Library` missing from columns!")
+# Ensure MultiIndex is preserved
+if isinstance(combined_latent_df.index, pd.MultiIndex):
+    combined_latent_df.to_csv(combined_output_file)
+else:
+    logger.warning("MultiIndex is missing! Attempting to restore it before saving.")
+    if {"cpd_id", "Library", "cpd_type"}.issubset(combined_latent_df.columns):
+        combined_latent_df = combined_latent_df.set_index(["cpd_id", "Library", "cpd_type"])
+    combined_latent_df.to_csv(combined_output_file)
+
+logger.info(f"Latent representations saved successfully with MultiIndex to {combined_output_file}.")
 
 
 # Log the combined latent representation DataFrame
@@ -1642,7 +1640,7 @@ if combined_latent_df is not None:
 umap_experiment_plot_file = os.path.join(output_folder, "UMAP_experiment_vs_stb.pdf")
 
 # Call the function using the UMAP DataFrame (ensuring MultiIndex)
-plot_umap_colored_by_experiment(umap_df, umap_experiment_plot_file)
+plot_umap_coloured_by_experiment(umap_df, umap_experiment_plot_file)
 
 
 ###########
