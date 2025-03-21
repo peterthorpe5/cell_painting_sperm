@@ -1594,6 +1594,40 @@ umap_plot_file = os.path.join(output_folder, "clipn_ldim_UMAP_labels.pdf")
 umap_df = generate_umap(combined_latent_df, output_folder, umap_plot_file, args, add_labels=True)
 
 
+# === Summarise UMAP clusters by cpd_type and cpd_id ===
+logger.info("Generating UMAP cluster summary.")
+
+try:
+    # Check required columns exist
+    if "Cluster" not in umap_df.columns:
+        raise ValueError("Cluster column not found in UMAP DataFrame.")
+
+    # Reset index to access cpd_id and cpd_type
+    umap_reset = umap_df.reset_index()
+
+    # Group and summarise
+    cluster_summary = (
+        umap_reset.groupby("Cluster")
+        .agg({
+            "cpd_type": lambda x: list(sorted(set(x))),
+            "cpd_id": lambda x: list(sorted(set(x)))
+        })
+        .rename(columns={
+            "cpd_type": "cpd_types_in_cluster",
+            "cpd_id": "cpd_ids_in_cluster"
+        })
+        .reset_index()
+    )
+
+    # Save to file
+    cluster_summary_file = os.path.join(output_folder, "umap_cluster_summary.csv")
+    cluster_summary.to_csv(cluster_summary_file, index=False)
+    logger.info(f"UMAP cluster summary saved to '{cluster_summary_file}'.")
+
+except Exception as e:
+    logger.error(f"Failed to generate UMAP cluster summary: {e}")
+
+
 # Save each dataset's latent representations separately with the correct prefix
 for dataset, values in Z_named.items():
     df = pd.DataFrame(values)
@@ -1646,14 +1680,29 @@ plot_umap_coloured_by_experiment(umap_df, umap_experiment_plot_file)
 ###########
 # Generate Summary of Closest & Farthest Compounds
 # Compute pairwise distances **before** using `dist_df`
-logger.info("Computing pairwise compound distances...")
+logger.info("Computing pairwise compound distances at the (cpd_id, Library) level without collapsing across Libraries.")
 
-# Drop 'Library' before computing distances (if it exists)
-dist_df = compute_pairwise_distances(combined_latent_df.drop(columns=["Library"], errors="ignore"))
+try:
+    # Drop non-numeric columns (e.g. dataset name annotations, strings)
+    numeric_latent_df = combined_latent_df.select_dtypes(include=[np.number])
 
-# Ensure index and columns are correctly assigned
-dist_df.index = combined_latent_df.index  
-dist_df.columns = combined_latent_df.index  
+    # Compute pairwise Euclidean distances
+    dist_df = compute_pairwise_distances(numeric_latent_df)
+
+    # Restore full MultiIndex
+    dist_df.index = combined_latent_df.index
+    dist_df.columns = combined_latent_df.index
+
+    logger.info(f"Distance matrix shape: {dist_df.shape}")
+
+    # Save distance matrix to CSV (MultiIndex as compound identifiers)
+    distance_matrix_file = os.path.join(output_folder, "pairwise_compound_distances.csv")
+    dist_df.to_csv(distance_matrix_file)
+    logger.info(f"Pairwise distance matrix saved to '{distance_matrix_file}'.")
+
+except Exception as e:
+    logger.error(f"Error computing pairwise distances: {e}")
+
 
 # Save distance matrix
 distance_matrix_file = os.path.join(output_folder, "pairwise_compound_distances.csv")
