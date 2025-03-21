@@ -1541,6 +1541,9 @@ output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_l
 os.makedirs(output_folder, exist_ok=True)
 
 # Save latent representations
+# Convert numerical dataset names back to string keys and make values serialisable
+Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
+
 np.savez(os.path.join(output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}_latent_representations.npz"), **Z_named)
 
 # Convert numerical dataset names back to original names
