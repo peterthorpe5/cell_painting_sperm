@@ -963,7 +963,7 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
     if add_labels:
         logger.info("Adding `cpd_id` labels to UMAP plot.")
         for (cpd_id, _), (x, y) in zip(umap_df.index, latent_umap):
-            plt.text(x, y, str(cpd_id), fontsize=4, alpha=0.7)
+            plt.text(x, y, str(cpd_id), fontsize=2, alpha=0.7)
 
     # Adjust filename if labels are included
     if add_labels:
@@ -1570,8 +1570,8 @@ logger.info("Grouped and filtered STB data shape: {}".format(stb_data_imputed.sh
 
 
 # Define output paths for grouped, imputed, and encoded data
-grouped_experiment_path = os.path.join(intermediate_folder, "experiment_data_grouped_encoded_imputed.csv")
-grouped_stb_path = os.path.join(intermediate_folder, "stb_data_grouped_encoded_imputed.csv")
+grouped_experiment_path = os.path.join(intermediate_folder, "experiment_data_grouped_encoded_imputed_final.csv")
+grouped_stb_path = os.path.join(intermediate_folder, "stb_data_grouped_encoded_imputed_final.csv")
 
 try:
     logger.info("Saving grouped, imputed, and label-encoded experiment and STB datasets.")
