@@ -1075,6 +1075,14 @@ experiment_name = args.experiment_name if hasattr(args, "experiment_name") else 
 main_output_folder = f"{experiment_name}_clipn_output"
 os.makedirs(main_output_folder, exist_ok=True)
 
+
+# Create intermediate_files directory inside the main output folder
+intermediate_folder = os.path.join(main_output_folder, "intermediate_files")
+os.makedirs(intermediate_folder, exist_ok=True)
+
+
+
+
 ##################################################################
 # Determine the log file name (including the experiment prefix)
 log_filename = os.path.join(main_output_folder, f"{experiment_name}_clipn_intergration.log")
@@ -1316,6 +1324,24 @@ experiment_data = experiment_data_imputed.copy()
 stb_data = stb_data_imputed.copy()
 
 
+# Define filenames
+imputed_experiment_path = os.path.join(intermediate_folder, "experiment_data_imputed.csv")
+imputed_stb_path = os.path.join(intermediate_folder, "stb_data_imputed.csv")
+
+# Save imputed datasets with MultiIndex (e.g. cpd_id, Library, cpd_type)
+try:
+    logger.info("Saving imputed experiment and STB datasets with MultiIndex.")
+
+    experiment_data_imputed.to_csv(imputed_experiment_path)
+    stb_data_imputed.to_csv(imputed_stb_path)
+
+    logger.info(f"Imputed experiment data saved to: {imputed_experiment_path}")
+    logger.info(f"Imputed STB data saved to: {imputed_stb_path}")
+
+except Exception as e:
+    logger.error(f"Error saving imputed datasets: {e}")
+
+
 # Step 2: Now it's safe to check for missing columns
 missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(experiment_data_imputed.columns)
 missing_stb_cols = {"cpd_id", "Library", "cpd_type"} - set(stb_data_imputed.columns)
@@ -1488,6 +1514,24 @@ stb_data_imputed = datasets["stb"]
 
 
 
+# Define output paths
+encoded_experiment_path = os.path.join(intermediate_folder, "experiment_data_encoded_imputed.csv")
+encoded_stb_path = os.path.join(intermediate_folder, "stb_data_encoded_imputed.csv")
+
+# Save encoded datasets
+try:
+    logger.info("Saving label-encoded + imputed experiment and STB datasets with MultiIndex.")
+
+    experiment_data.to_csv(encoded_experiment_path)
+    stb_data.to_csv(encoded_stb_path)
+
+    logger.info(f"Encoded experiment data saved to: {encoded_experiment_path}")
+    logger.info(f"Encoded STB data saved to: {encoded_stb_path}")
+
+except Exception as e:
+    logger.error(f"Error saving encoded datasets: {e}")
+
+
 # Apply grouping and filtering to both datasets
 # Ensure 'cpd_id', 'Library', and 'cpd_type' exist before setting MultiIndex
 required_cols = {"cpd_id", "Library", "cpd_type"}
@@ -1524,6 +1568,25 @@ logger.info("Grouped and filtered experiment data shape: {}".format(experiment_d
 logger.info("Grouped and filtered STB data shape: {}".format(stb_data_imputed.shape if stb_data_imputed is not None else "None"))
 
 
+
+# Define output paths for grouped, imputed, and encoded data
+grouped_experiment_path = os.path.join(intermediate_folder, "experiment_data_grouped_encoded_imputed.csv")
+grouped_stb_path = os.path.join(intermediate_folder, "stb_data_grouped_encoded_imputed.csv")
+
+try:
+    logger.info("Saving grouped, imputed, and label-encoded experiment and STB datasets.")
+
+    experiment_data_imputed.to_csv(grouped_experiment_path)
+    stb_data_imputed.to_csv(grouped_stb_path)
+
+    logger.info(f"Grouped experiment data saved to: {grouped_experiment_path}")
+    logger.info(f"Grouped STB data saved to: {grouped_stb_path}")
+
+except Exception as e:
+    logger.error(f"Error saving grouped, encoded datasets: {e}")
+
+
+
 #######################################################
 # Initialize empty dictionaries for CLIPn input
 # 
@@ -1558,6 +1621,11 @@ Z = run_clipn(X, y, output_folder, args)
 output_folder = os.path.join(main_output_folder, f"clipn_ldim{args.latent_dim}_lr{args.lr}_epoch{args.epoch}")
 os.makedirs(output_folder, exist_ok=True)
 
+
+# Create plot_file directory inside the main output folder
+plot_files = os.path.join(output_folder, "plot_files")
+os.makedirs(plot_files, exist_ok=True)
+
 # Save latent representations
 # Convert numerical dataset names back to string keys and make values serialisable
 Z_named = {str(k): v.tolist() for k, v in Z.items()}  # Convert keys to strings and values to lists
@@ -1586,12 +1654,12 @@ combined_latent_df = reconstruct_combined_latent_df(Z, dataset_mapping, index_lo
 # Perform UMAP
 logger.info("Generating UMAP visualization.")
 # Define the plot filename outside the function
-umap_plot_file = os.path.join(output_folder, "clipn_ldim_UMAP.pdf")
+umap_plot_file = os.path.join(plot_files, "clipn_ldim_UMAP.pdf")
 
 # Generate UMAP without labels
 umap_df = generate_umap(combined_latent_df, output_folder, umap_plot_file, args, add_labels=False)
 # Generate UMAP with labels
-umap_plot_file = os.path.join(output_folder, "clipn_ldim_UMAP_labels.pdf")
+umap_plot_file = os.path.join(plot_files, "clipn_ldim_UMAP_labels.pdf")
 umap_df = generate_umap(combined_latent_df, output_folder, umap_plot_file, args, add_labels=True)
 
 
@@ -1672,7 +1740,7 @@ if combined_latent_df is not None:
 # UMAP per experiment
 
 # Define the UMAP output file before calling function
-umap_experiment_plot_file = os.path.join(output_folder, "UMAP_experiment_vs_stb.pdf")
+umap_experiment_plot_file = os.path.join(plot_files, "UMAP_experiment_vs_stb.pdf")
 
 # Call the function using the UMAP DataFrame (ensuring MultiIndex)
 plot_umap_coloured_by_experiment(umap_df, umap_experiment_plot_file)
@@ -1739,7 +1807,7 @@ logger.info(f"Compound similarity summary saved to '{summary_file}'.")
 
 
 #  **Generate and Save Heatmap**
-heatmap_file = os.path.join(output_folder, "compound_distance_heatmap.pdf")
+heatmap_file = os.path.join(plot_files, "compound_distance_heatmap.pdf")
 plot_distance_heatmap(dist_df, heatmap_file)
 logger.info(f"Pairwise distance heatmap saved to '{heatmap_file}'.")
 
