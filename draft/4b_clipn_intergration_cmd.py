@@ -482,36 +482,40 @@ def plot_dendrogram(dist_df, output_path):
     plt.close()
 
 
-def reconstruct_combined_latent_df(Z, experiment_data_imputed, stb_data_imputed):
+def reconstruct_combined_latent_df(Z, experiment_index, stb_index):
     """
-    Reconstructs a DataFrame of latent representations with MultiIndex.
+    Reconstructs a combined DataFrame of latent representations with MultiIndex.
 
     Parameters
     ----------
     Z : dict
         Dictionary containing CLIPn latent representations.
+        Keys are integer dataset indices (e.g., 0 for experiment, 1 for STB),
+        and values are 2D numpy arrays of latent vectors.
 
-    experiment_data_imputed : pd.DataFrame
-        Imputed experiment dataset with MultiIndex (cpd_id, Library, cpd_type).
+    experiment_index : pd.Index
+        MultiIndex to assign to the experiment latent DataFrame.
 
-    stb_data_imputed : pd.DataFrame
-        Imputed STB dataset with MultiIndex (cpd_id, Library, cpd_type).
+    stb_index : pd.Index
+        MultiIndex to assign to the STB latent DataFrame.
 
     Returns
     -------
     pd.DataFrame
-        Combined latent representations indexed by (cpd_id, Library, cpd_type).
+        Combined DataFrame of latent representations, indexed by MultiIndex.
     """
+    # Validate index shapes match the latent data
+    if Z[0].shape[0] != len(experiment_index):
+        raise ValueError(f"Mismatch: experiment latent shape {Z[0].shape[0]} vs index length {len(experiment_index)}")
+    if Z[1].shape[0] != len(stb_index):
+        raise ValueError(f"Mismatch: STB latent shape {Z[1].shape[0]} vs index length {len(stb_index)}")
 
-    # Convert experiment latent representations
-    experiment_latent_df = pd.DataFrame(Z[0], index=experiment_data_imputed.index)
-
-    # Convert STB latent representations
-    stb_latent_df = pd.DataFrame(Z[1], index=stb_data_imputed.index)
+    # Create DataFrames from latent representations
+    experiment_latent_df = pd.DataFrame(Z[0], index=experiment_index)
+    stb_latent_df = pd.DataFrame(Z[1], index=stb_index)
 
     # Concatenate both datasets
     combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
-
     return combined_latent_df
 
 
@@ -1501,6 +1505,11 @@ logger.info(f"Before grouping: Experiment Data Index: {experiment_data_imputed.i
 experiment_data_imputed = group_and_filter_data(experiment_data_imputed)
 stb_data_imputed = group_and_filter_data(stb_data_imputed)
 
+# Keep a backup of the grouped index (after grouping by cpd_id and Library)
+experiment_index_backup = experiment_data_imputed.index
+stb_index_backup = stb_data_imputed.index
+
+
 # Log results
 logger.info("Grouped and filtered experiment data shape: {}".format(experiment_data_imputed.shape if experiment_data_imputed is not None else "None"))
 logger.info("Grouped and filtered STB data shape: {}".format(stb_data_imputed.shape if stb_data_imputed is not None else "None"))
@@ -1560,8 +1569,7 @@ umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_stat
 latent_umap = umap_model.fit_transform(np.vstack([Z[0], Z[1]]))
 
 
-combined_latent_df = reconstruct_combined_latent_df(Z, experiment_data_imputed, stb_data_imputed)
-combined_latent_df = ensure_multiindex(combined_latent_df, logger=logger, dataset_name="combined_latent_df")
+combined_latent_df = reconstruct_combined_latent_df(Z, experiment_index_backup, stb_index_backup)
 
 
 # Save UMAP results
