@@ -1246,6 +1246,10 @@ experiment_data_imputed, stb_data_imputed, stb_labels, \
                                            impute_method=args.impute_method, 
                                            knn_neighbors=args.knn_neighbors)
 
+# Also restore non-numeric columns into experiment_data and stb_data
+# so that encode_cpd_data() doesn't complain
+experiment_data = experiment_data_imputed.copy()
+stb_data = stb_data_imputed.copy()
 
 
 # Step 2: Now it's safe to check for missing columns
@@ -1327,9 +1331,10 @@ dataset_labels = {0: "experiment Assay", 1: "STB"}
 
 # Encode cpd_type and cpd_id for both experiment and STB datasets
 dataframes = {
-    "experiment": experiment_data,
-    "stb": stb_data
+    "experiment": experiment_data_imputed,
+    "stb": stb_data_imputed
 }
+
 
 encoded_results = encode_cpd_data(dataframes, encode_labels=True)
 
