@@ -71,7 +71,7 @@ def objective(trial):
     return final_loss
 
 
-def optimize_clipn(n_trials=20):
+def optimize_clipn(n_trials=40):
     """
     Runs Bayesian optimisation for CLIPn hyperparameter tuning.
 

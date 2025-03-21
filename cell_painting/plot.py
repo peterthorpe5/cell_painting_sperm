@@ -25,7 +25,7 @@ from scipy.spatial.distance import squareform
 logger = logging.getLogger(__name__)
 
 
-def plot_dendrogram(dist_df, output_file, method="ward", figsize=(12, 8), label_fontsize=4):
+def plot_dendrogram(dist_df, output_file, method="ward", figsize=(14, 10), label_fontsize=2):
     """
     Plots and saves a hierarchical clustering dendrogram.
 
