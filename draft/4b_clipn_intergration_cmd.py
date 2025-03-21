@@ -533,7 +533,20 @@ def impute_missing_values(experiment_data, stb_data, impute_method="median", knn
         stb_labels = np.zeros(stb_data_imputed.shape[0]) if stb_data_imputed is not None else np.array([])
         stb_cpd_id_map = {}
         logger.warning("Warning: No STB labels available!")
+    # Restore original non-numeric columns (e.g., cpd_id, Library, cpd_type)
+    if experiment_data is not None:
+        for col in ["cpd_id", "Library", "cpd_type"]:
+            if col in experiment_data.index.names:
+                experiment_data_imputed[col] = experiment_data.index.get_level_values(col)
+            elif col in experiment_data.columns:
+                experiment_data_imputed[col] = experiment_data[col]
 
+    if stb_data is not None:
+        for col in ["cpd_id", "Library", "cpd_type"]:
+            if col in stb_data.index.names:
+                stb_data_imputed[col] = stb_data.index.get_level_values(col)
+            elif col in stb_data.columns:
+                stb_data_imputed[col] = stb_data[col]
     return experiment_data_imputed, stb_data_imputed, stb_labels, stb_cpd_id_map
 
 
