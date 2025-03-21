@@ -811,7 +811,7 @@ def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experimen
     logger.info(" Datasets successfully structured for CLIPn.")
     logger.info(f" Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
 
-    return X, y, label_mappings
+    return X, y, label_mappings, dataset_mapping
 
 
 def run_clipn(X, y, output_folder, args):
@@ -1525,13 +1525,13 @@ logger.info("Grouped and filtered STB data shape: {}".format(stb_data_imputed.sh
 # Initialize empty dictionaries for CLIPn input
 # 
 
-X, y, label_mappings = prepare_data_for_clipn(
-                experiment_data_imputed=experiment_data_imputed,
-                experiment_labels=experiment_labels,
-                experiment_label_mapping=experiment_label_mapping,
-                stb_data_imputed=stb_data_imputed,
-                stb_labels=stb_labels,
-                stb_label_mapping=stb_label_mapping
+X, y, label_mappings, dataset_mapping = prepare_data_for_clipn(
+                                experiment_data_imputed=experiment_data_imputed,
+                                experiment_labels=experiment_labels,
+                                experiment_label_mapping=experiment_label_mapping,
+                                stb_data_imputed=stb_data_imputed,
+                                stb_labels=stb_labels,
+                                stb_label_mapping=stb_label_mapping
 )
 
 
