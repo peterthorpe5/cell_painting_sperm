@@ -91,9 +91,52 @@ import argparse
 import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import linkage, dendrogram
+from scipy.spatial.distance import squareform
 from pyvis.network import Network  # For interactive visualization
 import community.community_louvain as community  # Correct import for Louvain clustering
 
+
+
+import pandas as pd
+import logging
+
+def load_pairwise_distance_matrix(path):
+    """
+    Loads a pairwise compound distance matrix, skipping non-numeric header rows.
+
+    Parameters
+    ----------
+    path : str
+        Path to the CSV file containing the distance matrix.
+
+    Returns
+    -------
+    pd.DataFrame
+        Cleaned pairwise distance matrix with `cpd_id` as both index and columns.
+    """
+    # Load the raw CSV
+    raw_df = pd.read_csv(path, header=None)
+
+    # Extract compound IDs from row 0 (columns from position 2 onwards)
+    compound_ids = raw_df.iloc[0, 2:].tolist()
+
+    # Extract compound names from column 0 starting at row 2
+    row_ids = raw_df.iloc[2:, 0].tolist()
+
+    # Extract the actual distance values: rows 2+, columns 2+
+    distance_data = raw_df.iloc[2:, 2:].copy()
+
+    # Assign correct row and column labels
+    distance_data.index = row_ids
+    distance_data.columns = compound_ids
+    distance_data.index.name = "cpd_id"
+
+    # Convert to float (with coercion for any stray text)
+    distance_df = distance_data.apply(pd.to_numeric, errors="coerce")
+
+    return distance_df
 
 
 #  Step 1: Setup Logging 
@@ -148,8 +191,49 @@ output_prefix = os.path.join(log_folder, f"{prefix_label}_sim{similarity_label}"
 #  Step 3: Load Distance Matrix 
 logging.info(f"Loading distance matrix from {args.input}")
 logging.info("... this takes a long time ... go and have a beer")
-dist_df = pd.read_csv(args.input, index_col=0)
+logging.info(f"Loading and cleaning pairwise matrix from {args.input}")
+dist_df = load_pairwise_distance_matrix(args.input)
+logging.info(f"Parsed distance matrix shape: {dist_df.shape}")
 
+
+
+# Step 3.2: Clustered heatmap with MCP* labels
+logging.info("Generating heatmap with similarity clustering and MCP* compound highlights...")
+
+# Ensure the matrix is square and numeric
+assert dist_df.shape[0] == dist_df.shape[1], "Distance matrix must be square"
+assert (dist_df.columns == dist_df.index).all(), "Matrix rows and columns must match"
+
+# Perform hierarchical clustering
+linkage_matrix = linkage(squareform(dist_df.values), method="average")
+
+# Create a clustermap (not just heatmap – includes dendrogram)
+compound_labels = dist_df.index.tolist()
+is_mcp = [label.startswith("MCP") for label in compound_labels]
+
+# Row/column colours to highlight MCP* rows
+row_colours = ["red" if flag else "grey" for flag in is_mcp]
+
+# Create and save clustermap
+clustered_path = os.path.join(log_folder, f"{prefix_label}_sim{similarity_label}_clustered_heatmap.pdf")
+sns.set(style="white")
+cg = sns.clustermap(
+    dist_df,
+    row_linkage=linkage_matrix,
+    col_linkage=linkage_matrix,
+    cmap="viridis",
+    figsize=(15, 13),
+    row_colors=row_colours,
+    col_colors=row_colours,
+    xticklabels=False,
+    yticklabels=False
+)
+
+plt.suptitle("Clustered Compound Distance Matrix (MCP* highlighted)", y=1.02)
+plt.savefig(clustered_path, bbox_inches="tight")
+plt.close()
+
+logging.info(f"Clustered heatmap saved to '{clustered_path}'.")
 
 
 # SAFEGUARD: Ensure data is aggregated before processing
