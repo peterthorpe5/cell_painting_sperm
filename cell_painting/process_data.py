@@ -63,7 +63,7 @@ def objective(trial, X, y):
     logger.info(f"Trying CLIPn with latent_dim={latent_dim}, lr={lr:.6f}, epochs={epochs}")
 
     clipn_model = CLIPn(X, y, latent_dim=latent_dim)
-    loss = clipn_model.train(lr=lr, epochs=epochs, return_loss=True)
+    loss = clipn_model.fit(X, y, lr=lr, epochs=epochs, return_loss=True)
     return loss
 
 
