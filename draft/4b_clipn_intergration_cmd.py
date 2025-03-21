@@ -61,6 +61,10 @@ from clipn import CLIPn
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import LabelEncoder
 from sklearn.cluster import KMeans
+# so we keep the index .. fingers crossed!
+from sklearn import set_config
+set_config(transform_output="pandas")
+
 from scipy.spatial.distance import cdist
 import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
@@ -222,81 +226,6 @@ def group_and_filter_data(df):
     df = df.drop(columns=columns_to_drop, errors="ignore")
 
     return df
-
-
-
-def restore_cpd_id(imputed_df, cpd_id_map):
-    """
-    Restore the 'cpd_id' and 'Library' columns after data processing.
-    
-    Parameters:
-    -----------
-    imputed_df : pd.DataFrame
-        The DataFrame with transformed numerical features.
-    cpd_id_map : dict
-        A dictionary mapping original row indices to 'cpd_id' values.
-
-    Returns:
-    --------
-    pd.DataFrame
-        The DataFrame with 'cpd_id' restored as an index.
-    """
-    if imputed_df is None or imputed_df.empty:
-        logger.warning("Imputed data is empty. Returning unchanged.")
-        return imputed_df
-
-    if cpd_id_map is None:
-        logger.error("cpd_id_map is missing! Cannot restore 'cpd_id'. Returning unchanged.")
-        return imputed_df
-
-    # Ensure that the imputed DataFrame has the correct number of rows
-    expected_rows = len(imputed_df)
-    actual_mapped_rows = min(expected_rows, len(cpd_id_map))
-
-    # Assign `cpd_id` based on the stored mapping, filling missing values with "Unknown"
-    restored_cpd_ids = [cpd_id_map.get(i, f"Unknown_{i}") for i in range(expected_rows)]
-
-    # Set `cpd_id` as the index
-    imputed_df.index = restored_cpd_ids
-
-    # Log any mismatches
-    missing_count = sum(1 for cpd in restored_cpd_ids if cpd.startswith("Unknown"))
-    if missing_count > 0:
-        logger.warning(f"Warning: {missing_count} missing 'cpd_id' values were replaced with 'Unknown_X'.")
-
-    return imputed_df
-
-
-
-def restore_non_numeric(imputed_df, mappings):
-    """
-    Restore the 'cpd_id' and 'Library' columns after imputation.
-
-    Parameters:
-    -----------
-    imputed_df : pd.DataFrame
-        The DataFrame with numeric values imputed.
-    mappings : dict
-        A dictionary mapping row indices to {'cpd_id': value, 'Library': value}.
-
-    Returns:
-    --------
-    pd.DataFrame
-        The DataFrame with 'cpd_id' and 'Library' restored.
-    """
-    if mappings is None:
-        logger.warning("No mappings found. Returning data unchanged.")
-        return imputed_df
-
-    # Convert mappings back to DataFrame
-    non_numeric_df = pd.DataFrame.from_dict(mappings, orient="index")
-    
-    # Ensure both DataFrames have the same index
-    if len(non_numeric_df) != len(imputed_df):
-        logger.error("Mismatch in row counts after imputation. Check data integrity.")
-        sys.exit(1)
-
-    return pd.concat([non_numeric_df, imputed_df], axis=1)
 
 
 def compute_pairwise_distances(latent_df):
@@ -481,24 +410,28 @@ def reconstruct_combined_latent_df(Z, experiment_data_imputed, stb_data_imputed)
     return combined_latent_df
 
 
+
 def impute_missing_values(experiment_data, stb_data, impute_method="median", knn_neighbors=5):
     """
-    Perform missing value imputation while preserving MultiIndex (cpd_id, Library).
+    Perform missing value imputation while preserving MultiIndex (cpd_id, Library, cpd_type).
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     experiment_data : pd.DataFrame or None
-        Experiment dataset with `cpd_id` and `Library` as MultiIndex.
+        Experiment dataset with MultiIndex (`cpd_id`, `Library`, `cpd_type`).
+
     stb_data : pd.DataFrame or None
-        STB dataset with `cpd_id` and `Library` as MultiIndex.
+        STB dataset with MultiIndex (`cpd_id`, `Library`, `cpd_type`).
+
     impute_method : str, optional
         Imputation method: "median" (default) or "knn".
-    knn_neighbors : int, optional
-        Number of neighbors for KNN imputation (default is 5).
 
-    Returns:
-    --------
-    tuple:
+    knn_neighbors : int, optional
+        Number of neighbours for KNN imputation (default: 5).
+
+    Returns
+    -------
+    tuple
         - experiment_data_imputed : pd.DataFrame or None
         - stb_data_imputed : pd.DataFrame or None
         - stb_labels : np.array
@@ -506,7 +439,7 @@ def impute_missing_values(experiment_data, stb_data, impute_method="median", knn
     """
     logger.info(f"Performing imputation using {impute_method} strategy.")
 
-    # Choose imputer based on method
+    # Choose and configure imputer
     if impute_method == "median":
         imputer = SimpleImputer(strategy="median")
     elif impute_method == "knn":
@@ -514,45 +447,39 @@ def impute_missing_values(experiment_data, stb_data, impute_method="median", knn
     else:
         raise ValueError("Invalid imputation method. Choose 'median' or 'knn'.")
 
-    # Function to apply imputation and restore MultiIndex
+    # Enable pandas output to preserve index and column names
+    imputer.set_output(transform="pandas")
+
+    # Helper to apply imputation to a DataFrame
     def impute_dataframe(df):
         if df is None or df.empty:
             return df
-        # Backup original index
-        original_index = df.index
-        # Extract numeric columns
-        numeric_df = df.select_dtypes(include=[np.number])  
-        # Perform imputation
-        imputed_array = imputer.fit_transform(numeric_df)
-        # Convert back to DataFrame
-        imputed_df = pd.DataFrame(imputed_array, index=original_index, columns=numeric_df.columns)
-        # Restore MultiIndex if it was originally present
-        if isinstance(original_index, pd.MultiIndex):
-            imputed_df.index = original_index  # Explicitly reapply MultiIndex
-        return imputed_df
+        numeric_df = df.select_dtypes(include=[np.number])
+        return imputer.fit_transform(numeric_df)
 
-    # Apply imputation to each dataset
+    # Apply imputation
     experiment_data_imputed = impute_dataframe(experiment_data)
     stb_data_imputed = impute_dataframe(stb_data)
+
     logger.info(f"Imputation complete. Experiment shape: {experiment_data_imputed.shape if experiment_data_imputed is not None else 'None'}, "
                 f"STB shape: {stb_data_imputed.shape if stb_data_imputed is not None else 'None'}")
-    # Handle STB labels
-    if stb_data is not None and "cpd_type" in stb_data.columns:
-        label_encoder = LabelEncoder()
-        stb_labels = label_encoder.fit_transform(stb_data["cpd_type"])
-        stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
 
-        # Store mapping of encoded label to cpd_id
-        if "cpd_id" in stb_data.index.get_level_values(0):
-            stb_cpd_id_map = dict(zip(stb_data.index.get_level_values(0), stb_labels))
-        else:
+    # Encode STB labels if available
+    if stb_data is not None and "cpd_type" in stb_data.index.names:
+        try:
+            label_encoder = LabelEncoder()
+            stb_labels = label_encoder.fit_transform(stb_data.index.get_level_values("cpd_type"))
+            stb_label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+            stb_cpd_id_map = dict(zip(stb_data.index.get_level_values("cpd_id"), stb_labels))
+        except Exception as e:
+            logger.warning(f"Failed to encode STB labels: {e}")
+            stb_labels = np.zeros(stb_data_imputed.shape[0]) if stb_data_imputed is not None else np.array([])
             stb_cpd_id_map = {}
-            logger.warning("Warning: 'cpd_id' is missing from STB data index!")
     else:
         stb_labels = np.zeros(stb_data_imputed.shape[0]) if stb_data_imputed is not None else np.array([])
-        stb_label_mapping = {"unknown": 0}
         stb_cpd_id_map = {}
         logger.warning("Warning: No STB labels available!")
+
     return experiment_data_imputed, stb_data_imputed, stb_labels, stb_cpd_id_map
 
 
@@ -1142,7 +1069,6 @@ if stb_data is not None:
     logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
 
 
-# **Drop columns that are entirely NaN in either dataset BEFORE imputation**
 # Drop columns that are entirely NaN in either dataset BEFORE imputation
 
 if "cpd_id" not in experiment_data.columns:
@@ -1215,43 +1141,6 @@ logger.info(f"Dropped STB columns: {dropped_stb_cols}")
 experiment_data, stb_data, common_columns_before = process_common_columns(experiment_data, stb_data, step="before")
 logger.info(f"Common numerical columns BEFORE imputation: {len(common_columns_before)}")
 
-
-# Backup the full MultiIndex as a DataFrame
-
-# Ensure full MultiIndex is backed up as a proper DataFrame
-if experiment_data is not None:
-    experiment_index_backup = experiment_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
-    experiment_index_backup.columns = ["cpd_id", "Library", "cpd_type"]  # Explicitly name columns
-
-if stb_data is not None:
-    stb_index_backup = stb_data.index.to_frame(index=False)  # Converts MultiIndex to DataFrame
-    stb_index_backup.columns = ["cpd_id", "Library", "cpd_type"]  # Explicitly name columns
-
-# Confirm backup is correct
-logger.info(f"Backed up index before imputation. Experiment index shape: {experiment_index_backup.shape}")
-logger.info(f"Backed up index before imputation. STB index shape: {stb_index_backup.shape}")
-logger.info(f"Experiment index backup preview:\n{experiment_index_backup.head()}")
-logger.info(f"STB index backup preview:\n{stb_index_backup.head()}")
-
-#  Check if backup contains the required columns
-missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(experiment_index_backup.columns)
-if missing_exp_cols:
-    logger.error(f"Missing columns in index_backup for experiment: {missing_exp_cols}")
-else:
-    logger.info(" experiment_index_backup contains all required columns.")
-
-missing_stb_cols = {"cpd_id", "Library", "cpd_type"} - set(stb_index_backup.columns)
-if missing_stb_cols:
-    logger.error(f" Missing columns in index_backup for stb: {missing_stb_cols}")
-else:
-    logger.info(" stb_index_backup contains all required columns.")
-
-
-logger.info(f"Backed up index before imputation. Experiment index shape: {experiment_index_backup.shape if experiment_index_backup is not None else 'None'}")
-logger.info(f"Backed up index before imputation. STB index shape: {stb_index_backup.shape if stb_index_backup is not None else 'None'}")
-
-logger.info(f"Experiment index backup preview:\n{experiment_index_backup.head() if experiment_index_backup is not None else 'None'}")
-logger.info(f"STB index backup preview:\n{stb_index_backup.head() if stb_index_backup is not None else 'None'}")
 
 ####################
 # Perform imputation
