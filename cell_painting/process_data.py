@@ -63,8 +63,12 @@ def objective(trial, X, y):
     logger.info(f"Trying CLIPn with latent_dim={latent_dim}, lr={lr:.6f}, epochs={epochs}")
 
     clipn_model = CLIPn(X, y, latent_dim=latent_dim)
-    loss = clipn_model.fit(X, y, lr=lr, epochs=epochs, return_loss=True)
-    return loss
+    loss = clipn_model.fit(X, y, lr=lr, epochs=epochs)
+    # Return final loss if it's a list or array, otherwise assume scalar
+    if isinstance(loss, (list, tuple, np.ndarray)):
+        return loss[-1]
+    else:
+        return loss
 
 
 def optimise_clipn(X, y, n_trials=40):
