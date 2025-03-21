@@ -547,6 +547,9 @@ def impute_missing_values(experiment_data, stb_data, impute_method="median", knn
                 stb_data_imputed[col] = stb_data.index.get_level_values(col)
             elif col in stb_data.columns:
                 stb_data_imputed[col] = stb_data[col]
+    # Log presence of restored columns
+    logger.debug(f"experiment_data_imputed columns: {experiment_data_imputed.columns.tolist()}")
+    logger.debug(f"stb_data_imputed columns: {stb_data_imputed.columns.tolist()}")
     return experiment_data_imputed, stb_data_imputed, stb_labels, stb_cpd_id_map
 
 
