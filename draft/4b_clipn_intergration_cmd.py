@@ -401,9 +401,10 @@ def plot_umap_coloured_by_experiment(umap_df, output_file, color_map=None):
         plt.xlabel("UMAP 1")
         plt.ylabel("UMAP 2")
         plt.title("UMAP Visualization: Experiment (Red) vs. STB (Blue)")
+        plt.tick_params(axis='both', labelsize=6)
 
         # Save plot
-        plt.savefig(output_file, dpi=300)
+        plt.savefig(output_file, dpi=1200)
         plt.close()
         logger.info(f"UMAP visualization (experiment vs. STB) saved as '{output_file}'.")
 
@@ -452,8 +453,8 @@ def plot_distance_heatmap(dist_df, output_path):
                            yticklabels=True)
 
     # Rotate labels for better readability
-    plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, fontsize=4)
-    plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, fontsize=6)
+    plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, fontsize=3)
+    plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, fontsize=4)
 
     plt.title("Pairwise Distance Heatmap of Compounds")
     plt.savefig(output_path, dpi=1200, bbox_inches="tight")
@@ -962,7 +963,7 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
     if add_labels:
         logger.info("Adding `cpd_id` labels to UMAP plot.")
         for (cpd_id, _), (x, y) in zip(umap_df.index, latent_umap):
-            plt.text(x, y, str(cpd_id), fontsize=6, alpha=0.7)
+            plt.text(x, y, str(cpd_id), fontsize=4, alpha=0.7)
 
     # Adjust filename if labels are included
     if add_labels:

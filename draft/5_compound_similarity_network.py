@@ -104,39 +104,41 @@ import logging
 
 def load_pairwise_distance_matrix(path):
     """
-    Loads a pairwise compound distance matrix, skipping non-numeric header rows.
+    Loads a distance matrix from CSV, skipping library rows and fixing headers.
 
     Parameters
     ----------
     path : str
-        Path to the CSV file containing the distance matrix.
+        Path to CSV file.
 
     Returns
     -------
     pd.DataFrame
-        Cleaned pairwise distance matrix with `cpd_id` as both index and columns.
+        Cleaned, square distance matrix with cpd_id as index and columns.
     """
-    # Load the raw CSV
+    logging.info(f"Loading and cleaning pairwise matrix from {path}")
+
+    # Load raw data with no header
     raw_df = pd.read_csv(path, header=None)
 
-    # Extract compound IDs from row 0 (columns from position 2 onwards)
-    compound_ids = raw_df.iloc[0, 2:].tolist()
+    # Extract the column labels from the first row (index 0), skipping first two columns
+    col_labels = raw_df.iloc[0, 2:].values.tolist()
 
-    # Extract compound names from column 0 starting at row 2
-    row_ids = raw_df.iloc[2:, 0].tolist()
+    # Extract actual numeric data from row 3 onwards (drop cpd_id and library)
+    matrix_df = raw_df.iloc[2:, 2:]
 
-    # Extract the actual distance values: rows 2+, columns 2+
-    distance_data = raw_df.iloc[2:, 2:].copy()
+    # Fix index (cpd_id) from column 0 (row 3 onwards)
+    matrix_df.index = raw_df.iloc[2:, 0].values.tolist()
 
-    # Assign correct row and column labels
-    distance_data.index = row_ids
-    distance_data.columns = compound_ids
-    distance_data.index.name = "cpd_id"
+    # Set proper column labels
+    matrix_df.columns = col_labels
 
-    # Convert to float (with coercion for any stray text)
-    distance_df = distance_data.apply(pd.to_numeric, errors="coerce")
+    # Convert all to numeric
+    matrix_df = matrix_df.apply(pd.to_numeric, errors="coerce")
 
-    return distance_df
+    logging.info(f"Parsed distance matrix shape: {matrix_df.shape}")
+    return matrix_df
+
 
 
 #  Step 1: Setup Logging 
