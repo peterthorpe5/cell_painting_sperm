@@ -930,7 +930,9 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
 
     # Perform UMAP dimensionality reduction
     umap_model = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.1, n_components=2, random_state=42)
-    latent_umap = umap_model.fit_transform(combined_latent_df)
+
+    latent_umap = umap_model.fit_transform(combined_latent_df.drop(columns=["dataset"], errors="ignore"))
+
 
     # Create DataFrame with MultiIndex
     umap_df = pd.DataFrame(latent_umap, columns=["UMAP1", "UMAP2"], index=combined_latent_df.index)
@@ -1569,16 +1571,8 @@ np.savez(os.path.join(output_folder, "CLIPn_latent_representations.npz"), **Z_na
 logger.info("Latent representations saved successfully.")
 
 
-# Perform UMAP
-logger.info("Generating UMAP visualization.")
-umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
-latent_umap = umap_model.fit_transform(np.vstack([Z[0], Z[1]]))
-
-
 
 # Store your MultiIndex backups from before CLIPn:
-
-
 index_lookup = {
     "experiment_assay_combined": experiment_index_backup,
     "STB_combined": stb_index_backup
@@ -1587,9 +1581,9 @@ index_lookup = {
 combined_latent_df = reconstruct_combined_latent_df(Z, dataset_mapping, index_lookup)
 
 
-# Save UMAP results
-# Ensure UMAP results keep original MultiIndex (cpd_id, Library, cpd_type)
 
+# Perform UMAP
+logger.info("Generating UMAP visualization.")
 # Define the plot filename outside the function
 umap_plot_file = os.path.join(output_folder, "clipn_ldim_UMAP.pdf")
 
