@@ -124,15 +124,15 @@ def plot_distance_heatmap(dist_df, output_path):
     output_path : str
         Path to save the heatmap PDF file.
     """
-    plt.figure(figsize=(12, 10))
+    plt.figure(figsize=(14, 12))
     htmap = sns.clustermap(dist_df, cmap="viridis", method="ward",
                            figsize=(12, 10),
                            xticklabels=True,
                            yticklabels=True)
 
     # Rotate labels for better readability
-    plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, fontsize=3)
-    plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, fontsize=4)
+    plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, fontsize=2)
+    plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, fontsize=2)
 
     plt.title("Pairwise Distance Heatmap of Compounds")
     plt.savefig(output_path, dpi=1200, bbox_inches="tight")

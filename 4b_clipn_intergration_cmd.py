@@ -318,9 +318,9 @@ experiment_data = pd.concat(experiment_dfs, axis=0, ignore_index=True) if experi
 
 # Log the first few rows of the data before processing
 if experiment_data is not None:
-    logger.info("First few rows of experiment_data:\n" + experiment_data.head().to_string())
+    logger.info("First few rows of experiment_data:\n" + experiment_data.head(3).to_string())
 if stb_data is not None:
-    logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
+    logger.info("First few rows of stb_data:\n" + stb_data.head(3).to_string())
 
 
 
@@ -362,9 +362,9 @@ logger.info(f"STB MultiIndex levels: {stb_index_levels}")
 
 # Log the first few rows after extracting numerical features
 if experiment_data is not None:
-    logger.info("First few rows of experiment_data:\n" + experiment_data.head().to_string())
+    logger.info("First few rows of experiment_data:\n" + experiment_data.head(2).to_string())
 if stb_data is not None:
-    logger.info("First few rows of stb_data:\n" + stb_data.head().to_string())
+    logger.info("First few rows of stb_data:\n" + stb_data.head().to_string(2))
 
 
 # Drop columns that are entirely NaN in either dataset BEFORE imputation
@@ -485,9 +485,9 @@ if missing_stb_cols:
 
 # Log the first few rows after imputation
 if experiment_data_imputed is not None:
-    logger.info("First few rows of experiment_data_imputed:\n" + experiment_data_imputed.head().to_string())
+    logger.info("First few rows of experiment_data_imputed:\n" + experiment_data_imputed.head(3).to_string())
 if stb_data_imputed is not None:
-    logger.info("First few rows of stb_data_imputed:\n" + stb_data_imputed.head().to_string())
+    logger.info("First few rows of stb_data_imputed:\n" + stb_data_imputed.head(3).to_string())
 
 
 
@@ -626,9 +626,9 @@ logger.info("Dataset labels assigned: Experiment → 0, STB → 1")
 
 # Log the updated DataFrames
 if experiment_data_imputed is not None:
-    logger.info(f"First few rows of experiment_data_imputed:\n{experiment_data_imputed.head()}")
+    logger.info(f"First few rows of experiment_data_imputed:\n{experiment_data_imputed.head(3)}")
 if stb_data_imputed is not None:
-    logger.info(f"First few rows of stb_data_imputed:\n{stb_data_imputed.head()}")
+    logger.info(f"First few rows of stb_data_imputed:\n{stb_data_imputed.head(3)}")
 
 
 
@@ -858,7 +858,7 @@ logger.info(f"Latent representations saved successfully with MultiIndex to {comb
 
 # Log the combined latent representation DataFrame
 if combined_latent_df is not None:
-    logger.info("First few rows of combined_latent_df (final merged latent space):\n" + combined_latent_df.head().to_string())
+    logger.info("First few rows of combined_latent_df (final merged latent space):\n" + combined_latent_df.head(3).to_string())
 
 
 

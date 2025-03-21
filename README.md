@@ -136,10 +136,73 @@ All outputs are saved under the specified `output_folder`, organised by CLIPn pa
 
 ---
 
-### Suggested Downstream Analyses
+### Downstream Analyses?
 
 - Similarity network clustering (`5_compound_similarity_network.py`)
 - Toxic compound filtering via distance thresholds
 - Latent space analysis for compound mechanism of action
 - Integration with transcriptomic or proteomic embeddings (if available)
 
+
+
+## Step 5: Compound Similarity Network
+
+This script builds on the latent space generated in `4b_clipn_integration_cmd.py` and creates compound similarity heatmaps and networks based on a pairwise Euclidean distance matrix.
+
+### Overview
+
+The script performs the following:
+
+- Loads a pairwise compound distance matrix (CSV format) generated from CLIPn latent space.
+- Cleans and validates the matrix to ensure it is square.
+- Highlights specific compounds (e.g. those prefixed with `MCP`) in the heatmap.
+- Generates a clustered heatmap with hierarchical clustering.
+- Constructs and saves a compound similarity network (graph) based on a user-defined similarity threshold.
+- Outputs summary files and visualisations for further analysis.
+
+### Command-Line Usage
+
+```bash
+python 5_compound_similarity_network.py \
+  --input pairwise_compound_distances.csv \
+  --output compound_similarity_0.1 \
+  --similarity 0.1 \
+  --compound-prefix MCP
+```
+
+### Command-Line Arguments
+
+- `--input`  
+  **Required**  
+  Path to the pairwise distance matrix CSV file. This must be a square matrix with compound IDs as both rows and columns.
+
+- `--output`  
+  **Required**  
+  Output prefix or folder name to store generated plots and network files.
+
+- `--similarity`  
+  **Optional** (default: `0.1`)  
+  Similarity threshold to define an edge in the similarity network. A lower value means compounds must be closer in latent space to be connected.
+
+- `--compound-prefix`  
+  **Optional**  
+  Prefix string (e.g., `MCP`) to highlight specific compounds in the visualisations.
+
+### Input Requirements
+
+- A square pairwise distance matrix where rows and columns are compound IDs (ideally derived from `compute_pairwise_distances` in the CLIPn pipeline).
+- The file must be in comma-separated values (CSV) format with headers and compound IDs aligned.
+
+### Outputs
+
+- **Clustered Heatmap (PDF)**  
+  A hierarchical heatmap visualising compound similarity. Similar compounds are clustered, and target compounds (e.g., `MCP*`) are optionally highlighted.
+
+- **Dendrogram (PDF)**  
+  Hierarchical clustering dendrogram of the compounds.
+
+- **Compound Similarity Network (GraphML + CSV)**  
+  A network of compounds where edges represent pairwise similarity below the specified threshold. Useful for visualising compound clusters or hubs.
+
+- **Compound Pair Summary (CSV)**  
+  A table listing each compound’s 
