@@ -1683,20 +1683,34 @@ plot_umap_coloured_by_experiment(umap_df, umap_experiment_plot_file)
 # Compute pairwise distances **before** using `dist_df`
 logger.info("Computing pairwise compound distances at the (cpd_id, Library) level without collapsing across Libraries.")
 
+logger.info("Computing pairwise compound distances at the (cpd_id, Library) level without collapsing across Libraries.")
+
 try:
-    # Drop non-numeric columns (e.g. dataset name annotations, strings)
+    # Step 1: Drop non-numeric columns (e.g. annotations)
     numeric_latent_df = combined_latent_df.select_dtypes(include=[np.number])
 
-    # Compute pairwise Euclidean distances
+    # Step 2: Compute pairwise distances
     dist_df = compute_pairwise_distances(numeric_latent_df)
 
-    # Restore full MultiIndex
+    # Step 3: Assign MultiIndex (same as original latent data)
     dist_df.index = combined_latent_df.index
     dist_df.columns = combined_latent_df.index
 
     logger.info(f"Distance matrix shape: {dist_df.shape}")
 
-    # Save distance matrix to CSV (MultiIndex as compound identifiers)
+    # Step 4: Ensure square and symmetric matrix
+    if not dist_df.shape[0] == dist_df.shape[1]:
+        raise ValueError("Computed distance matrix is not square!")
+
+    if not (dist_df.columns.equals(dist_df.index)):
+        logger.warning("Distance matrix is not symmetric — enforcing symmetry.")
+        dist_df = (dist_df + dist_df.T) / 2
+
+    # Step 5: Flatten MultiIndex for clean CSV export
+    dist_df.index = ['__'.join(map(str, idx)) for idx in dist_df.index]
+    dist_df.columns = ['__'.join(map(str, idx)) for idx in dist_df.columns]
+
+    # Step 6: Save to CSV
     distance_matrix_file = os.path.join(output_folder, "pairwise_compound_distances.csv")
     dist_df.to_csv(distance_matrix_file)
     logger.info(f"Pairwise distance matrix saved to '{distance_matrix_file}'.")

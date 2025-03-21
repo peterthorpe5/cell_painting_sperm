@@ -102,42 +102,6 @@ import community.community_louvain as community  # Correct import for Louvain cl
 import pandas as pd
 import logging
 
-def load_pairwise_distance_matrix(path):
-    """
-    Loads a distance matrix from CSV, skipping library rows and fixing headers.
-
-    Parameters
-    ----------
-    path : str
-        Path to CSV file.
-
-    Returns
-    -------
-    pd.DataFrame
-        Cleaned, square distance matrix with cpd_id as index and columns.
-    """
-    logging.info(f"Loading and cleaning pairwise matrix from {path}")
-
-    # Load raw data with no header
-    raw_df = pd.read_csv(path, header=None)
-
-    # Extract the column labels from the first row (index 0), skipping first two columns
-    col_labels = raw_df.iloc[0, 2:].values.tolist()
-
-    # Extract actual numeric data from row 3 onwards (drop cpd_id and library)
-    matrix_df = raw_df.iloc[2:, 2:]
-
-    # Fix index (cpd_id) from column 0 (row 3 onwards)
-    matrix_df.index = raw_df.iloc[2:, 0].values.tolist()
-
-    # Set proper column labels
-    matrix_df.columns = col_labels
-
-    # Convert all to numeric
-    matrix_df = matrix_df.apply(pd.to_numeric, errors="coerce")
-
-    logging.info(f"Parsed distance matrix shape: {matrix_df.shape}")
-    return matrix_df
 
 
 
@@ -194,7 +158,7 @@ output_prefix = os.path.join(log_folder, f"{prefix_label}_sim{similarity_label}"
 logging.info(f"Loading distance matrix from {args.input}")
 logging.info("... this takes a long time ... go and have a beer")
 logging.info(f"Loading and cleaning pairwise matrix from {args.input}")
-dist_df = load_pairwise_distance_matrix(args.input)
+dist_df = pd.read_csv(args.input, index_col=0)
 logging.info(f"Parsed distance matrix shape: {dist_df.shape}")
 
 
