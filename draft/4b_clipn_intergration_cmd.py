@@ -1413,6 +1413,13 @@ logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
 logger.info(f"Experiment label mapping: {experiment_label_mapping}")
 logger.info(f"STB label mapping: {stb_label_mapping}")
 
+# Restore non-numeric metadata columns if needed
+for col in ["cpd_id", "Library", "cpd_type"]:
+    if col not in experiment_data.columns and col in experiment_data_imputed.columns:
+        experiment_data[col] = experiment_data_imputed[col]
+    if col not in stb_data.columns and col in stb_data_imputed.columns:
+        stb_data[col] = stb_data_imputed[col]
+
 
 required_columns = {"cpd_id", "Library", "cpd_type"}
 missing_exp = required_columns - set(experiment_data.columns)
