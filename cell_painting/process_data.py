@@ -88,7 +88,7 @@ def optimise_clipn(X, y, n_trials=40):
         Best hyperparameter set found.
     """
     logger.info("Starting Bayesian optimisation with %d trials.", n_trials)
-    study = optuna.create_study(direction="minimise")
+    study = optuna.create_study(direction="minimize")
     study.optimize(lambda trial: objective(trial, X, y), n_trials=n_trials)
 
     logger.info(f"Best trial: {study.best_trial.params}")
