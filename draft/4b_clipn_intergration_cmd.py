@@ -482,40 +482,46 @@ def plot_dendrogram(dist_df, output_path):
     plt.close()
 
 
-def reconstruct_combined_latent_df(Z, experiment_index, stb_index):
+def reconstruct_combined_latent_df(Z, dataset_index_map, index_lookup):
     """
-    Reconstructs a combined DataFrame of latent representations with MultiIndex.
+    Reconstructs a combined DataFrame of latent representations using original MultiIndex.
 
     Parameters
     ----------
     Z : dict
-        Dictionary containing CLIPn latent representations.
-        Keys are integer dataset indices (e.g., 0 for experiment, 1 for STB),
-        and values are 2D numpy arrays of latent vectors.
+        Dictionary containing CLIPn latent representations, with integer keys (dataset labels).
+    
+    dataset_index_map : dict
+        Dictionary mapping integer dataset indices (from CLIPn) to dataset names (e.g., {0: "experiment", 1: "stb"}).
 
-    experiment_index : pd.Index
-        MultiIndex to assign to the experiment latent DataFrame.
-
-    stb_index : pd.Index
-        MultiIndex to assign to the STB latent DataFrame.
+    index_lookup : dict
+        Dictionary mapping dataset names to their original MultiIndex (e.g., {"experiment": index_df, "stb": index_df}).
 
     Returns
     -------
     pd.DataFrame
-        Combined DataFrame of latent representations, indexed by MultiIndex.
+        Combined latent representation DataFrame with correct MultiIndex restored.
     """
-    # Validate index shapes match the latent data
-    if Z[0].shape[0] != len(experiment_index):
-        raise ValueError(f"Mismatch: experiment latent shape {Z[0].shape[0]} vs index length {len(experiment_index)}")
-    if Z[1].shape[0] != len(stb_index):
-        raise ValueError(f"Mismatch: STB latent shape {Z[1].shape[0]} vs index length {len(stb_index)}")
+    latent_frames = []
 
-    # Create DataFrames from latent representations
-    experiment_latent_df = pd.DataFrame(Z[0], index=experiment_index)
-    stb_latent_df = pd.DataFrame(Z[1], index=stb_index)
+    for index_id, dataset_name in dataset_index_map.items():
+        if dataset_name not in index_lookup:
+            raise ValueError(f"Missing index for dataset '{dataset_name}'")
 
-    # Concatenate both datasets
-    combined_latent_df = pd.concat([experiment_latent_df, stb_latent_df])
+        latent_array = Z[index_id]
+        dataset_index = index_lookup[dataset_name]
+
+        if latent_array.shape[0] != len(dataset_index):
+            raise ValueError(
+                f"Mismatch: latent array for '{dataset_name}' has shape {latent_array.shape[0]}, "
+                f"but index has length {len(dataset_index)}"
+            )
+
+        df = pd.DataFrame(latent_array, index=dataset_index)
+        df["dataset"] = dataset_name  # Optional: helpful for visualisation
+        latent_frames.append(df)
+
+    combined_latent_df = pd.concat(latent_frames)
     return combined_latent_df
 
 
@@ -1569,7 +1575,15 @@ umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_stat
 latent_umap = umap_model.fit_transform(np.vstack([Z[0], Z[1]]))
 
 
-combined_latent_df = reconstruct_combined_latent_df(Z, experiment_index_backup, stb_index_backup)
+
+# Store your MultiIndex backups from before CLIPn:
+index_lookup = {
+    "experiment": experiment_index_backup,
+    "stb": stb_index_backup
+}
+
+
+combined_latent_df = reconstruct_combined_latent_df(Z, dataset_mapping, index_lookup)
 
 
 # Save UMAP results
