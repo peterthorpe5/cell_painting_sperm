@@ -38,66 +38,63 @@ logger = logging.getLogger(__name__)
 
 ##################################################################
 # functions
-def objective(trial):
+def objective(trial, X, y):
     """
-    Bayesian optimisation objective function for CLIPn.
-
-    This function tunes `latent_dim`, `lr`, and `epochs` dynamically to minimize
-    the final training loss.
+    Objective function for Optuna hyperparameter tuning of CLIPn.
 
     Parameters
     ----------
-    trial : optuna.trial.Trial
-        An Optuna trial object for hyperparameter tuning.
+    trial : optuna.Trial
+        An Optuna trial object used to sample hyperparameters.
+    X : dict
+        Dictionary of dataset inputs (e.g., {0: stb_data, 1: experiment_data}).
+    y : dict
+        Dictionary of dataset labels matching the structure of `X`.
 
     Returns
     -------
     float
-        The final loss after training CLIPn with the suggested hyperparameters.
+        Validation loss or score to be minimised.
     """
-    latent_dim = trial.suggest_int("latent_dim", 10, 40, step=10)
-    lr = trial.suggest_loguniform("lr", 1e-5, 1e-2)
-    epochs = trial.suggest_int("epochs", 100, 500, step=50)
+    latent_dim = trial.suggest_int("latent_dim", 10, 60)
+    lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+    epochs = trial.suggest_int("epochs", 200, 500)
 
     logger.info(f"Trying CLIPn with latent_dim={latent_dim}, lr={lr:.6f}, epochs={epochs}")
 
-    # Train CLIPn model
     clipn_model = CLIPn(X, y, latent_dim=latent_dim)
-    loss = clipn_model.fit(X, y, lr=lr, epochs=epochs)
-
-    final_loss = loss[-1]  # Get final loss
-    logger.info(f"Final loss for this run: {final_loss:.6f}")
-
-    return final_loss
+    loss = clipn_model.train(lr=lr, epochs=epochs, return_loss=True)
+    return loss
 
 
-def optimize_clipn(n_trials=40):
+def optimise_clipn(X, y, n_trials=40):
     """
-    Runs Bayesian optimisation for CLIPn hyperparameter tuning.
-
-    This function optimizes `latent_dim`, `lr`, and `epochs` using Optuna
-    to find the best combination that minimizes the final loss.
+    Runs Optuna Bayesian optimisation to tune CLIPn hyperparameters.
 
     Parameters
     ----------
+    X : dict
+        Dictionary of dataset inputs.
+
+    y : dict
+        Dictionary of dataset labels.
+
     n_trials : int, optional
-        The number of trials for optimisation (default is 20).
+        Number of optimisation trials (default: 20).
 
     Returns
     -------
     dict
-        The best hyperparameters found (latent_dim, lr, epochs).
+        Best hyperparameter set found.
     """
-    logger.info(f"Starting Bayesian optimisation with {n_trials} trials.")
+    logger.info("Starting Bayesian optimisation with %d trials.", n_trials)
+    study = optuna.create_study(direction="minimise")
+    study.optimize(lambda trial: objective(trial, X, y), n_trials=n_trials)
 
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=n_trials)
+    logger.info(f"Best trial: {study.best_trial.params}")
+    return study.best_trial.params
 
-    best_params = study.best_params
-    best_loss = study.best_value
 
-    logger.info(f"Best hyperparameters found: {best_params} with final loss {best_loss:.6f}")
-    return best_params
 
 def group_and_filter_data(df):
     """
@@ -663,7 +660,7 @@ def run_clipn(X, y, output_folder, args):
     else:
         # Run Hyperparameter Optimization
         logger.info("Running Hyperparameter Optimization")
-        best_params = optimize_clipn(n_trials=20)  # Bayesian Optimization
+        best_params = optimise_clipn(X,y, n_trials=40)  # Bayesian Optimization
 
         # Save optimized parameters
         with open(hyperparam_file, "w") as f:

@@ -72,7 +72,7 @@ from scipy.spatial.distance import squareform
 import optuna
 from cell_painting.plot import plot_dendrogram, plot_umap_coloured_by_experiment, \
     plot_distance_heatmap, generate_umap
-from cell_painting.process_data import objective, optimize_clipn, group_and_filter_data, \
+from cell_painting.process_data import objective, optimise_clipn, group_and_filter_data, \
     decode_clipn_predictions, ensure_multiindex, \
         compute_pairwise_distances, generate_similarity_summary, restore_encoded_labels, \
         reconstruct_combined_latent_df, impute_missing_values, process_common_columns, \
@@ -613,12 +613,6 @@ if stb_data_imputed is not None:
 
 
 
-# Define the pattern for columns to drop
-filter_pattern = re.compile(
-    r"Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
-    r"Child|Paren|Location_[X,Y,Z]|ZernikePhase|Euler|Plate|Well|Field|"
-    r"Center_Z|Center_X|Center_Y|no_|fn_"
-)
 
 # Reassign the updated datasets
 experiment_data_imputed = datasets["experiment"]
