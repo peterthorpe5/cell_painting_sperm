@@ -1577,11 +1577,12 @@ latent_umap = umap_model.fit_transform(np.vstack([Z[0], Z[1]]))
 
 
 # Store your MultiIndex backups from before CLIPn:
-index_lookup = {
-    "experiment": experiment_index_backup,
-    "stb": stb_index_backup
-}
 
+
+index_lookup = {
+    "experiment_assay_combined": experiment_index_backup,
+    "STB_combined": stb_index_backup
+}
 
 combined_latent_df = reconstruct_combined_latent_df(Z, dataset_mapping, index_lookup)
 
