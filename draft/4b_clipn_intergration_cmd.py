@@ -228,6 +228,37 @@ def group_and_filter_data(df):
     return df
 
 
+def decode_clipn_predictions(predicted_labels, predicted_cpd_ids,
+                             cpd_type_encoder, cpd_id_encoder):
+    """
+    Decode numeric predictions back to original 'cpd_type' and 'cpd_id' labels.
+
+    Parameters
+    ----------
+    predicted_labels : np.ndarray or list
+        Predicted numeric `cpd_type` values (from CLIPn or similar models).
+    predicted_cpd_ids : np.ndarray or list
+        Predicted numeric `cpd_id` values (optional, if used for clustering).
+
+    cpd_type_encoder : LabelEncoder
+        Fitted LabelEncoder used to encode 'cpd_type'.
+
+    cpd_id_encoder : LabelEncoder
+        Fitted LabelEncoder used to encode 'cpd_id'.
+
+    Returns
+    -------
+    tuple
+        - original_labels : np.ndarray
+            Decoded `cpd_type` labels.
+        - original_cpd_ids : np.ndarray
+            Decoded `cpd_id` labels.
+    """
+    original_labels = cpd_type_encoder.inverse_transform(predicted_labels)
+    original_cpd_ids = cpd_id_encoder.inverse_transform(predicted_cpd_ids)
+    return original_labels, original_cpd_ids
+
+
 def compute_pairwise_distances(latent_df):
     """
     Compute the pairwise Euclidean distance between compounds in latent space.
@@ -245,6 +276,7 @@ def compute_pairwise_distances(latent_df):
     dist_matrix = cdist(latent_df.values, latent_df.values, metric="euclidean")
     dist_df = pd.DataFrame(dist_matrix, index=latent_df.index, columns=latent_df.index)
     return dist_df
+
 
 def generate_similarity_summary(dist_df):
     """
@@ -326,6 +358,28 @@ def plot_umap_colored_by_experiment(umap_df, output_file, color_map=None):
 
     except Exception as e:
         logger.error(f"Error generating UMAP experiment visualization: {e}. Continuing script execution.")
+
+
+def restore_encoded_labels(encoded_series, encoder):
+    """
+    Restores original categorical labels from an encoded Series using the fitted LabelEncoder.
+
+    Parameters
+    ----------
+    encoded_series : pd.Series or np.ndarray
+        Encoded numeric labels to be restored.
+
+    encoder : sklearn.preprocessing.LabelEncoder
+        The fitted LabelEncoder used during encoding.
+
+    Returns
+    -------
+    np.ndarray
+        Array of original categorical labels.
+    """
+    if encoder is None:
+        raise ValueError("Encoder must be provided and fitted.")
+    return encoder.inverse_transform(encoded_series)
 
 
 
@@ -523,45 +577,71 @@ def process_common_columns(df1, df2, step="before"):
     return df1_filtered, df2_filtered, common_columns
 
 
-def encode_cpd_data(dataframes, encode=False):
+def encode_cpd_data(dataframes, encode_labels=False):
     """
-    Ensures 'cpd_id', 'Library', and 'cpd_type' are set as a MultiIndex
-    and optionally encodes them for machine learning.
+    Applies MultiIndex and optionally encodes 'cpd_id' and 'cpd_type' for ML.
 
     Parameters
     ----------
     dataframes : dict
-        Dictionary where keys are dataset names and values are DataFrames.
-    encode : bool, optional
-        If True, encodes 'cpd_id' and 'cpd_type' numerically (default is False).
+        Dictionary of dataset name to DataFrame.
+    encode_labels : bool, optional
+        If True, returns encoded labels and mappings. Default is False.
 
     Returns
     -------
     dict
-        Dictionary of processed DataFrames with MultiIndex applied.
+        Dictionary with structure:
+        {
+            "dataset_name": {
+                "data": DataFrame,
+                "cpd_type_encoded": np.ndarray,
+                "cpd_type_mapping": dict,
+                "cpd_id_mapping": dict
+            }
+        }
+        If encode_labels is False, only returns {"dataset_name": DataFrame}.
     """
-    processed_dfs = {}
+    from sklearn.preprocessing import LabelEncoder
+
+    results = {}
 
     for name, df in dataframes.items():
-        if df is not None and not df.empty:
-            # Ensure 'cpd_id', 'Library', and 'cpd_type' exist before indexing
-            if {"cpd_id", "Library", "cpd_type"}.issubset(df.columns):
-                df = df.set_index(["cpd_id", "Library", "cpd_type"])
-            else:
-                raise ValueError(f"Missing required columns in {name} dataset: {df.columns}")
+        if df is None or df.empty:
+            continue
 
-            # Encode 'cpd_id' and 'cpd_type' if requested
-            if encode:
-                df = df.copy()  # Ensure we don't modify the original dataframe
-                df["cpd_id_encoded"] = LabelEncoder().fit_transform(df.index.get_level_values("cpd_id"))
-                df["cpd_type_encoded"] = LabelEncoder().fit_transform(df.index.get_level_values("cpd_type"))
+        # Ensure proper index
+        if {"cpd_id", "Library", "cpd_type"}.issubset(df.columns):
+            df = df.set_index(["cpd_id", "Library", "cpd_type"])
+        elif not isinstance(df.index, pd.MultiIndex):
+            raise ValueError(f"{name} is missing MultiIndex or required columns.")
 
-                # Restore MultiIndex after encoding
-                df = df.reset_index().set_index(["cpd_id", "Library", "cpd_type"])
+        output = {"data": df}
 
-            processed_dfs[name] = df
+        if encode_labels:
+            # Encode cpd_type
+            le_type = LabelEncoder()
+            cpd_type_encoded = le_type.fit_transform(df.index.get_level_values("cpd_type"))
+            cpd_type_mapping = dict(zip(le_type.classes_, le_type.transform(le_type.classes_)))
 
-    return processed_dfs
+            # Encode cpd_id
+            le_id = LabelEncoder()
+            cpd_id_encoded = le_id.fit_transform(df.index.get_level_values("cpd_id"))
+            cpd_id_mapping = dict(zip(le_id.classes_, le_id.transform(le_id.classes_)))
+            # Add to DataFrame (with restored MultiIndex)
+            df = df.copy()
+            df["cpd_type_encoded"] = cpd_type_encoded
+            df["cpd_id_encoded"] = cpd_id_encoded
+            output.update({
+                "data": df,
+                "cpd_type_encoded": cpd_type_encoded,
+                "cpd_type_mapping": cpd_type_mapping,
+                "cpd_type_encoder": le_type,
+                "cpd_id_mapping": cpd_id_mapping,
+                "cpd_id_encoder": le_id
+            })
+        results[name] = output
+    return results
 
 
 
@@ -817,6 +897,7 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
 
     return umap_df
 
+
 # Ensure index backup is not empty and restore MultiIndex properly
 def restore_multiindex(imputed_df, index_backup, dataset_name):
     """
@@ -915,8 +996,6 @@ main_output_folder = f"{experiment_name}_clipn_output"
 os.makedirs(main_output_folder, exist_ok=True)
 
 ##################################################################
-# **3. Initialize Logger BEFORE Calling logger.info()**
-
 # Determine the log file name (including the experiment prefix)
 log_filename = os.path.join(main_output_folder, f"{experiment_name}_clipn_intergration.log")
 
@@ -1046,7 +1125,7 @@ if {"cpd_id", "Library", "cpd_type"}.issubset(stb_data.columns):
 
 
 
-    # Check if MultiIndex contains these columns
+# Check if MultiIndex contains these columns
 if isinstance(experiment_data.index, pd.MultiIndex):
     index_levels = experiment_data.index.names  # Get MultiIndex level names
 else:
@@ -1151,14 +1230,6 @@ experiment_data_imputed, stb_data_imputed, stb_labels, \
                                            impute_method=args.impute_method, 
                                            knn_neighbors=args.knn_neighbors)
 
-# Restore the original MultiIndex after imputation
-# Ensure index backup is not empty
-
-# Restore MultiIndex for both datasets
-experiment_data_imputed = restore_multiindex(experiment_data_imputed, experiment_index_backup, "experiment")
-stb_data_imputed = restore_multiindex(stb_data_imputed, stb_index_backup, "stb")
-
-
 
 
 # Step 2: Now it's safe to check for missing columns
@@ -1197,47 +1268,6 @@ logger.info(f"Columns lost during imputation: {len(columns_lost)}")
 logger.info(f"Lost columns: {columns_lost}")  # Add this line
 
 
-# Ensure original data exists
-if experiment_data is not None and stb_data is not None:
-
-    # Restore 'cpd_id', 'Library', and 'cpd_type' before setting MultiIndex
-    experiment_data_imputed = experiment_data_imputed.copy()
-    stb_data_imputed = stb_data_imputed.copy()
-
-    for col in ["cpd_id", "Library", "cpd_type"]:
-        if col in experiment_data.index.names:
-            experiment_data_imputed[col] = experiment_data.index.get_level_values(col)
-        elif col in experiment_data.columns:
-            experiment_data_imputed[col] = experiment_data[col]
-        else:
-            logger.warning(f"Warning: {col} not found in experiment_data!")
-
-        if col in stb_data.index.names:
-            stb_data_imputed[col] = stb_data.index.get_level_values(col)
-        elif col in stb_data.columns:
-            stb_data_imputed[col] = stb_data[col]
-        else:
-            logger.warning(f"Warning: {col} not found in stb_data!")
-
-    logger.info("Restored 'cpd_id', 'Library', and 'cpd_type' to imputed datasets.")
-
-# Now check if columns exist before setting MultiIndex
-missing_exp_cols = {"cpd_id", "Library", "cpd_type"} - set(experiment_data_imputed.columns)
-missing_stb_cols = {"cpd_id", "Library", "cpd_type"} - set(stb_data_imputed.columns)
-
-if missing_exp_cols:
-    raise ValueError(f"Missing restored columns in experiment_data_imputed: {missing_exp_cols}")
-
-if missing_stb_cols:
-    raise ValueError(f"Missing restored columns in stb_data_imputed: {missing_stb_cols}")
-
-# Now, we can safely set MultiIndex
-experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-
-logger.info(f"Successfully restored MultiIndex: {experiment_data_imputed.index.names}")
-logger.info(f"Successfully restored MultiIndex: {stb_data_imputed.index.names}")
-
 
 
 #   Check if experiment_data_imputed is None before accessing .shape
@@ -1253,11 +1283,16 @@ else:
     logger.info("STB data is None after imputation.")
 
 
+# Save MultiIndex from imputed data BEFORE passing to CLIPn (for later reconstruction)
+experiment_index_backup = experiment_data_imputed.index if experiment_data_imputed is not None else None
+stb_index_backup = stb_data_imputed.index if stb_data_imputed is not None else None
+
 # Check if MultiIndex still exists after imputation
 logger.info(f"Experiment MultiIndex after imputation: {experiment_data_imputed.index.names}")
 logger.info(f"STB MultiIndex after imputation: {stb_data_imputed.index.names}")
 
 # Check if cpd_id and Library are present in columns (if MultiIndex was reset)
+# Sanity check: ensure 'cpd_id' and 'Library' are still present after imputation
 missing_cols_experiment = {"cpd_id", "Library"} - set(experiment_data_imputed.columns)
 missing_cols_stb = {"cpd_id", "Library"} - set(stb_data_imputed.columns)
 
@@ -1269,28 +1304,42 @@ if missing_cols_stb:
 
 
 
-# If imputation removed MultiIndex, restore it!
-
-# Ensure MultiIndex is restored
-if not isinstance(experiment_data_imputed.index, pd.MultiIndex):
-    experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-    logger.info("Restored MultiIndex for experiment_data_imputed.")
-
-if not isinstance(stb_data_imputed.index, pd.MultiIndex):
-    stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-    logger.info("Restored MultiIndex for stb_data_imputed.")
-
-# Debugging AFTER restoring MultiIndex
-logger.info(f"After restoring - Experiment index levels: {experiment_data_imputed.index.names}")
-logger.info(f"After restoring - STB index levels: {stb_data_imputed.index.names}")
-
+#################################################
+# encode the non numeric, but important cols. 
 # Create dataset labels
 dataset_labels = {0: "experiment Assay", 1: "STB"}
 
-# Initialize dictionaries to store mappings between LabelEncoder values and cpd_id
-experiment_cpd_id_map = {}
-stb_cpd_id_map = {}
+# Encode cpd_type and cpd_id for both experiment and STB datasets
+dataframes = {
+    "experiment": experiment_data,
+    "stb": stb_data
+}
 
+encoded_results = encode_cpd_data(dataframes, encode_labels=True)
+
+# Experiment data
+experiment_data = encoded_results["experiment"]["data"]
+experiment_labels = encoded_results["experiment"]["cpd_type_encoded"]
+experiment_label_mapping = encoded_results["experiment"]["cpd_type_mapping"]
+experiment_cpd_id_map = encoded_results["experiment"]["cpd_id_mapping"]
+experiment_label_encoder = encoded_results["experiment"]["cpd_type_encoder"]
+experiment_id_encoder = encoded_results["experiment"]["cpd_id_encoder"]
+
+# STB data
+stb_data = encoded_results["stb"]["data"]
+stb_labels = encoded_results["stb"]["cpd_type_encoded"]
+stb_label_mapping = encoded_results["stb"]["cpd_type_mapping"]
+stb_cpd_id_map = encoded_results["stb"]["cpd_id_mapping"]
+stb_label_encoder = encoded_results["stb"]["cpd_type_encoder"]
+stb_id_encoder = encoded_results["stb"]["cpd_id_encoder"]
+
+
+logger.info(f"Encoded Experiment Labels: {experiment_labels[:5]}")
+logger.info(f"Encoded STB Labels: {stb_labels[:5]}")
+logger.info(f"Experiment cpd_id mapping size: {len(experiment_cpd_id_map)}")
+logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
+logger.info(f"Experiment label mapping: {experiment_label_mapping}")
+logger.info(f"STB label mapping: {stb_label_mapping}")
 
 
 required_columns = {"cpd_id", "Library", "cpd_type"}
@@ -1306,71 +1355,6 @@ if missing_exp or missing_stb:
     raise ValueError("Critical columns are missing after preprocessing. Check logs above.")
 
 
-# Handle labels (assuming 'cpd_type' exists)
-# Labelencoder as cmp_id and type have to be numeric. 
-# Prepare DataFrames for encoding
-dataframes = {
-    "experiment": experiment_data,
-    "stb": stb_data
-}
-
-# Apply MultiIndex without encoding
-processed_data = encode_cpd_data(dataframes, encode=False)
-
-# If encoding is required (for ML models), apply encoding
-encoded_data = encode_cpd_data(dataframes, encode=True)
-
-# Extract processed datasets
-experiment_data = processed_data.get("experiment")
-stb_data = processed_data.get("stb")
-
-# Extract encoded datasets if needed
-experiment_data_encoded = encoded_data.get("experiment")
-stb_data_encoded = encoded_data.get("stb")
-
-#  Ensure MultiIndex is not lost
-logger.info(f"After encoding - Experiment index levels: {experiment_data.index.names}")
-logger.info(f"After encoding - STB index levels: {stb_data.index.names}")
-
-# Debugging logs
-logger.info(f"Experiment DataFrame after MultiIndexing:\n{experiment_data.head()}")
-logger.info(f"STB DataFrame after MultiIndexing:\n{stb_data.head()}")
-
-# Handle encoded labels for downstream ML tasks
-if experiment_data_encoded is not None:
-    experiment_labels = experiment_data_encoded["cpd_type_encoded"].values
-    experiment_cpd_id_map = dict(zip(experiment_data_encoded.index.get_level_values("cpd_id"),
-                                     experiment_data_encoded["cpd_id_encoded"]))
-    experiment_label_mapping = dict(zip(experiment_data_encoded.index.get_level_values("cpd_type"),
-                                        experiment_data_encoded["cpd_type_encoded"]))
-else:
-    experiment_labels = np.array([])
-    experiment_cpd_id_map = {}
-    experiment_label_mapping = {}
-
-if stb_data_encoded is not None:
-    stb_labels = stb_data_encoded["cpd_type_encoded"].values
-    stb_cpd_id_map = dict(zip(stb_data_encoded.index.get_level_values("cpd_id"),
-                              stb_data_encoded["cpd_id_encoded"]))
-    stb_label_mapping = dict(zip(stb_data_encoded.index.get_level_values("cpd_type"),
-                                 stb_data_encoded["cpd_type_encoded"]))
-else:
-    stb_labels = np.array([])
-    stb_cpd_id_map = {}
-    stb_label_mapping = {}
-
-# Log outputs
-logger.info(f"Encoded Experiment Labels: {experiment_labels[:5] if len(experiment_labels) > 5 else experiment_labels}")
-logger.info(f"Encoded STB Labels: {stb_labels[:5] if len(stb_labels) > 5 else stb_labels}")
-logger.info(f"Experiment cpd_id mapping size: {len(experiment_cpd_id_map)}")
-logger.info(f"STB cpd_id mapping size: {len(stb_cpd_id_map)}")
-logger.info(f"Experiment label mapping: {experiment_label_mapping}")
-logger.info(f"STB label mapping: {stb_label_mapping}")
-
-
-
-logger.info(f"Experiment label mapping: {experiment_label_mapping}")
-logger.info(f"Experiment cpd_id mapping size: {len(experiment_cpd_id_map)}")
 
 # Define datasets to process
 datasets = {
@@ -1409,23 +1393,6 @@ filter_pattern = re.compile(
 # Reassign the updated datasets
 experiment_data_imputed = datasets["experiment"]
 stb_data_imputed = datasets["stb"]
-
-
-
-# If imputation removed MultiIndex, restore it!
-if {"cpd_id", "Library", "cpd_type"}.issubset(experiment_data.columns):
-    experiment_data_imputed = restore_non_numeric(experiment_data_imputed, experiment_data)
-    experiment_data_imputed = experiment_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-    logger.info("Restored MultiIndex after imputation for experiment_data_imputed.")
-else:
-    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
-
-if {"cpd_id", "Library", "cpd_type"}.issubset(stb_data.columns):
-    stb_data_imputed = restore_non_numeric(stb_data_imputed, stb_data)
-    stb_data_imputed = stb_data_imputed.set_index(["cpd_id", "Library", "cpd_type"])
-    logger.info("Restored MultiIndex after imputation for stb_data_imputed.")
-else:
-    raise ValueError("Critical columns missing BEFORE imputation! Check previous steps.")
 
 
 
