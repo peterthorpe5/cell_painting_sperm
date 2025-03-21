@@ -31,7 +31,7 @@ import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import squareform
 import optuna
-
+logger = logging.getLogger(__name__)
 
 
 
