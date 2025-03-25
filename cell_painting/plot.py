@@ -112,6 +112,22 @@ def plot_umap_coloured_by_experiment(umap_df, output_file, color_map=None):
         logger.error(f"Error generating UMAP experiment visualization: {e}. Continuing script execution.")
 
 
+def load_latent_data(latent_csv_path):
+    """
+    Load latent representations with MultiIndex.
+
+    Parameters
+    ----------
+    latent_csv_path : str
+        Path to CSV file.
+
+    Returns
+    -------
+    pd.DataFrame
+        Latent data with MultiIndex.
+    """
+    return pd.read_csv(latent_csv_path, index_col=[0, 1, 2])
+
 
 def plot_distance_heatmap(dist_df, output_path):
     """

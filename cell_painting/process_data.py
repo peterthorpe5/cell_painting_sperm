@@ -38,6 +38,67 @@ logger = logging.getLogger(__name__)
 
 ##################################################################
 # functions
+
+def load_datasets_from_folderlist(list_file_path, exclude_file_substring=None):
+    """
+    Load datasets from a list file specifying dataset names and folder paths.
+    Each line in the list file should be:
+        dataset_name    /path/to/folder
+
+    The function will read all `.csv` files in each folder (except ones containing `exclude_file_substring`).
+    Each CSV is assumed to have a MultiIndex: ['cpd_id', 'Library', 'cpd_type'].
+
+    Parameters
+    ----------
+    list_file_path : str
+        Path to the list file with dataset names and folders.
+
+    exclude_file_substring : str, optional
+        If provided, any CSV file containing this substring in the filename will be skipped.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping dataset names to concatenated DataFrames.
+    """
+    datasets = {}
+
+    with open(list_file_path, "r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+
+            parts = line.strip().split()
+            if len(parts) != 2:
+                raise ValueError(f"Invalid line in list file: '{line.strip()}'")
+
+            dataset_name, folder_path = parts
+            folder_path = folder_path.strip()
+
+            if not os.path.isdir(folder_path):
+                raise FileNotFoundError(f"Folder not found: {folder_path}")
+
+            csv_files = [f for f in os.listdir(folder_path)
+                         if f.endswith(".csv") and
+                         (exclude_file_substring not in f if exclude_file_substring else True)]
+
+            dataframes = []
+            for csv_file in csv_files:
+                csv_path = os.path.join(folder_path, csv_file)
+                df = pd.read_csv(csv_path, index_col=[0, 1, 2])
+                df.index.names = ["cpd_id", "Library", "cpd_type"]
+                dataframes.append(df)
+
+            if not dataframes:
+                raise ValueError(f"No CSV files found for dataset '{dataset_name}' in '{folder_path}'")
+
+            combined_df = pd.concat(dataframes)
+            datasets[dataset_name] = combined_df
+
+    return datasets
+
+
+
 def objective(trial, X, y):
     """
     Objective function for Optuna hyperparameter tuning of CLIPn.
