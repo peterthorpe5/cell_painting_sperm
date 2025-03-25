@@ -12,12 +12,6 @@ more doc to come once drafted more.
 Logging also needed. 
 
 """
-
-
-
-#!/usr/bin/env python
-# impute_missing_data.py
-
 import argparse
 import os
 import pandas as pd
@@ -30,15 +24,25 @@ from process_data import (
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Impute and encode multiple datasets for CLIPn analysis.")
-    parser.add_argument("--dataset-list", required=True,
+    parser.add_argument("--dataset-list", 
+                        required=True,
                         help="Path to dataset list file (each line: dataset_name folder_path)")
-    parser.add_argument("--output-folder", required=True, help="Folder to save imputed and encoded files")
-    parser.add_argument("--exclude-substring", default=None,
+    parser.add_argument("--output-folder", 
+                        required=True, 
+                        help="Folder to save imputed and encoded files")
+    parser.add_argument("--exclude-substring", 
+                        default=None,
                         help="Substring of CSV filenames to exclude (optional)")
-    parser.add_argument("--impute-method", choices=["median", "knn"], default="median",
+    parser.add_argument("--impute-method", 
+                        choices=["median", "knn"], default="knn",
                         help="Imputation method to use")
-    parser.add_argument("--knn-neighbors", type=int, default=5, help="Neighbors for KNN imputation")
-    parser.add_argument("--encode-labels", action="store_true", help="Whether to encode labels")
+    parser.add_argument("--knn-neighbors", 
+                        type=int, 
+                        default=5, 
+                        help="Neighbors for KNN imputation")
+    parser.add_argument("--encode-labels", 
+                        action="store_true", 
+                        help="Whether to encode labels")
     return parser.parse_args()
 
 

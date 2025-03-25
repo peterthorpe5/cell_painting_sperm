@@ -156,13 +156,30 @@ def run_clipn(datasets, reference, output_folder, latent_dim, epochs, lr, mode="
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run CLIPn clustering on multiple datasets.")
-    parser.add_argument("--datasets", required=True, help="Path to the dataset list file.")
-    parser.add_argument("--output", required=True, help="Output folder to save results.")
-    parser.add_argument("--reference", required=False, help="Reference dataset name (for reference mode).")
-    parser.add_argument("--use-pre-encoded", action="store_true", help="Use pre-encoded data (skip encoding).")
-    parser.add_argument("--latent-dim", type=int, default=20, help="Number of latent dimensions.")
-    parser.add_argument("--epochs", type=int, default=200, help="Number of training epochs.")
-    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate for CLIPn.")
+    parser.add_argument("--datasets", 
+                        required=True, 
+                        help="Path to the dataset list file.")
+    parser.add_argument("--output", 
+                        required=True, 
+                        help="Output folder to save results.")
+    parser.add_argument("--reference", 
+                        required=False, 
+                        help="Reference dataset name (for reference mode).")
+    parser.add_argument("--use-pre-encoded", 
+                        action="store_true", 
+                        help="Use pre-encoded data (skip encoding).")
+    parser.add_argument("--latent-dim", 
+                        type=int, 
+                        default=20, 
+                        help="Number of latent dimensions.")
+    parser.add_argument("--epochs", 
+                        type=int, 
+                        default=300, 
+                        help="Number of training epochs.")
+    parser.add_argument("--lr", 
+                        type=float, 
+                        default=1e-5, 
+                        help="Learning rate for CLIPn.")
 
     args = parser.parse_args()
 
