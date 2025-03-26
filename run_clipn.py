@@ -32,7 +32,7 @@ from pathlib import Path
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from sklearn import set_config
-from cell_painting.run_cplin import (
+from cell_painting.run_clipn import (
     load_and_harmonise_datasets,
     encode_labels,
     decode_labels,
