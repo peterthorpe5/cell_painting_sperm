@@ -39,6 +39,10 @@ import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from umap import UMAP
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
 
 
 # Configure logging
@@ -58,10 +62,7 @@ def umap_scatter_save(Z: dict, y: dict, path: str) -> None:
     path : str
         Path prefix for saving the output UMAP images (e.g., 'output/umap').
     """
-    from umap import UMAP
-    import matplotlib.pyplot as plt
-    import pandas as pd
-    import numpy as np
+
 
     keys = list(Z.keys())
     latent = np.vstack([Z[k] for k in keys])
