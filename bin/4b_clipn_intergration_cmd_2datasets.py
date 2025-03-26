@@ -70,6 +70,10 @@ import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import squareform
 import optuna
+
+# Add parent directory to Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from cell_painting.plot import (
         plot_dendrogram,
         plot_umap_coloured_by_experiment,
