@@ -87,7 +87,7 @@ def load_annotation(annotation_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--in", 
+    parser.add_argument("--input", 
                         required=True,
                         help="input folder of cvs. OR a single csv, normalised")
     parser.add_argument("--out", 
@@ -116,7 +116,7 @@ if __name__ == "__main__":
 
 
     # === Load Data ===
-    input_path = Path(args.in)
+    input_path = Path(args.input)
 
     if input_path.suffix == ".csv":
         # Use the single specified CSV file
