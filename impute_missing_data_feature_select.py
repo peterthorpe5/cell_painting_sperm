@@ -50,7 +50,7 @@ from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn import set_config
 set_config(transform_output="pandas")
 
-from cel_painting.process_data import group_and_filter_data
+from cell_painting.process_data import group_and_filter_data
 from packaging import version
 
 if version.parse(sklearn.__version__) < version.parse("1.2"):
