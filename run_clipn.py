@@ -38,6 +38,11 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from sklearn import set_config
 import csv
+from cell_painting.process_data import (
+
+        prepare_data_for_clipn,
+
+)
 
 
 set_config(transform_output="pandas")
