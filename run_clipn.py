@@ -88,7 +88,7 @@ def detect_csv_delimiter(csv_path):
 def load_and_harmonise_datasets(datasets_csv, logger):
     """Load datasets from CSV and harmonise columns."""
     delimiter = detect_csv_delimiter(datasets_csv)
-    delimiter = "\t"
+
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
