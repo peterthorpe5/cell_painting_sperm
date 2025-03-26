@@ -105,6 +105,15 @@ def save_latent_representations(Z, output_folder, dataset_mapping, index_lookup)
     combined_output_file = os.path.join(output_folder, "CLIPn_latent_representations_with_cpd_id.csv")
     combined_latent_df.to_csv(combined_output_file)
     logger.info(f"Combined latent DataFrame saved to {combined_output_file}.")
+    # Save metadata (cpd_id, cpd_type, Library) for downstream analysis
+    metadata_cols = ["cpd_id", "cpd_type"]
+    if "Library" in combined_latent_df.index.names:
+        metadata_cols.append("Library")
+
+    metadata_df = combined_latent_df.reset_index()[metadata_cols]
+    metadata_df.to_csv(os.path.join(output_folder, "latent_metadata.csv"), index=False)
+    logger.info("Latent metadata saved to 'latent_metadata.csv'")
+
 
 def run_clipn(datasets, reference, output_folder, latent_dim, epochs, lr, mode="reference"):
     """
