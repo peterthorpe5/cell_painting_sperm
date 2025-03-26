@@ -13,7 +13,7 @@ The script processes input CSV files from Cell Painting assays by:
 Command-Line Arguments:
 -----------------------
     --input_dir                : Directory containing input CSV files.
-    --output_dir               : Directory where outputs will be saved.
+    --out               : Directory where outputs will be saved.
     --experiment          : Name of the experiment.
     --impute_method            : Method for imputing missing values ('median' or 'knn').
     --knn_neighbors            : Number of neighbors for KNN imputation.
@@ -24,7 +24,7 @@ Example Usage:
 --------------
     python impute_missing_data.py \
         --input_dir ./data/raw \
-        --output_dir ./data/processed \
+        --out ./data/processed \
         --experiment MyExperiment \
         --impute_method knn \
         --knn_neighbors 5 \
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
     logger.info(f"Experiment Name: {args.experiment}")
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.out, exist_ok=True)
 
 
     # === Load Data ===
@@ -179,7 +179,7 @@ if __name__ == "__main__":
             df.set_index(required_cols, inplace=True)
 
         grouped_filtered_df = group_and_filter_data(df)
-        grouped_filtered_file = output_dir / f"{args.experiment}_grouped_filtered.csv"
+        grouped_filtered_file = out / f"{args.experiment}_grouped_filtered.csv"
         grouped_filtered_df.to_csv(grouped_filtered_file)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
@@ -193,7 +193,7 @@ if __name__ == "__main__":
     logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
 
     # === Save Final Cleaned Output ===
-    output_path = Path(args.output_dir) / f"{args.experiment}_cleaned.csv"
+    output_path = Path(args.out) / f"{args.experiment}_cleaned.csv"
     df_selected.to_csv(output_path)
     logger.info(f"Final cleaned data saved to {output_path}")
 
