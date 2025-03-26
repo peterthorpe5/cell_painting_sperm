@@ -83,6 +83,55 @@ def load_annotation(annotation_path):
     except Exception as e:
         logger.warning(f"Annotation file could not be loaded: {e}")
         return None
+    
+def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Renames columns in the annotation DataFrame to match expected schema.
+
+    Parameters
+    ----------
+    annotation_df : pd.DataFrame
+        The raw annotation DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        Standardised annotation DataFrame with expected columns.
+    """
+    rename_map = {
+        "COMPOUND_NAME": "cpd_id",
+        "Library": "Library",
+        "Source_Plate_Barcode": "Plate_Metadata",
+        "Source_Well": "Well_Metadata"
+    }
+
+    annotation_df = annotation_df.rename(columns={
+        k: v for k, v in rename_map.items() if k in annotation_df.columns
+    })
+
+    # Ensure required columns exist
+    required = ["cpd_id", "Library", "Plate_Metadata", "Well_Metadata"]
+    missing = [col for col in required if col not in annotation_df.columns]
+    if missing:
+        logger.warning(f"Annotation file is missing expected columns: {missing}")
+
+    return annotation_df
+
+
+# === Optional Annotation Merge ===
+if args.annotation_file:
+    try:
+        annotation_df = pd.read_csv(args.annotation_file)
+        logger.info(f"Annotation file loaded: {args.annotation_file}")
+        annotation_df = standardise_annotation_columns(annotation_df)
+
+        # Set appropriate index for joining
+        annotation_df = annotation_df.set_index(["Plate_Metadata", "Well_Metadata"])
+        df = df.join(annotation_df, how="inner")
+        logger.info(f"Data merged with annotation. New shape: {df.shape}")
+    except Exception as e:
+        logger.warning(f"Annotation file could not be processed: {e}")
+    
 
 
 if __name__ == "__main__":
