@@ -118,22 +118,6 @@ def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
     return annotation_df
 
 
-# === Optional Annotation Merge ===
-if args.annotation_file:
-    try:
-        annotation_df = pd.read_csv(args.annotation_file)
-        logger.info(f"Annotation file loaded: {args.annotation_file}")
-        annotation_df = standardise_annotation_columns(annotation_df)
-
-        # Set appropriate index for joining
-        annotation_df = annotation_df.set_index(["Plate_Metadata", "Well_Metadata"])
-        df = df.join(annotation_df, how="inner")
-        logger.info(f"Data merged with annotation. New shape: {df.shape}")
-    except Exception as e:
-        logger.warning(f"Annotation file could not be processed: {e}")
-    
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", 
@@ -210,10 +194,18 @@ if __name__ == "__main__":
 
     # === Optional Annotation Merge ===
     if args.annotation_file:
-        annotation_df = load_annotation(args.annotation_file)
-        if annotation_df is not None:
-            df = df.join(annotation_df, how='inner')
+        try:
+            annotation_df = pd.read_csv(args.annotation_file)
+            logger.info(f"Annotation file loaded: {args.annotation_file}")
+            annotation_df = standardise_annotation_columns(annotation_df)
+
+            # Set appropriate index for joining
+            annotation_df = annotation_df.set_index(["Plate_Metadata", "Well_Metadata"])
+            df = df.join(annotation_df, how="inner")
             logger.info(f"Data merged with annotation. New shape: {df.shape}")
+        except Exception as e:
+            logger.warning(f"Annotation file could not be processed: {e}")
+
 
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
