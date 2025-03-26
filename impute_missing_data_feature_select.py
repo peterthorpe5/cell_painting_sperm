@@ -61,9 +61,22 @@ from cell_painting.process_data import (
 )
 
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+if sys.version_info[:1] != (3,):
+    # e.g. sys.version_info(major=3, minor=9, micro=7,
+    # releaselevel='final', serial=0)
+    # break the program
+    print ("currently using:", sys.version_info,
+           "  version of python")
+    raise ImportError("Python 3.x is required")
+    print ("did you activate the virtual environment?")
+    print ("this is to deal with module imports")
+    sys.exit(1)
+
+VERSION = "cell painting: intergration: v0.0.1"
+if "--version" in sys.argv:
+    print(VERSION)
+    sys.exit(1)
+
 
 
 if __name__ == "__main__":
@@ -87,6 +100,29 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Setup logging
+    log_filename = os.path.join(Path(args.out) / f"{args.experiment}_intergration.log")
+
+    # **Proper Logger Initialization**
+    logger = logging.getLogger(f"{experiment}: {time.asctime()}")
+    logger.setLevel(logging.DEBUG)  # Capture all levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+
+    # Stream Handler (stderr)
+    err_handler = logging.StreamHandler(sys.stderr)
+    err_formatter = logging.Formatter('%(levelname)s: %(message)s')
+    err_handler.setFormatter(err_formatter)
+    logger.addHandler(err_handler)
+
+    # File Handler (Logfile)
+    try:
+        logstream = open(log_filename, 'w')
+        err_handler_file = logging.StreamHandler(logstream)
+        err_handler_file.setFormatter(err_formatter)
+        err_handler_file.setLevel(logging.INFO)  # Logfile should always be verbose
+        logger.addHandler(err_handler_file)
+    except Exception as e:
+        print(f"Could not open {log_filename} for logging: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
     logger.info(f"Python Version: {sys.version_info}")
