@@ -163,10 +163,9 @@ def optimise_clipn(X, y, n_trials=40):
     return study.best_trial.params
 
 
-
-def group_and_filter_data(df):
+def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Groups data by `cpd_id` and `Library`, then drops unwanted columns.
+    Groups data by cpd_id and Library, drops known metadata columns, and averages numeric features.
 
     Parameters
     ----------
@@ -179,20 +178,28 @@ def group_and_filter_data(df):
         The grouped and cleaned DataFrame.
     """
     if df is None or df.empty:
-        return df  # Return as-is if empty or None
-    # Ensure 'cpd_id' and 'Library' are in the MultiIndex
+        return df
+
     if not isinstance(df.index, pd.MultiIndex):
         raise ValueError("Expected a MultiIndex DataFrame with ['cpd_id', 'Library', 'cpd_type'].")
-    # Group by `cpd_id` and `Library` (taking the mean for numeric values)
-    df = df.groupby(["cpd_id", "Library"], as_index=True).mean()
-    # Define columns to drop based on known noise patterns
-    filter_cols = df.columns.str.contains(
-        r"Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|Source_Well|"
-        r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_[XYZ]|Well_Metadata|"
-        r"no_|fn_"
-    )
-    df = df.loc[:, ~filter_cols]
-    return df
+
+    # Drop known non-feature metadata columns
+    filter_cols = df.columns[df.columns.str.contains(
+        r"Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
+        r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_[XYZ]|"
+        r"no_|fn_|Source_Well|Source_Plate_Well|Source_Well|Well_Metadata", case=False
+    )]
+
+    df = df.drop(columns=filter_cols, errors="ignore")
+
+    # Select numeric columns for grouping
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df_numeric = df[numeric_cols]
+
+    # Group by cpd_id and Library while preserving as index
+    grouped = df_numeric.groupby(["cpd_id", "Library"], as_index=True).mean()
+
+    return grouped
 
 
 
