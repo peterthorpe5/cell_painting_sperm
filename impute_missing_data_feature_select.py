@@ -87,14 +87,14 @@ def load_annotation(annotation_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", 
+    parser.add_argument("--in", 
                         required=True,
                         help="input folder of cvs. OR a single csv, normalised")
-    parser.add_argument("--output_dir", 
+    parser.add_argument("--out", 
                         default="processed")
-    parser.add_argument("--experiment_name", 
+    parser.add_argument("--experiment", 
                         default="Experiment")
-    parser.add_argument("--impute_method", 
+    parser.add_argument("--impute", 
                         choices=["median", "knn"], 
                         default="knn")
     parser.add_argument("--knn_neighbors", 
@@ -134,6 +134,20 @@ if __name__ == "__main__":
     dataframes = [pd.read_csv(f, index_col=0) for f in input_files]
     df = pd.concat(dataframes, axis=0)
     logger.info(f"Initial data shape: {df.shape}")
+
+    # Rename common compound column names
+    rename_map = {
+        "COMPOUND_NAME": "cpd_id",
+        "Library": "Library",
+        "Source_Plate_Barcode": "Plate_Metadata",
+        "Source_Well": "Well_Metadata"
+    }
+
+    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+    if "cpd_type" not in df.columns:
+        logger.warning("'cpd_type' not found in data; setting it equal to 'Library'")
+        df["cpd_type"] = df["Library"]
+
 
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
