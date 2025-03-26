@@ -157,7 +157,7 @@ if __name__ == "__main__":
     # === Imputation ===
     imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
     df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
-    logger.info(f"Imputation ({args.impute_method}) completed.")
+    logger.info(f"Imputation ({args.impute}) completed.")
 
     # === Optional Annotation Merge ===
     if args.annotation_file:
