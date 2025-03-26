@@ -163,6 +163,97 @@ def optimise_clipn(X, y, n_trials=40):
     return study.best_trial.params
 
 
+def variance_threshold_selector(data, threshold=0.05):
+    """Select features based on variance threshold."""
+    selector = VarianceThreshold(threshold)
+    selector.fit(data)
+    return data.iloc[:, selector.get_support(indices=True)]
+
+
+def correlation_filter(data, threshold=0.99):
+    """Remove highly correlated features based on threshold."""
+    corr_matrix = data.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    drop_cols = [column for column in upper.columns if any(upper[column] > threshold)]
+    return data.drop(columns=drop_cols)
+
+
+def load_annotation(annotation_path):
+    """Load annotation file safely."""
+    try:
+        annotation_df = pd.read_csv(annotation_path)
+        annotation_df.columns = annotation_df.columns.str.strip().str.replace(" ", "_")
+        annotation_df.set_index(['Plate_Metadata', 'Well_Metadata'], inplace=True)
+        logger.info(f"Annotation file loaded with shape {annotation_df.shape}")
+        return annotation_df
+    except Exception as e:
+        logger.warning(f"Annotation file could not be loaded: {e}")
+        return None
+
+
+def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Renames columns in the annotation DataFrame to match expected schema.
+
+    Parameters
+    ----------
+    annotation_df : pd.DataFrame
+        The raw annotation DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        Standardised annotation DataFrame with expected columns.
+    """
+    rename_map = {
+        "COMPOUND_NAME": "cpd_id",
+        "Library": "Library",
+        "Source_Plate_Barcode": "Plate_Metadata",
+        "Source_Well": "Well_Metadata"
+    }
+
+    annotation_df = annotation_df.rename(columns={
+        k: v for k, v in rename_map.items() if k in annotation_df.columns
+    })
+
+    # Ensure required columns exist
+    required = ["cpd_id", "Library", "Plate_Metadata", "Well_Metadata"]
+    missing = [col for col in required if col not in annotation_df.columns]
+    if missing:
+        logger.warning(f"Annotation file is missing expected columns: {missing}")
+
+    return annotation_df
+
+
+def standardise_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Standardises metadata column names for downstream processing.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with standardised column names.
+    """
+    rename_map = {
+        "library": "Library",
+        "compound_name": "cpd_id",
+        "COMPOUND_NAME": "cpd_id",
+        "Source_Plate_Barcode": "Plate_Metadata",
+        "Source_Well": "Well_Metadata"
+    }
+    for old, new in rename_map.items():
+        if old in df.columns and new not in df.columns:
+            df.rename(columns={old: new}, inplace=True)
+            logger.info(f"Renamed column '{old}' to '{new}'")
+    return df
+
+
+
 def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Groups data by cpd_id and Library, drops known metadata columns, and averages numeric features.

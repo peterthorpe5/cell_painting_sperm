@@ -50,72 +50,19 @@ from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn import set_config
 set_config(transform_output="pandas")
 
-from cell_painting.process_data import group_and_filter_data
+from cell_painting.process_data import (
+    group_and_filter_data, 
+    standardise_metadata_columns,
+    variance_threshold_selector,
+    correlation_filter,
+    load_annotation,
+    standardise_annotation_columns
+)
 
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-def variance_threshold_selector(data, threshold=0.05):
-    """Select features based on variance threshold."""
-    selector = VarianceThreshold(threshold)
-    selector.fit(data)
-    return data.iloc[:, selector.get_support(indices=True)]
-
-
-def correlation_filter(data, threshold=0.99):
-    """Remove highly correlated features based on threshold."""
-    corr_matrix = data.corr().abs()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    drop_cols = [column for column in upper.columns if any(upper[column] > threshold)]
-    return data.drop(columns=drop_cols)
-
-
-def load_annotation(annotation_path):
-    """Load annotation file safely."""
-    try:
-        annotation_df = pd.read_csv(annotation_path)
-        annotation_df.columns = annotation_df.columns.str.strip().str.replace(" ", "_")
-        annotation_df.set_index(['Plate_Metadata', 'Well_Metadata'], inplace=True)
-        logger.info(f"Annotation file loaded with shape {annotation_df.shape}")
-        return annotation_df
-    except Exception as e:
-        logger.warning(f"Annotation file could not be loaded: {e}")
-        return None
-    
-def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Renames columns in the annotation DataFrame to match expected schema.
-
-    Parameters
-    ----------
-    annotation_df : pd.DataFrame
-        The raw annotation DataFrame.
-
-    Returns
-    -------
-    pd.DataFrame
-        Standardised annotation DataFrame with expected columns.
-    """
-    rename_map = {
-        "COMPOUND_NAME": "cpd_id",
-        "Library": "Library",
-        "Source_Plate_Barcode": "Plate_Metadata",
-        "Source_Well": "Well_Metadata"
-    }
-
-    annotation_df = annotation_df.rename(columns={
-        k: v for k, v in rename_map.items() if k in annotation_df.columns
-    })
-
-    # Ensure required columns exist
-    required = ["cpd_id", "Library", "Plate_Metadata", "Well_Metadata"]
-    missing = [col for col in required if col not in annotation_df.columns]
-    if missing:
-        logger.warning(f"Annotation file is missing expected columns: {missing}")
-
-    return annotation_df
 
 
 if __name__ == "__main__":
@@ -166,21 +113,15 @@ if __name__ == "__main__":
 
     dataframes = [pd.read_csv(f, index_col=0) for f in input_files]
     df = pd.concat(dataframes, axis=0)
+
+    # Normalise column naming
+    if "library" in df.columns and "Library" not in df.columns:
+        df.rename(columns={"library": "Library"}, inplace=True)
+        logger.info("Renamed column 'library' to 'Library' for consistency.")
+
     logger.info(f"Initial data shape: {df.shape}")
 
-    # Rename common compound column names
-    rename_map = {
-        "COMPOUND_NAME": "cpd_id",
-        "Library": "Library",
-        "Source_Plate_Barcode": "Plate_Metadata",
-        "Source_Well": "Well_Metadata"
-    }
-
-    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
-    if "cpd_type" not in df.columns:
-        logger.warning("'cpd_type' not found in data; setting it equal to 'Library'")
-        df["cpd_type"] = df["Library"]
-
+    df = standardise_metadata_columns(df)
 
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -220,7 +161,7 @@ if __name__ == "__main__":
             df.set_index(required_cols, inplace=True)
 
         grouped_filtered_df = group_and_filter_data(df)
-        grouped_filtered_file = out / f"{args.experiment}_grouped_filtered.csv"
+        grouped_filtered_file = out / f"{args.experiment}_imputed_grouped_filtered.csv"
         grouped_filtered_df.to_csv(grouped_filtered_file)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
@@ -234,7 +175,7 @@ if __name__ == "__main__":
     logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
 
     # === Save Final Cleaned Output ===
-    output_path = Path(args.out) / f"{args.experiment}_cleaned.csv"
+    output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_fselected.csv"
     df_selected.to_csv(output_path)
     logger.info(f"Final cleaned data saved to {output_path}")
 
