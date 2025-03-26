@@ -9,7 +9,7 @@ and performs post-analysis including:
     - PCA scatter plots
     - Recall@k calculation
     - Confusion matrix generation
-    - Cluster summary table of cpd_id and cpd_type per cluster
+    - Cluster summary including compound metadata (cpd_id, cpd_type)
 
 Outputs are saved to a specified output directory with filenames indicating the analysis type.
 
@@ -17,12 +17,14 @@ Usage:
     python analyse_clipn_latent.py \
         --latent path/to/CLIPn_latent_representations.npz \
         --labels path/to/label_mapping.csv \
+        --metadata path/to/combined_metadata.csv \
         --output analysis_results
 
 Command-Line Arguments:
 ------------------------
     --latent         : Path to latent representation NPZ file.
     --labels         : Path to CSV file with label mappings.
+    --metadata       : Path to combined metadata file (with MultiIndex).
     --output         : Output directory for plots and results.
 
 All analyses run by default.
@@ -31,6 +33,7 @@ Logging:
 --------
 The script logs progress and saves outputs with informative filenames in the specified folder.
 """
+
 
 import os
 import sys
@@ -62,12 +65,40 @@ def umap_scatter_save(Z: dict, y: dict, path: str) -> None:
     path : str
         Path prefix for saving the output UMAP images (e.g., 'output/umap').
     """
+    from umap import UMAP
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
 
+    latent_list = []
+    label_list = []
+    dataset_list = []
 
-    keys = list(Z.keys())
-    latent = np.vstack([Z[k] for k in keys])
-    labels = np.concatenate([y[k] for k in keys])
-    datasets = np.concatenate([[k] * len(y[k]) for k in keys])
+    for key in Z:
+        if key not in y:
+            logger.warning(f"Key {key} in Z but not found in y. Skipping.")
+            continue
+
+        z_array = Z[key]
+        y_array = y[key]
+
+        if len(z_array) != len(y_array):
+            logger.warning(f"Length mismatch for key {key}: latent={len(z_array)}, labels={len(y_array)}. Skipping.")
+            continue
+
+        latent_list.append(z_array)
+        label_list.append(y_array)
+        dataset_list.append(np.full(len(y_array), key))
+
+    if not latent_list:
+        logger.error("No valid dataset-label pairs found for UMAP plotting. Exiting.")
+        return
+
+    latent = np.vstack(latent_list)
+    labels = np.concatenate(label_list)
+    datasets = np.concatenate(dataset_list)
+
+    logger.info(f"Running UMAP on {latent.shape[0]} samples from {len(latent_list)} datasets.")
 
     umap_coords = UMAP().fit_transform(latent)
     df = pd.DataFrame({
@@ -93,9 +124,10 @@ def umap_scatter_save(Z: dict, y: dict, path: str) -> None:
         ax.set_yticks([])
 
     plt.tight_layout()
-    plt.savefig(path + "_labels.png", dpi=1200)
-    plt.savefig(path + "_datasets.png", dpi=1200)
+    plt.savefig(path + "_labels.pdf", dpi=1200)
+    plt.savefig(path + "_datasets.pdf", dpi=1200)
     plt.close()
+
 
 
 def recall_k(Z_train: dict, Z_test: dict, y_train: dict, y_test: dict, k: list = [1, 5, 10, 20, 50]) -> np.ndarray:
@@ -171,7 +203,6 @@ def confusion_matrix(Z_train: dict, y_train: dict, Z_test: dict, y_test: dict) -
     return cm / cm.sum(axis=1, keepdims=True)
 
 
-
 def load_latent_and_labels(latent_path: str, labels_path: str) -> tuple:
     """Load CLIPn latent representations and corresponding labels.
 
@@ -194,6 +225,11 @@ def load_latent_and_labels(latent_path: str, labels_path: str) -> tuple:
     logger.info(f"Loading label mappings from: {labels_path}")
     label_df = pd.read_csv(labels_path, index_col=0)
     y = {int(k): label_df[str(k)].dropna().astype(int).values for k in Z}
+
+    # Validate consistency
+    for k in Z:
+        if len(Z[k]) != len(y[k]):
+            raise ValueError(f"Mismatch in latent and label sizes for dataset {k}: {len(Z[k])} vs {len(y[k])}")
 
     return Z, y
 
@@ -236,7 +272,7 @@ def save_confusion_matrix(Z: dict, y: dict, output_path: str) -> None:
     cm_df.to_csv(cm_file, index=False)
     logger.info(f"Saved confusion matrix to {cm_file}")
 
-def save_cluster_summary(Z: dict, y: dict, output_path: str) -> None:
+def save_cluster_summary(Z: dict, y: dict, metadata_path: str, output_path: str) -> None:
     """Generate a summary of latent space clusters by compound ID and type.
 
     Parameters
@@ -245,10 +281,12 @@ def save_cluster_summary(Z: dict, y: dict, output_path: str) -> None:
         Latent representations.
     y : dict
         Encoded labels for each representation.
+    metadata_path : str
+        Path to metadata file containing MultiIndex with cpd_id and cpd_type.
     output_path : str
         Path to save the summary CSV file.
     """
-    logger.info("Generating cluster summary by label")
+    logger.info("Generating cluster summary with compound metadata")
     df_list = []
     for key, z_array in Z.items():
         cluster_ids = y[key]
@@ -257,12 +295,36 @@ def save_cluster_summary(Z: dict, y: dict, output_path: str) -> None:
         temp_df['Dataset'] = key
         df_list.append(temp_df)
 
-    combined_df = pd.concat(df_list)
-    summary = (
-        combined_df.groupby("Cluster")
-        .agg(Dataset_Count=("Dataset", lambda x: len(set(x))))
-        .reset_index()
-    )
+    combined_df = pd.concat(df_list).reset_index(drop=True)
+
+    if metadata_path and os.path.exists(metadata_path):
+        metadata_df = pd.read_csv(metadata_path, index_col=[0, 1, 2])
+        metadata_df = metadata_df.reset_index(drop=False)
+        metadata_df = metadata_df.iloc[:len(combined_df)]  # truncate to match if needed
+        combined_df = pd.concat([combined_df, metadata_df], axis=1)
+
+        summary = (
+            combined_df.groupby("Cluster")
+            .agg({
+                "cpd_id": lambda x: list(sorted(set(x))),
+                "cpd_type": lambda x: list(sorted(set(x))),
+                "Dataset": lambda x: list(sorted(set(x)))
+            })
+            .rename(columns={
+                "cpd_id": "cpd_ids_in_cluster",
+                "cpd_type": "cpd_types_in_cluster",
+                "Dataset": "datasets_present"
+            })
+            .reset_index()
+        )
+    else:
+        logger.warning("Metadata not found or not provided. Generating summary without compound info.")
+        summary = (
+            combined_df.groupby("Cluster")
+            .agg(Dataset_Count=("Dataset", lambda x: len(set(x))))
+            .reset_index()
+        )
+
     summary_path = os.path.join(output_path, "clipn_cluster_summary.csv")
     summary.to_csv(summary_path, index=False)
     logger.info(f"Cluster summary saved to {summary_path}")
@@ -289,6 +351,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyse CLIPn latent space outputs.")
     parser.add_argument("--latent", required=True, help="Path to .npz file with latent outputs.")
     parser.add_argument("--labels", required=True, help="Path to CSV file with label mappings.")
+    parser.add_argument("--metadata", required=False, help="Optional path to compound metadata CSV.")
     parser.add_argument("--output", required=True, help="Output directory for results.")
     args = parser.parse_args()
 
@@ -298,7 +361,8 @@ def main():
     generate_visualisations(Z, y, args.output)
     save_recall_at_k(Z, y, args.output)
     save_confusion_matrix(Z, y, args.output)
-    save_cluster_summary(Z, y, args.output)
+    save_cluster_summary(Z, y, args.metadata, args.output)
 
 if __name__ == "__main__":
     main()
+
