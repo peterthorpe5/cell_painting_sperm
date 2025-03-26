@@ -14,7 +14,7 @@ Command-Line Arguments:
 -----------------------
     --input_dir                : Directory containing input CSV files.
     --output_dir               : Directory where outputs will be saved.
-    --experiment_name          : Name of the experiment.
+    --experiment          : Name of the experiment.
     --impute_method            : Method for imputing missing values ('median' or 'knn').
     --knn_neighbors            : Number of neighbors for KNN imputation.
     --correlation_threshold    : Threshold for removing highly correlated features.
@@ -25,7 +25,7 @@ Example Usage:
     python impute_missing_data.py \
         --input_dir ./data/raw \
         --output_dir ./data/processed \
-        --experiment_name MyExperiment \
+        --experiment MyExperiment \
         --impute_method knn \
         --knn_neighbors 5 \
         --correlation_threshold 0.98 \
@@ -110,7 +110,7 @@ if __name__ == "__main__":
 
     logger.info(f"Python Version: {sys.version_info}")
     logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
-    logger.info(f"Experiment Name: {args.experiment_name}")
+    logger.info(f"Experiment Name: {args.experiment}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -179,7 +179,7 @@ if __name__ == "__main__":
             df.set_index(required_cols, inplace=True)
 
         grouped_filtered_df = group_and_filter_data(df)
-        grouped_filtered_file = output_dir / f"{args.experiment_name}_grouped_filtered.csv"
+        grouped_filtered_file = output_dir / f"{args.experiment}_grouped_filtered.csv"
         grouped_filtered_df.to_csv(grouped_filtered_file)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
@@ -193,7 +193,7 @@ if __name__ == "__main__":
     logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
 
     # === Save Final Cleaned Output ===
-    output_path = Path(args.output_dir) / f"{args.experiment_name}_cleaned.csv"
+    output_path = Path(args.output_dir) / f"{args.experiment}_cleaned.csv"
     df_selected.to_csv(output_path)
     logger.info(f"Final cleaned data saved to {output_path}")
 
