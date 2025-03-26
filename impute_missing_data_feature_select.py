@@ -46,6 +46,7 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.impute import SimpleImputer, KNNImputer
+from cell_painting.process_data import group_and_filter_data
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -81,27 +82,49 @@ def load_annotation(annotation_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", required=True)
-    parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--experiment_name", default="Experiment")
-    parser.add_argument("--impute_method", choices=["median", "knn"], default="knn")
-    parser.add_argument("--knn_neighbors", type=int, default=5)
-    parser.add_argument("--correlation_threshold", type=float, default=0.99)
-    parser.add_argument("--annotation_file", required=False)
+    parser.add_argument("--input_dir", 
+                        required=True,
+                        help="input folder of cvs. OR a single csv, normalised")
+    parser.add_argument("--output_dir", 
+                        default="processed")
+    parser.add_argument("--experiment_name", 
+                        default="Experiment")
+    parser.add_argument("--impute_method", 
+                        choices=["median", "knn"], 
+                        default="knn")
+    parser.add_argument("--knn_neighbors", 
+                        type=int, default=5)
+    parser.add_argument("--correlation_threshold", 
+                        type=float, default=0.99)
+    parser.add_argument("--annotation_file", 
+                        required=False)
 
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+
 
     logger.info(f"Python Version: {sys.version_info}")
     logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
     logger.info(f"Experiment Name: {args.experiment_name}")
 
-    # Load data
-    input_files = list(Path(args.input_dir).glob("*.csv"))
-    if not input_files:
-        logger.error("No input CSV files found.")
-        sys.exit(1)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    
+    # === Load Data ===
+    input_path = Path(args.input_dir)
+
+    if input_path.suffix == ".csv":
+        # Use the single specified CSV file
+        input_files = [input_path]
+        logger.info(f"Single input file provided: {input_path.name}")
+    else:
+        # Load all CSV files from directory
+        input_files = list(input_path.glob("*.csv"))
+        if not input_files:
+            logger.error(f"No CSV files found in directory: {input_path}")
+            sys.exit(1)
+        logger.info(f"Found {len(input_files)} CSV files in directory: {input_path}")
+
 
     dataframes = [pd.read_csv(f, index_col=0) for f in input_files]
     df = pd.concat(dataframes, axis=0)
@@ -112,24 +135,48 @@ if __name__ == "__main__":
     df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
     df.dropna(axis=1, how='all', inplace=True)
 
-    # Imputation
+    # === Imputation ===
     imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute_method == "knn" else SimpleImputer(strategy="median")
     df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
     logger.info(f"Imputation ({args.impute_method}) completed.")
 
-    # Optional Annotation Merge
+    # === Optional Annotation Merge ===
     if args.annotation_file:
         annotation_df = load_annotation(args.annotation_file)
         if annotation_df is not None:
             df = df.join(annotation_df, how='inner')
             logger.info(f"Data merged with annotation. New shape: {df.shape}")
 
-    # Feature selection
-    df = correlation_filter(df, threshold=args.correlation_threshold)
-    df = variance_threshold_selector(df)
-    logger.info(f"Feature selection complete. Final shape: {df.shape}")
+    # === Grouping and Filtering ===
+    logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
+    try:
+        from cell_painting.process_data import group_and_filter_data
 
-    # Save cleaned data
+        required_cols = ["cpd_id", "Library", "cpd_type"]
+        if not isinstance(df.index, pd.MultiIndex):
+            missing = [col for col in required_cols if col not in df.columns]
+            if missing:
+                raise ValueError(f"Missing required columns for grouping: {missing}")
+            df.set_index(required_cols, inplace=True)
+
+        grouped_filtered_df = group_and_filter_data(df)
+        grouped_filtered_file = output_dir / f"{args.experiment_name}_grouped_filtered.csv"
+        grouped_filtered_df.to_csv(grouped_filtered_file)
+        logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
+
+    except Exception as e:
+        logger.error(f"Error during grouping and filtering: {e}")
+        grouped_filtered_df = df.copy()
+
+    # === Feature Selection ===
+    df_selected = correlation_filter(grouped_filtered_df, threshold=args.correlation_threshold)
+    df_selected = variance_threshold_selector(df_selected)
+    logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
+
+    # === Save Final Cleaned Output ===
     output_path = Path(args.output_dir) / f"{args.experiment_name}_cleaned.csv"
-    df.to_csv(output_path)
-    logger.info(f"Data saved to {output_path}")
+    df_selected.to_csv(output_path)
+    logger.info(f"Final cleaned data saved to {output_path}")
+
+
+
