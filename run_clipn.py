@@ -70,13 +70,20 @@ def setup_logging(out_dir, experiment):
 
     return logger
 
+
 def detect_csv_delimiter(csv_path):
     """Detect the delimiter of a CSV file."""
     with open(csv_path, 'r', newline='') as csvfile:
-        sniffer = csv.Sniffer()
         sample = csvfile.read(2048)
         csvfile.seek(0)
-        return sniffer.sniff(sample).delimiter
+        if ',' in sample and '\t' not in sample:
+            return ','
+        elif '\t' in sample and ',' not in sample:
+            return '\t'
+        else:
+            # default to comma if both are found or none
+            return ','
+
 
 def load_and_harmonise_datasets(datasets_csv, logger):
     """Load datasets from CSV and harmonise columns."""
