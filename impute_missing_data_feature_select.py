@@ -213,7 +213,7 @@ if __name__ == "__main__":
     logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
 
     # === Save Final Cleaned Output ===
-    output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_fselected.csv"
+    output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.csv"
     df_selected.to_csv(output_path)
     logger.info(f"Final cleaned data saved to {output_path}")
 
