@@ -161,7 +161,7 @@ if __name__ == "__main__":
             df.set_index(required_cols, inplace=True)
 
         grouped_filtered_df = group_and_filter_data(df)
-        grouped_filtered_file = out / f"{args.experiment}_imputed_grouped_filtered.csv"
+        grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
         grouped_filtered_df.to_csv(grouped_filtered_file)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
