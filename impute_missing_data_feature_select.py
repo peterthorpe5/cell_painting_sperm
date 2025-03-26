@@ -46,6 +46,10 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.impute import SimpleImputer, KNNImputer
+# so we keep the index .. fingers crossed!
+from sklearn import set_config
+set_config(transform_output="pandas")
+
 from cell_painting.process_data import group_and_filter_data
 
 # Setup logging
@@ -109,7 +113,7 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    
+
     # === Load Data ===
     input_path = Path(args.input_dir)
 
