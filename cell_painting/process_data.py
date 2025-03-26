@@ -22,6 +22,7 @@ from clipn import CLIPn
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import LabelEncoder
 from sklearn.cluster import KMeans
+from sklearn.feature_selection import VarianceThreshold
 # so we keep the index .. fingers crossed!
 from sklearn import set_config
 set_config(transform_output="pandas")

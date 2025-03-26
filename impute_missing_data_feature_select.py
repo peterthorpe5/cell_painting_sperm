@@ -51,7 +51,8 @@ from sklearn import set_config
 set_config(transform_output="pandas")
 
 from cell_painting.process_data import (
-    group_and_filter_data, 
+    group_and_filter_data,
+    VarianceThreshold,
     standardise_metadata_columns,
     variance_threshold_selector,
     correlation_filter,
