@@ -41,7 +41,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-
+import time
 import numpy as np
 import pandas as pd
 from sklearn.feature_selection import VarianceThreshold
@@ -100,36 +100,37 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    os.makedirs(args.out, exist_ok=True)
+
     # Setup logging
-    log_filename = os.path.join(Path(args.out) / f"{args.experiment}_intergration.log")
+    log_dir = Path(args.out)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_filename = log_dir / f"{args.experiment}_integration.log"
 
-    # **Proper Logger Initialization**
-    logger = logging.getLogger(f"{experiment}: {time.asctime()}")
-    logger.setLevel(logging.DEBUG)  # Capture all levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    logger = logging.getLogger("imputation_logger")
+    logger.setLevel(logging.DEBUG)  # Log everything; filter per handler
 
-    # Stream Handler (stderr)
-    err_handler = logging.StreamHandler(sys.stderr)
-    err_formatter = logging.Formatter('%(levelname)s: %(message)s')
-    err_handler.setFormatter(err_formatter)
-    logger.addHandler(err_handler)
+    # Console handler (stream)
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_formatter = logging.Formatter('%(levelname)s: %(message)s')
+    stream_handler.setFormatter(stream_formatter)
+    stream_handler.setLevel(logging.INFO)  # Console shows INFO+
 
-    # File Handler (Logfile)
-    try:
-        logstream = open(log_filename, 'w')
-        err_handler_file = logging.StreamHandler(logstream)
-        err_handler_file.setFormatter(err_formatter)
-        err_handler_file.setLevel(logging.INFO)  # Logfile should always be verbose
-        logger.addHandler(err_handler_file)
-    except Exception as e:
-        print(f"Could not open {log_filename} for logging: {e}", file=sys.stderr)
-        sys.exit(1)
+    # File handler (logfile)
+    file_handler = logging.FileHandler(log_filename)
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(logging.DEBUG)  # File captures all logs
+
+    # Register handlers
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
 
 
     logger.info(f"Python Version: {sys.version_info}")
     logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
     logger.info(f"Experiment Name: {args.experiment}")
 
-    os.makedirs(args.out, exist_ok=True)
 
 
     # === Load Data ===
