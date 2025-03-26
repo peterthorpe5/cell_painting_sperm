@@ -39,8 +39,6 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn import set_config
 import csv
 
-from cell_painting.process_data import prepare_data_for_clipn, run_clipn
-from cell_painting.visualisation import umap_plot, cluster_summary_table
 
 set_config(transform_output="pandas")
 
@@ -191,17 +189,6 @@ def main(args):
     except Exception as e:
         logger.warning(f"Failed to save label encoder mappings: {e}")
 
-    try:
-        umap_plot(decoded_df, output_dir=args.out, experiment_name=args.experiment)
-        logger.info("UMAP visualisation generated.")
-    except Exception as e:
-        logger.warning(f"UMAP visualisation failed: {e}")
-
-    try:
-        cluster_summary_table(decoded_df, output_dir=args.out, experiment_name=args.experiment)
-        logger.info("Cluster summary saved.")
-    except Exception as e:
-        logger.warning(f"Cluster summary generation failed: {e}")
 
 
 if __name__ == "__main__":
