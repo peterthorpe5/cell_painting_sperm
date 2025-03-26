@@ -116,7 +116,7 @@ if __name__ == "__main__":
 
 
     # === Load Data ===
-    input_path = Path(args.input_dir)
+    input_path = Path(args.in)
 
     if input_path.suffix == ".csv":
         # Use the single specified CSV file
