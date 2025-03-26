@@ -188,7 +188,7 @@ def group_and_filter_data(df):
     # Define columns to drop based on known noise patterns
     filter_cols = df.columns.str.contains(
         r"Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
-        r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_[XYZ]|"
+        r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_[XYZ]|Well_Metadata|"
         r"no_|fn_"
     )
     df = df.loc[:, ~filter_cols]
