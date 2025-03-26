@@ -15,7 +15,7 @@ Logging also needed.
 import argparse
 import os
 import pandas as pd
-from process_data import (
+from cell_painting.process_data import (
     load_datasets_from_folderlist,
     group_and_filter_data,
     impute_missing_values,
