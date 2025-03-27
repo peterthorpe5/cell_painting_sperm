@@ -124,8 +124,20 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     for name, path in dataset_paths.items():
         df = pd.read_csv(path, index_col=0)
 
-        # Standardise metadata columns immediately after loading
+        # Check early if cpd_id is already there
+        if "cpd_id" not in df.columns:
+            logger.warning(f"[{name}] 'cpd_id' is MISSING right after loading!")
+        else:
+            logger.debug(f"[{name}] 'cpd_id' is present after loading.")
+
+        # Standardise metadata columns
         df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
+
+        # Check again after standardisation
+        if "cpd_id" not in df.columns:
+            logger.error(f"[{name}] 'cpd_id' is STILL missing after standardisation!")
+        else:
+            logger.debug(f"[{name}] 'cpd_id' is present after standardisation.")
 
         logger.debug(f"After standardisation, columns in '{name}': {df.columns.tolist()}")
         dataframes[name] = df
@@ -147,7 +159,12 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
         for name in reference_dfs:
             df = reference_dfs[name]
             logger.debug(f"[{name}] Columns BEFORE subsetting: {df.columns.tolist()}")
-            subset_cols = [col for col in common_cols + ["cpd_id", "cpd_type", "Library"] if col in df.columns]
+            required_metadata = ["cpd_id", "cpd_type", "Library"]
+            available_cols = df.columns.tolist()
+            missing_cols = [col for col in required_metadata if col not in available_cols]
+            if missing_cols:
+                logger.warning(f"[{name}] Missing metadata column(s): {missing_cols}")
+            subset_cols = [col for col in common_cols + required_metadata if col in df.columns]
             dataframes[name] = df[subset_cols].copy()
             logger.debug(f"[{name}] Columns AFTER subsetting: {dataframes[name].columns.tolist()}")
 
