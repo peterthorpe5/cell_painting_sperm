@@ -94,9 +94,8 @@ def detect_csv_delimiter(csv_path):
 # I hate this function. 
 def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     """
-    Load datasets from CSV, harmonise numeric feature columns,
-    explicitly maintain metadata columns (cpd_type, cpd_id, Library),
-    and set a clear MultiIndex.
+    Load datasets from CSV and harmonise numeric feature columns,
+    explicitly maintaining metadata columns (cpd_type, cpd_id, Library).
 
     Parameters
     ----------
@@ -123,63 +122,51 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     metadata_cols = ["cpd_id", "cpd_type", "Library"]
 
     logger.info("Loading datasets and setting explicit MultiIndex ('Dataset', 'Sample')")
-
     for name, path in dataset_paths.items():
-        df = pd.read_csv(path, index_col=0)
+        # Load without forcing cpd_id to index to ensure it's a column
+        df = pd.read_csv(path)
 
-        # Log the initial columns explicitly
-        logger.debug(f"[{name}] Columns loaded initially: {df.columns.tolist()}")
+        # Reset index explicitly to ensure 'cpd_id' is a column
+        if df.index.name in ["cpd_id", "compound_name", "COMPOUND_NAME"]:
+            df.reset_index(inplace=True)
+            logger.info(f"[{name}] Reset index to ensure 'cpd_id' is a column.")
 
-        # Standardise metadata columns explicitly
+        # Standardise metadata column names
         df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
-        # Explicit check immediately after standardisation
-        for mandatory_col in metadata_cols:
-            if mandatory_col not in df.columns:
-                logger.error(f"[{name}] Mandatory column '{mandatory_col}' missing after standardisation.")
-                raise ValueError(f"Mandatory column '{mandatory_col}' missing from dataset '{name}' after loading.")
+        # Verify all metadata columns exist explicitly
+        for col in metadata_cols:
+            if col not in df.columns:
+                logger.error(f"[{name}] Mandatory column '{col}' missing after standardisation.")
+                raise ValueError(f"Mandatory column '{col}' missing from dataset '{name}' after loading.")
 
-        # Set explicit MultiIndex
+        # Set MultiIndex explicitly here
         df.index = pd.MultiIndex.from_product([[name], df.index], names=["Dataset", "Sample"])
-
         dataframes[name] = df
-        logger.debug(f"[{name}] Loaded successfully with shape: {df.shape}")
+        logger.debug(f"Loaded '{name}', shape: {df.shape}, cols: {df.columns.tolist()}")
 
-    # Filter datasets based on the mode
     if mode == "reference_only":
         dataframes = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
 
-    # Determine common numeric feature columns explicitly
-    numeric_cols_sets = [
-        set(df.select_dtypes(include=[np.number]).columns)
-        for df in dataframes.values()
-    ]
+    # Identify numeric feature intersection
+    numeric_cols_sets = [set(df.select_dtypes(include=[np.number]).columns) for df in dataframes.values()]
     common_cols = sorted(set.intersection(*numeric_cols_sets))
     logger.info(f"Harmonised numeric columns across datasets: {len(common_cols)}")
 
-    # Attach metadata explicitly to numeric features
+    # Explicitly preserve metadata during subset selection
     for name, df in dataframes.items():
-        metadata_df = df[metadata_cols].copy()
-        numeric_df = df[common_cols].copy()
+        metadata_df = df[metadata_cols]
+        numeric_df = df[common_cols]
 
-        # Check indices alignment explicitly
-        if not numeric_df.index.equals(metadata_df.index):
-            logger.warning(f"[{name}] Numeric and metadata indices misaligned. Reindexing metadata explicitly.")
-            metadata_df = metadata_df.reindex(numeric_df.index)
-
+        # Reattach metadata explicitly, ensuring indices match
         harmonised_df = pd.concat([numeric_df, metadata_df], axis=1)
-
-        # Final explicit sanity check
-        if not all(col in harmonised_df.columns for col in metadata_cols):
-            missing = [col for col in metadata_cols if col not in harmonised_df.columns]
-            logger.error(f"[{name}] Missing metadata after harmonisation: {missing}")
-            raise ValueError(f"Missing metadata columns after harmonisation in dataset '{name}': {missing}")
-
         dataframes[name] = harmonised_df
-        logger.info(f"[{name}] Sanity check passed, final columns: {harmonised_df.columns.tolist()}")
+
+        # Sanity check
+        assert metadata_df.index.equals(harmonised_df.index), f"Metadata indices misaligned for '{name}'"
+        logger.info(f"Sanity check passed for '{name}'.")
 
     return dataframes, common_cols
-
 
 
 def standardise_numeric_columns_preserving_metadata(
