@@ -125,8 +125,9 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
         df = pd.read_csv(path, index_col=0)
 
         # Standardise metadata columns immediately after loading
-        df = standardise_metadata_columns(df, logger)
+        df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
+        logger.debug(f"After standardisation, columns in '{name}': {df.columns.tolist()}")
         dataframes[name] = df
         all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
         logger.debug(f"Loaded {name}: shape {df.shape}")
@@ -135,13 +136,21 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     if mode == "reference_only":
         logger.info("Running in reference_only mode: loading and harmonising reference datasets only.")
         reference_dfs = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
+
+        # Compute common numeric columns across references
         common_cols = sorted(list(
             set.intersection(*(set(df.select_dtypes(include=[np.number]).columns) for df in reference_dfs.values()))
         ))
         logger.info(f"Harmonised feature columns across references: {len(common_cols)}")
+
+        # Subset and debug column presence
         for name in reference_dfs:
-            dataframes[name] = dataframes[name][[col for col in common_cols + ["cpd_id", "cpd_type", "Library"] if col in dataframes[name].columns]]
-            logger.debug(f"Harmonised {name}: shape {dataframes[name].shape}")
+            df = reference_dfs[name]
+            logger.debug(f"[{name}] Columns BEFORE subsetting: {df.columns.tolist()}")
+            subset_cols = [col for col in common_cols + ["cpd_id", "cpd_type", "Library"] if col in df.columns]
+            dataframes[name] = df[subset_cols].copy()
+            logger.debug(f"[{name}] Columns AFTER subsetting: {dataframes[name].columns.tolist()}")
+
         return dataframes, common_cols
 
     # Otherwise, harmonise across all datasets
@@ -152,8 +161,11 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     final_cols = metadata_cols + common_cols
 
     for name in dataframes:
-        dataframes[name] = dataframes[name][[col for col in final_cols if col in dataframes[name].columns]].copy()
-        logger.debug(f"Harmonised {name}: shape {dataframes[name].shape}")
+        df = dataframes[name]
+        logger.debug(f"[{name}] Columns BEFORE subsetting: {df.columns.tolist()}")
+        subset_cols = [col for col in final_cols if col in df.columns]
+        dataframes[name] = df[subset_cols].copy()
+        logger.debug(f"[{name}] Columns AFTER subsetting: {dataframes[name].columns.tolist()}")
 
     return dataframes, common_cols
 
