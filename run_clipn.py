@@ -287,7 +287,6 @@ def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, 
 
     df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
 
-    X, y, label_mappings, ids = prepare_data_for_clipn_from_df(df_scaled)
 
     data_dict, label_dict, label_mappings, cpd_ids = prepare_data_for_clipn_from_df(df_scaled)
 
@@ -335,10 +334,12 @@ def main(args):
             raise ValueError(f"Sanity check failed after harmonisation for '{name}': Missing {missing_meta}")
         logger.info(f"Sanity check passed for '{name}'.")
         all_have_multiindex = all(isinstance(df.index, pd.MultiIndex) for df in dataframes.values())
-        if all_have_multiindex:
-            combined_df = pd.concat(dataframes.values())
-        else:
-            combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
+        combined_df = pd.concat(dataframes.values())
+        for name, df in dataframes.items():
+            if not isinstance(df.index, pd.MultiIndex):
+                logger.warning(f"[{name}] Expected MultiIndex but found {type(df.index)}")
+
+
 
         logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
         
@@ -347,7 +348,7 @@ def main(args):
 
     if args.mode == "reference_only":
         reference_names = [name for name in dataframes if 'reference' in name.lower()]
-        reference_df = combined_df.loc[reference_names]
+        reference_df = combined_df.loc[reference_names] if len(reference_names) > 1 else combined_df.loc[[reference_names[0]]]
         logger.info(f"Training CLIPn on references: {reference_names}")
         latent_df, cpd_ids = run_clipn_integration(reference_df, logger, args.clipn_param, args.out, 
                                                    args.latent_dim, args.lr, args.epoch)
@@ -373,8 +374,8 @@ def main(args):
             lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
             axis=1
         )
+        renamed_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
 
-        renamed_path = Path(args.out) / f"{experiment}_CLIPn_latent_representations_with_cpd_id.csv"
         decoded_with_index.to_csv(renamed_path, index=False)
     except Exception as e:
         logger.warning(f"Failed to save renamed latent file: {e}")
