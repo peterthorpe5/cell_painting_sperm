@@ -91,89 +91,72 @@ def detect_csv_delimiter(csv_path):
             return ','
 
 
-def load_and_harmonise_datasets(datasets_csv, logger, mode="integrate_all"):
+def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     """
-    Load datasets from CSV and process them for CLIPn.
-    In 'reference_only' mode, only reference datasets are loaded and harmonised.
-    In 'integrate_all' mode, all datasets are harmonised across numeric features.
+    Load datasets from CSV and harmonise numeric feature columns,
+    while preserving metadata columns such as cpd_type, cpd_id, and Library.
 
     Parameters
     ----------
     datasets_csv : str
-        Path to the CSV listing dataset names and their paths.
+        Path to the CSV file listing dataset names and their paths.
     logger : logging.Logger
-        Logger instance for logging.
-    mode : str
-        Either 'reference_only' or 'integrate_all'.
+        Logger instance for logging progress and messages.
+    mode : str, optional
+        Mode flag (e.g., 'reference_only') to control which datasets to harmonise.
 
     Returns
     -------
     tuple
         dataframes : dict
-            Dictionary of processed DataFrames.
+            Dictionary of harmonised pandas DataFrames indexed by dataset name.
         common_cols : list
-            List of harmonised numeric feature columns (empty if none).
+            List of numeric feature columns that were harmonised across datasets.
     """
     delimiter = detect_csv_delimiter(datasets_csv)
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
     dataframes = {}
-    metadata_cols = ["cpd_type", "cpd_id", "Library"]
-
-    if mode == "reference_only":
-        logger.info("Running in reference_only mode: loading and harmonising reference datasets only.")
-        reference_dataframes = {}
-        all_numeric_cols = set()
-        all_metadata_cols = set()
-
-        for name, path in dataset_paths.items():
-            if "reference" in name.lower():
-                df = pd.read_csv(path, index_col=0)
-                df = standardise_metadata_columns(df, logger)
-                reference_dataframes[name] = df
-                all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
-                all_metadata_cols.update(col for col in df.columns if col in metadata_cols)
-                logger.debug(f"Loaded reference dataset {name}: shape {df.shape}")
-
-        if not reference_dataframes:
-            raise ValueError("No reference datasets found in reference_only mode.")
-
-        # Harmonise numeric features across reference datasets
-        common_cols = sorted(list(all_numeric_cols.intersection(*[set(df.columns) for df in reference_dataframes.values()])))
-        logger.info(f"Harmonised feature columns across references: {len(common_cols)}")
-
-        final_cols = list(all_metadata_cols) + common_cols
-        for name in reference_dataframes:
-            df = reference_dataframes[name]
-            reference_dataframes[name] = df[[col for col in final_cols if col in df.columns]].copy()
-            logger.debug(f"Harmonised {name}: shape {reference_dataframes[name].shape}")
-
-        return reference_dataframes, common_cols
-
-    # integrate_all mode
-    logger.info("Running in integrate_all mode: loading and harmonising all datasets")
     all_numeric_cols = set()
-    all_metadata_cols = set()
 
+    logger.info("Loading datasets")
     for name, path in dataset_paths.items():
         df = pd.read_csv(path, index_col=0)
+
+        # Standardise metadata columns immediately after loading
         df = standardise_metadata_columns(df, logger)
+
         dataframes[name] = df
         all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
-        all_metadata_cols.update(col for col in df.columns if col in metadata_cols)
         logger.debug(f"Loaded {name}: shape {df.shape}")
 
-    common_cols = sorted(list(all_numeric_cols.intersection(*[set(df.columns) for df in dataframes.values()])))
-    logger.info(f"Harmonised feature columns across all datasets: {len(common_cols)}")
+    # Harmonise feature columns only across reference datasets if in reference_only mode
+    if mode == "reference_only":
+        logger.info("Running in reference_only mode: loading and harmonising reference datasets only.")
+        reference_dfs = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
+        common_cols = sorted(list(
+            set.intersection(*(set(df.select_dtypes(include=[np.number]).columns) for df in reference_dfs.values()))
+        ))
+        logger.info(f"Harmonised feature columns across references: {len(common_cols)}")
+        for name in reference_dfs:
+            dataframes[name] = dataframes[name][[col for col in common_cols + ["cpd_id", "cpd_type", "Library"] if col in dataframes[name].columns]]
+            logger.debug(f"Harmonised {name}: shape {dataframes[name].shape}")
+        return dataframes, common_cols
 
-    final_cols = list(all_metadata_cols) + common_cols
+    # Otherwise, harmonise across all datasets
+    common_cols = sorted(list(all_numeric_cols.intersection(*[set(df.columns) for df in dataframes.values()])))
+    logger.info(f"Harmonised feature columns count: {len(common_cols)}")
+
+    metadata_cols = ["cpd_type", "cpd_id", "Library"]
+    final_cols = metadata_cols + common_cols
+
     for name in dataframes:
-        df = dataframes[name]
-        dataframes[name] = df[[col for col in final_cols if col in df.columns]].copy()
+        dataframes[name] = dataframes[name][[col for col in final_cols if col in dataframes[name].columns]].copy()
         logger.debug(f"Harmonised {name}: shape {dataframes[name].shape}")
 
     return dataframes, common_cols
+
 
 
 def encode_labels(df, logger):
