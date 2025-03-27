@@ -162,6 +162,7 @@ def main(args):
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger)
     combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
+    logger(f"Columns at this stage, combined:" {combined_df.columns.tolist()})
 
     combined_df, encoders = encode_labels(combined_df, logger)
 
@@ -188,7 +189,7 @@ def main(args):
         logger.info(f"Latent representations with original labels saved to {renamed_path}")
     except Exception as e:
         logger.warning(f"Failed to save renamed latent file: {e}")
-
+    logger(f"Columns at this stage, endoded:" {combined_df.columns.tolist()})
     # Save label encoder mappings
     try:
         mapping_dir = Path(args.out)
