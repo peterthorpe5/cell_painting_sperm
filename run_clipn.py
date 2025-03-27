@@ -121,6 +121,10 @@ def load_and_harmonise_datasets(datasets_csv, logger):
     logger.info("Loading datasets")
     for name, path in dataset_paths.items():
         df = pd.read_csv(path, index_col=0)
+        # covert weird col names to a standard
+        # Im sure we will find more to fix. 
+        df = standardise_metadata_columns(df)
+
         dataframes[name] = df
         all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
         logger.debug(f"Loaded {name}: shape {df.shape}")
@@ -186,7 +190,6 @@ def main(args):
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger)
     combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
     logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
-
     
 
     combined_df, encoders = encode_labels(combined_df, logger)
