@@ -765,13 +765,13 @@ def prepare_data_for_clipn_from_df(df):
     -------
     tuple
         data_dict : dict
-            Dictionary mapping dataset name to feature matrix (np.ndarray).
+            Dictionary mapping integer index to feature matrix (np.ndarray).
         label_dict : dict
-            Dictionary mapping dataset name to label vector (np.ndarray).
+            Dictionary mapping integer index to label vector (np.ndarray).
         label_mappings : dict
-            Dictionary mapping dataset name to {label_id: label_name}.
+            Dictionary mapping integer index to {label_id: label_name}.
         cpd_ids : dict
-            Dictionary mapping dataset name to list of compound IDs.
+            Dictionary mapping integer index to list of compound IDs.
     """
     from collections import defaultdict
 
@@ -784,7 +784,9 @@ def prepare_data_for_clipn_from_df(df):
     if not isinstance(df.index, pd.MultiIndex):
         raise ValueError("Expected a MultiIndex DataFrame with levels ['Dataset', 'Sample']")
 
-    for dataset_name in df.index.levels[0]:
+    dataset_keys = list(df.index.levels[0])
+
+    for i, dataset_name in enumerate(dataset_keys):
         dataset_df = df.loc[dataset_name]
 
         # Get feature columns (exclude metadata)
@@ -800,13 +802,12 @@ def prepare_data_for_clipn_from_df(df):
         label_map = {label: idx for idx, label in enumerate(unique_labels)}
         y_encoded = np.array([label_map[label] for label in y])
 
-        data_dict[dataset_name] = X
-        label_dict[dataset_name] = y_encoded
-        label_mappings[dataset_name] = {v: k for k, v in label_map.items()}
-        cpd_ids[dataset_name] = ids
+        data_dict[i] = X
+        label_dict[i] = y_encoded
+        label_mappings[i] = {v: k for k, v in label_map.items()}
+        cpd_ids[i] = ids
 
     return data_dict, label_dict, label_mappings, cpd_ids
-
 
 
 def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experiment_label_mapping,
