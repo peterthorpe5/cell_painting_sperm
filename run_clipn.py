@@ -151,9 +151,9 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
             logger.debug(f"[{name}] Columns BEFORE subsetting: {df.columns.tolist()}")
             df = df[common_cols].copy()
 
-            # Reattach metadata
             if name in metadata_dict:
-                df = pd.concat([df, metadata_dict[name]], axis=1)
+                meta = metadata_dict[name].reindex(df.index)
+                df = pd.concat([df, meta], axis=1)
                 logger.debug(f"[{name}] Metadata reattached. Final columns: {df.columns.tolist()}")
 
             dataframes[name] = df
@@ -172,11 +172,11 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
         df = df[common_cols].copy()
 
         if name in metadata_dict:
-            df = pd.concat([df, metadata_dict[name]], axis=1)
+            meta = metadata_dict[name].reindex(df.index)
+            df = pd.concat([df, meta], axis=1)
             logger.debug(f"[{name}] Metadata reattached. Final columns: {df.columns.tolist()}")
 
         dataframes[name] = df
-
     return dataframes, common_cols
 
 
@@ -238,6 +238,11 @@ def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, 
     """Run the actual CLIPn integration logic."""
     logger.info(f"Running CLIPn integration with param: {clipn_param}")
     meta_cols = ["cpd_id", "cpd_type", "Library"]  # or any others
+    # Ensure all meta_columns exist before scaling
+    missing_meta = [col for col in meta_cols if col not in df.columns]
+    if missing_meta:
+        raise ValueError(f"Missing metadata columns in input DataFrame before scaling: {missing_meta}")
+
     df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
 
     X, y, label_mappings, ids = prepare_data_for_clipn_from_df(df_scaled)
