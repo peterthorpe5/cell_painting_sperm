@@ -275,9 +275,16 @@ def main(args):
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
 
-    combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
-    logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
-    
+    # Sanity check here:
+    for name, df in dataframes.items():
+        missing_meta = [col for col in ["cpd_id", "cpd_type", "Library"] if col not in df.columns]
+        if missing_meta:
+            raise ValueError(f"Sanity check failed after harmonisation for '{name}': Missing {missing_meta}")
+        logger.info(f"Sanity check passed for '{name}'.")
+
+        combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
+        logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
+        
 
     combined_df, encoders = encode_labels(combined_df, logger)
 
