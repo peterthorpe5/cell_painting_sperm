@@ -226,19 +226,24 @@ def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
     return annotation_df
 
 
-def standardise_metadata_columns(df: pd.DataFrame, logger=None) -> pd.DataFrame:
+
+def standardise_metadata_columns(df: pd.DataFrame, logger=None, dataset_name=None) -> pd.DataFrame:
     """
-    Standardises metadata column names for downstream processing.
+    Standardises metadata column names and assigns cpd_type if missing.
 
     Parameters
     ----------
     df : pd.DataFrame
         Input DataFrame.
+    logger : logging.Logger, optional
+        Logger instance.
+    dataset_name : str, optional
+        Dataset name used to infer cpd_type if missing.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with standardised column names.
+        DataFrame with standardised metadata columns.
     """
     rename_map = {
         "library": "Library",
@@ -247,10 +252,20 @@ def standardise_metadata_columns(df: pd.DataFrame, logger=None) -> pd.DataFrame:
         "Source_Plate_Barcode": "Plate_Metadata",
         "Source_Well": "Well_Metadata"
     }
+
     for old, new in rename_map.items():
         if old in df.columns and new not in df.columns:
             df.rename(columns={old: new}, inplace=True)
-            logger.info(f"Renamed column '{old}' to '{new}'")
+            if logger:
+                logger.info(f"Renamed column '{old}' to '{new}'")
+
+    # Assign 'cpd_type' using dataset name if missing
+    if 'cpd_type' not in df.columns:
+        inferred_type = dataset_name if dataset_name is not None else 'unknown'
+        df['cpd_type'] = inferred_type
+        if logger:
+            logger.warning(f"Column 'cpd_type' was missing — defaulted to dataset name: '{inferred_type}'")
+
     return df
 
 
