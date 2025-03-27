@@ -41,7 +41,8 @@ import csv
 from cell_painting.process_data import (
 
         prepare_data_for_clipn_from_df,
-        run_clipn_simple
+        run_clipn_simple,
+        standardise_metadata_columns
 )
 
 
