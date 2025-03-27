@@ -128,13 +128,22 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
         # Standardise metadata without dropping important columns
         df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
-        # Confirm and handle metadata columns explicitly
-        for col in metadata_cols:
-            if col not in df.columns:
-                df[col] = name  # default to dataset name if genuinely missing
-                logger.warning(f"Column '{col}' was missing — defaulted to dataset name: '{name}'")
+        # Explicitly check for mandatory metadata columns
+        if 'cpd_id' not in df.columns:
+            raise ValueError(f"Mandatory column 'cpd_id' missing from dataset '{name}' after loading.")
 
-        # Set MultiIndex explicitly here
+        # Assign default cpd_type only if missing
+        if 'cpd_type' not in df.columns:
+            df['cpd_type'] = name
+            logger.warning(f"Column 'cpd_type' was missing — defaulted to dataset name: '{name}'")
+
+        # Assign default Library if missing (optional, but recommended)
+        if 'Library' not in df.columns:
+            df['Library'] = name
+            logger.warning(f"Column 'Library' was missing — defaulted to dataset name: '{name}'")
+
+        # Clear existing indices and explicitly set MultiIndex
+        df.reset_index(drop=True, inplace=True)
         df.index = pd.MultiIndex.from_product([[name], df.index], names=["Dataset", "Sample"])
 
         dataframes[name] = df
@@ -157,8 +166,10 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
         harmonised_df = pd.concat([numeric_df, metadata_df], axis=1)
         dataframes[name] = harmonised_df
 
-        # Sanity check
-        assert metadata_df.index.equals(harmonised_df.index), f"Metadata indices misaligned for '{name}'"
+        # Sanity check for indices alignment
+        if not metadata_df.index.equals(harmonised_df.index):
+            raise ValueError(f"Metadata indices misaligned for '{name}'")
+
         logger.info(f"Sanity check passed for '{name}'.")
 
     return dataframes, common_cols
