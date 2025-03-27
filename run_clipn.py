@@ -36,6 +36,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
 from sklearn import set_config
 import csv
 from cell_painting.process_data import (
@@ -212,39 +213,47 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     return harmonise_numeric_columns(dataframes, logger)
 
 
+from sklearn.preprocessing import StandardScaler
 
-def standardise_numeric_columns_preserving_metadata(
-    df: pd.DataFrame, 
-    meta_columns: list[str]
-) -> pd.DataFrame:
+def standardise_numeric_columns_preserving_metadata(df: pd.DataFrame, meta_columns: list[str]) -> pd.DataFrame:
     """
-    Standardise numeric columns in a MultiIndex DataFrame, preserving metadata columns.
+    Standardise numeric columns in a MultiIndex DataFrame per dataset,
+    preserving metadata columns.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Input DataFrame with MultiIndex (dataset, sample).
+        Input DataFrame with MultiIndex (Dataset, Sample).
     meta_columns : list of str
         List of columns to exclude from standardisation.
 
     Returns
     -------
     pd.DataFrame
-        Standardised DataFrame with metadata columns preserved.
+        Standardised DataFrame with numeric features scaled per dataset
+        PER DATASET!!!!!!!!
+        and metadata columns preserved.
     """
-    df = df.copy()
-    metadata = df[meta_columns]
-    numeric = df.drop(columns=meta_columns)
+    if not isinstance(df.index, pd.MultiIndex) or 'Dataset' not in df.index.names:
+        raise ValueError("Input DataFrame must have a MultiIndex with level 'Dataset'.")
 
-    scaler = StandardScaler()
-    numeric_scaled = pd.DataFrame(
-        scaler.fit_transform(numeric),
-        columns=numeric.columns,
-        index=df.index,
-    )
+    scaled_frames = []
+    for dataset, group in df.groupby(level="Dataset"):
+        meta = group[meta_columns]
+        numeric = group.drop(columns=meta_columns)
 
-    return pd.concat([numeric_scaled, metadata], axis=1)
+        scaler = StandardScaler()
+        numeric_scaled = pd.DataFrame(
+            scaler.fit_transform(numeric),
+            columns=numeric.columns,
+            index=group.index
+        )
 
+        scaled_group = pd.concat([numeric_scaled, meta], axis=1)
+        scaled_frames.append(scaled_group)
+
+    df_scaled_all = pd.concat(scaled_frames).sort_index()
+    return df_scaled_all
 
 
 
