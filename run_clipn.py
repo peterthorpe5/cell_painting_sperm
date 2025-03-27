@@ -123,16 +123,14 @@ def load_single_dataset(name, path, logger, metadata_cols):
         logger.debug(f"[{name}] Columns after initial load: {df.columns.tolist()}")
         logger.debug(f"[{name}] Index name after initial load: {df.index.name}")
 
+    # Promote index to column if it's one of the metadata cols
+    if df.index.name in metadata_cols:
+        df[df.index.name] = df.index
+        df.index.name = None
+        logger.warning(f"[{name}] Promoted index '{df.columns[-1]}' to column to preserve metadata.")
+
     df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
-    # Recover cpd_id from index if it is not in the columns
-    if 'cpd_id' not in df.columns:
-        if df.index.name == 'cpd_id':
-            df['cpd_id'] = df.index
-            logger.warning(f"[{name}] 'cpd_id' recovered from Index.")
-        else:
-            logger.error(f"[{name}] 'cpd_id' not found in columns or index.")
-    
     # Check for all required metadata columns
     missing_cols = [col for col in metadata_cols if col not in df.columns]
     if missing_cols:
@@ -140,19 +138,11 @@ def load_single_dataset(name, path, logger, metadata_cols):
             logger.error(f"[{name}] Mandatory column '{col}' missing after standardisation.")
         raise ValueError(f"[{name}] Mandatory column(s) {missing_cols} missing after standardisation.")
 
-    # Wrap in MultiIndex correctly
-    if not isinstance(df.index, pd.MultiIndex):
-        sample_index_name = df.index.name or "Sample"
-        df.index = pd.MultiIndex.from_product(
-            [[name], df.index],
-            names=["Dataset", sample_index_name]
-        )
-    else:
-        # Already MultiIndexed (less common), just prepend the dataset level
-        df.index = pd.MultiIndex.from_tuples(
-            [(name,) + idx if isinstance(idx, tuple) else (name, idx) for idx in df.index],
-            names=["Dataset"] + list(df.index.names)
-        )
+    # Reset index before setting MultiIndex to avoid mismatches
+    df = df.reset_index(drop=True)
+    df.index = pd.MultiIndex.from_frame(
+        pd.DataFrame({"Dataset": name, "Sample": range(len(df))})
+    )
 
     if logger:
         logger.debug(f"[{name}] Final columns: {df.columns.tolist()}")
@@ -160,8 +150,6 @@ def load_single_dataset(name, path, logger, metadata_cols):
         logger.debug(f"[{name}] Final index names: {df.index.names}")
 
     return df
-
-
 
 
 
@@ -296,7 +284,14 @@ def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, 
 
     latent_dict = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
 
-    latent_combined = pd.concat(latent_dict.values(), keys=latent_dict.keys(), names=["Dataset", "Sample"])
+    latent_frames = []
+    for name, array in latent_dict.items():
+        df = pd.DataFrame(array)
+        df.index = pd.MultiIndex.from_product([[name], range(len(df))], names=["Dataset", "Sample"])
+        latent_frames.append(df)
+
+    latent_combined = pd.concat(latent_frames)
+
 
     latent_file = Path(output_path) / "CLIPn_latent_representations.npz"
     np.savez(latent_file, **latent_dict)
@@ -329,8 +324,12 @@ def main(args):
         if missing_meta:
             raise ValueError(f"Sanity check failed after harmonisation for '{name}': Missing {missing_meta}")
         logger.info(f"Sanity check passed for '{name}'.")
+        all_have_multiindex = all(isinstance(df.index, pd.MultiIndex) for df in dataframes.values())
+        if all_have_multiindex:
+            combined_df = pd.concat(dataframes.values())
+        else:
+            combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
 
-        combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
         logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
         
 
