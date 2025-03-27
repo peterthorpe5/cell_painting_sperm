@@ -234,8 +234,6 @@ def decode_labels(df, encoders, logger):
     return df
 
 
-
-
 def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, epochs):
     """Run the actual CLIPn integration logic."""
     logger.info(f"Running CLIPn integration with param: {clipn_param}")
