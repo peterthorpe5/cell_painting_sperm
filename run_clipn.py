@@ -152,9 +152,19 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
             df = df[common_cols].copy()
 
             if name in metadata_dict:
-                meta = metadata_dict[name].reindex(df.index)
+                meta = metadata_dict[name]
+
+                # Align indices just in case
+                if not meta.index.equals(df.index):
+                    meta = meta.loc[df.index]
+
+                missing = [col for col in ["cpd_id", "cpd_type", "Library"] if col not in meta.columns]
+                if missing:
+                    logger.warning(f"Metadata for '{name}' missing columns: {missing}")
+
                 df = pd.concat([df, meta], axis=1)
                 logger.debug(f"[{name}] Metadata reattached. Final columns: {df.columns.tolist()}")
+
 
             dataframes[name] = df
 
