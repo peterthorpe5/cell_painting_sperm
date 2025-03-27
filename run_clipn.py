@@ -94,27 +94,37 @@ def detect_csv_delimiter(csv_path):
 # I hate this function. 
 
 def load_single_dataset(name, path, logger, metadata_cols):
-    """Load a single dataset and confirm metadata presence."""
     df = pd.read_csv(path, index_col=0)
     df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
     missing_cols = [col for col in metadata_cols if col not in df.columns]
     if missing_cols:
         for col in missing_cols:
-            if col == "cpd_id":
-                raise ValueError(f"Mandatory column '{col}' missing from dataset '{name}' after loading.")
-            df[col] = name
-            logger.warning(f"Column '{col}' was missing — defaulted to dataset name: '{name}'")
+            logger.error(f"[{name}] Mandatory column '{col}' missing after loading.")
+        raise ValueError(f"Mandatory column(s) '{missing_cols}' missing from dataset '{name}' after loading.")
 
+    df.index = pd.MultiIndex.from_product([[name], df.index], names=["Dataset", "Sample"])
+    logger.debug(f"[{name}] Loaded successfully with shape {df.shape} and columns: {df.columns.tolist()}")
     return df
 
 
 def harmonise_numeric_columns(dataframes, logger):
-    """Identify numeric columns common across datasets."""
     numeric_cols_sets = [set(df.select_dtypes(include=[np.number]).columns) for df in dataframes.values()]
     common_cols = sorted(set.intersection(*numeric_cols_sets))
     logger.info(f"Harmonised numeric columns across datasets: {len(common_cols)}")
-    return common_cols
+
+    metadata_cols = ["cpd_id", "cpd_type", "Library"]
+    for name, df in dataframes.items():
+        numeric_df = df[common_cols]
+        metadata_df = df[metadata_cols]
+        df_harmonised = pd.concat([numeric_df, metadata_df], axis=1)
+        assert df_harmonised.index.equals(df.index), f"Index mismatch after harmonisation in '{name}'."
+        dataframes[name] = df_harmonised
+        logger.debug(f"[{name}] Harmonisation successful, final columns: {df_harmonised.columns.tolist()}")
+
+    return dataframes, common_cols
+
+
 
 
 def apply_harmonisation(dataframes, common_cols, metadata_cols, logger):
@@ -135,28 +145,28 @@ def apply_harmonisation(dataframes, common_cols, metadata_cols, logger):
 
 
 def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
-    """Load datasets, ensure metadata columns, and harmonise numeric features."""
     delimiter = detect_csv_delimiter(datasets_csv)
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
     metadata_cols = ["cpd_id", "cpd_type", "Library"]
-
-    logger.info("Loading datasets")
     dataframes = {}
+
+    logger.info("Loading datasets individually")
     for name, path in dataset_paths.items():
-        dataframes[name] = load_single_dataset(name, path, logger, metadata_cols)
-        logger.debug(f"Loaded '{name}', shape: {dataframes[name].shape}, cols: {dataframes[name].columns.tolist()}")
+        try:
+            dataframes[name] = load_single_dataset(name, path, logger, metadata_cols)
+        except ValueError as e:
+            logger.error(f"Loading dataset '{name}' failed: {e}")
+            raise
 
     if mode == "reference_only":
         dataframes = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
+        logger.info("Running in 'reference_only' mode, filtered datasets accordingly.")
 
-    common_cols = harmonise_numeric_columns(dataframes, logger)
-    harmonised_dataframes = apply_harmonisation(dataframes, common_cols, metadata_cols, logger)
+    return harmonise_numeric_columns(dataframes, logger)
 
-    combined_df = pd.concat(harmonised_dataframes.values(), keys=harmonised_dataframes.keys(), names=['Dataset', 'Sample'])
 
-    return combined_df, common_cols
 
 def standardise_numeric_columns_preserving_metadata(
     df: pd.DataFrame, 
