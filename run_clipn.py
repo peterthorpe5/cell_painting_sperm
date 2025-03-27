@@ -91,90 +91,77 @@ def detect_csv_delimiter(csv_path):
             return ','
 
 # this is the problem function when we loose cpd_id
+# I hate this function. 
 def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     """
-    Load datasets from CSV, harmonise numeric columns, explicitly retaining metadata.
+    Load datasets from CSV and harmonise numeric feature columns,
+    explicitly maintaining metadata columns (cpd_type, cpd_id, Library).
 
     Parameters
     ----------
     datasets_csv : str
-        Path to CSV listing dataset names and their paths.
+        Path to CSV listing dataset names and paths.
     logger : logging.Logger
-        Logger instance.
+        Logger instance for detailed logging.
     mode : str, optional
-        Control which datasets to harmonise ('reference_only' or all).
+        Mode for loading datasets ('reference_only', etc.).
 
     Returns
     -------
     tuple
         dataframes : dict
-            Harmonised DataFrames with MultiIndex (Dataset, Sample).
-        common_numeric_cols : list
-            Numeric columns harmonised across datasets.
+            Dictionary of harmonised pandas DataFrames indexed by dataset name.
+        common_cols : list
+            List of numeric feature columns harmonised across datasets.
     """
     delimiter = detect_csv_delimiter(datasets_csv)
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
     dataframes = {}
-    numeric_cols_dict = {}
     metadata_cols = ["cpd_id", "cpd_type", "Library"]
 
-    logger.info("Loading datasets and setting MultiIndex ('Dataset', 'Sample')")
-
+    logger.info("Loading datasets and setting explicit MultiIndex ('Dataset', 'Sample')")
     for name, path in dataset_paths.items():
         df = pd.read_csv(path, index_col=0)
+
+        # Standardise metadata without dropping important columns
         df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
-        # Ensure metadata columns are present, add if missing
+        # Confirm and handle metadata columns explicitly
         for col in metadata_cols:
             if col not in df.columns:
-                df[col] = name
+                df[col] = name  # default to dataset name if genuinely missing
                 logger.warning(f"Column '{col}' was missing — defaulted to dataset name: '{name}'")
 
-        # Set MultiIndex explicitly: (Dataset, Sample)
-        df.index.name = 'Sample'
-        df['Dataset'] = name
-        df.set_index('Dataset', append=True, inplace=True)
-        df = df.reorder_levels(['Dataset', 'Sample'])
+        # Set MultiIndex explicitly here
+        df.index = pd.MultiIndex.from_product([[name], df.index], names=["Dataset", "Sample"])
 
-        # Save DataFrame
         dataframes[name] = df
-        numeric_cols_dict[name] = set(df.select_dtypes(include=[np.number]).columns)
-
         logger.debug(f"Loaded '{name}', shape: {df.shape}, cols: {df.columns.tolist()}")
 
-    # Decide which datasets to harmonise
     if mode == "reference_only":
-        datasets_to_harmonise = {k: v for k, v in dataframes.items() if 'reference' in k.lower()}
-    else:
-        datasets_to_harmonise = dataframes
+        dataframes = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
 
-    # Find common numeric columns explicitly
-    common_numeric_cols = sorted(list(set.intersection(*numeric_cols_dict.values())))
-    logger.info(f"Harmonised numeric columns across datasets: {len(common_numeric_cols)}")
+    # Identify numeric feature intersection clearly
+    numeric_cols_sets = [set(df.select_dtypes(include=[np.number]).columns) for df in dataframes.values()]
+    common_cols = sorted(set.intersection(*numeric_cols_sets))
+    logger.info(f"Harmonised numeric columns across datasets: {len(common_cols)}")
 
-    # Explicitly subset numeric data and immediately reattach metadata via MultiIndex
-    for name in datasets_to_harmonise:
-        df = datasets_to_harmonise[name]
-
-        # subset numeric explicitly
-        numeric_df = df[common_numeric_cols].copy()
-
-        # Explicitly reattach metadata using MultiIndex alignment
+    # Explicitly preserve metadata during subset selection
+    for name, df in dataframes.items():
         metadata_df = df[metadata_cols]
-        numeric_df = numeric_df.join(metadata_df, how='left')
+        numeric_df = df[common_cols]
 
-        # Sanity check immediately after reattachment
-        missing_after_concat = [col for col in metadata_cols if col not in numeric_df.columns]
-        if missing_after_concat:
-            raise ValueError(f"After metadata reattachment, missing cols in '{name}': {missing_after_concat}")
+        # Reattach metadata explicitly, ensuring indices match
+        harmonised_df = pd.concat([numeric_df, metadata_df], axis=1)
+        dataframes[name] = harmonised_df
 
-        dataframes[name] = numeric_df
-        logger.debug(f"After reattaching metadata, '{name}' columns: {numeric_df.columns.tolist()}")
+        # Sanity check
+        assert metadata_df.index.equals(harmonised_df.index), f"Metadata indices misaligned for '{name}'"
+        logger.info(f"Sanity check passed for '{name}'.")
 
-    return dataframes, common_numeric_cols
-
+    return dataframes, common_cols
 
 
 def standardise_numeric_columns_preserving_metadata(
