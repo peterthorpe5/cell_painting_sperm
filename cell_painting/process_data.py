@@ -226,7 +226,7 @@ def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
     return annotation_df
 
 
-def standardise_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
+def standardise_metadata_columns(df: pd.DataFrame, logger=None) -> pd.DataFrame:
     """
     Standardises metadata column names for downstream processing.
 
