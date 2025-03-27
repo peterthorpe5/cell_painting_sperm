@@ -180,6 +180,40 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     return dataframes, common_cols
 
 
+def standardise_numeric_columns_preserving_metadata(
+    df: pd.DataFrame, 
+    meta_columns: list[str]
+) -> pd.DataFrame:
+    """
+    Standardise numeric columns in a MultiIndex DataFrame, preserving metadata columns.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame with MultiIndex (dataset, sample).
+    meta_columns : list of str
+        List of columns to exclude from standardisation.
+
+    Returns
+    -------
+    pd.DataFrame
+        Standardised DataFrame with metadata columns preserved.
+    """
+    df = df.copy()
+    metadata = df[meta_columns]
+    numeric = df.drop(columns=meta_columns)
+
+    scaler = StandardScaler()
+    numeric_scaled = pd.DataFrame(
+        scaler.fit_transform(numeric),
+        columns=numeric.columns,
+        index=df.index,
+    )
+
+    return pd.concat([numeric_scaled, metadata], axis=1)
+
+
+
 
 def encode_labels(df, logger):
     """Encode categorical columns and return encoders for decoding later."""
@@ -205,7 +239,12 @@ def decode_labels(df, encoders, logger):
 def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, epochs):
     """Run the actual CLIPn integration logic."""
     logger.info(f"Running CLIPn integration with param: {clipn_param}")
-    data_dict, label_dict, label_mappings, cpd_ids = prepare_data_for_clipn_from_df(df)
+    meta_cols = ["cpd_id", "cpd_type", "Library"]  # or any others
+    df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
+
+    X, y, label_mappings, ids = prepare_data_for_clipn_from_df(df_scaled)
+
+    data_dict, label_dict, label_mappings, cpd_ids = prepare_data_for_clipn_from_df(df_scaled)
 
     latent_dict = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
 
