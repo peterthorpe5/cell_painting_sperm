@@ -93,19 +93,53 @@ def detect_csv_delimiter(csv_path):
 # this is the problem function when we loose cpd_id
 # I hate this function. 
 
+
 def load_single_dataset(name, path, logger, metadata_cols):
+    """
+    Load a single dataset, explicitly log all column names, and verify metadata columns.
+
+    Parameters
+    ----------
+    name : str
+        Dataset name.
+    path : str
+        Path to the dataset CSV file.
+    logger : logging.Logger
+        Logger instance.
+    metadata_cols : list of str
+        Mandatory metadata column names.
+
+    Returns
+    -------
+    pd.DataFrame
+        Loaded and standardised DataFrame with MultiIndex.
+
+    Raises
+    ------
+    ValueError
+        If mandatory metadata columns are missing after loading.
+    """
     df = pd.read_csv(path, index_col=0)
+
+    if logger:
+        logger.debug(f"[{name}] Columns after initial load: {df.columns.tolist()}")
+
     df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
     missing_cols = [col for col in metadata_cols if col not in df.columns]
     if missing_cols:
         for col in missing_cols:
-            logger.error(f"[{name}] Mandatory column '{col}' missing after loading.")
-        raise ValueError(f"Mandatory column(s) '{missing_cols}' missing from dataset '{name}' after loading.")
+            logger.error(f"[{name}] Mandatory column '{col}' missing after standardisation.")
+        raise ValueError(f"Mandatory column(s) '{missing_cols}' missing from dataset '{name}'.")
 
     df.index = pd.MultiIndex.from_product([[name], df.index], names=["Dataset", "Sample"])
-    logger.debug(f"[{name}] Loaded successfully with shape {df.shape} and columns: {df.columns.tolist()}")
+
+    if logger:
+        logger.debug(f"[{name}] Final columns: {df.columns.tolist()}")
+        logger.debug(f"[{name}] Final shape: {df.shape}")
+
     return df
+
 
 
 def harmonise_numeric_columns(dataframes, logger):
