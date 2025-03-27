@@ -752,43 +752,60 @@ def encode_cpd_data(dataframes, encode_labels=False):
     return results
 
 
-def prepare_data_for_clipn_from_df(df, label_col="cpd_type", id_col="cpd_id"):
+def prepare_data_for_clipn_from_df(df):
     """
-    Prepare data for CLIPn using a combined DataFrame with MultiIndex (Dataset, Sample).
+    Prepares input data for CLIPn training from a MultiIndex DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame with MultiIndex (Dataset, Sample). Should contain numeric features and metadata.
 
     Returns
     -------
     tuple
-        X (dict): Dictionary of feature arrays for each dataset.
-        y (dict): Dictionary of encoded label arrays.
-        label_mappings (dict): Mapping of encoded labels to original labels.
-        ids (dict): Dictionary of cpd_id arrays for each dataset.
+        data_dict : dict
+            Dictionary mapping dataset name to feature matrix (np.ndarray).
+        label_dict : dict
+            Dictionary mapping dataset name to label vector (np.ndarray).
+        label_mappings : dict
+            Dictionary mapping dataset name to {label_id: label_name}.
+        cpd_ids : dict
+            Dictionary mapping dataset name to list of compound IDs.
     """
-    X, y, label_mappings, ids = {}, {}, {}, {}
+    from collections import defaultdict
 
-    exclude_cols = [label_col, id_col, "Library"]
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    data_dict = {}
+    label_dict = {}
+    label_mappings = {}
+    cpd_ids = {}
 
-    for dataset in df.index.get_level_values(0).unique():
-        subset = df.loc[dataset]
+    # Ensure it's a MultiIndex
+    if not isinstance(df.index, pd.MultiIndex):
+        raise ValueError("Expected a MultiIndex DataFrame with levels ['Dataset', 'Sample']")
 
-        # Check required columns
-        missing = [col for col in [label_col, id_col] if col not in subset.columns]
-        if missing:
-            raise ValueError(f"Dataset '{dataset}' is missing required column(s): {', '.join(missing)}")
+    for dataset_name in df.index.levels[0]:
+        dataset_df = df.loc[dataset_name]
 
-        labels = subset[label_col]
-        features = subset[numeric_cols]
-        ids[dataset] = subset[id_col].values
+        # Get feature columns (exclude metadata)
+        feature_cols = dataset_df.select_dtypes(include=[np.number]).columns.tolist()
+        meta_cols = ['cpd_id', 'cpd_type', 'Library']
+        feature_cols = [col for col in feature_cols if col not in meta_cols]
 
-        le = LabelEncoder()
-        labels_encoded = le.fit_transform(labels)
+        X = dataset_df[feature_cols].to_numpy()
+        y = dataset_df['cpd_type'].astype(str).to_numpy()
+        ids = dataset_df['cpd_id'].astype(str).tolist()
 
-        X[dataset] = features.values
-        y[dataset] = labels_encoded
-        label_mappings[dataset] = dict(zip(range(len(le.classes_)), le.classes_))
+        unique_labels = sorted(set(y))
+        label_map = {label: idx for idx, label in enumerate(unique_labels)}
+        y_encoded = np.array([label_map[label] for label in y])
 
-    return X, y, label_mappings, ids
+        data_dict[dataset_name] = X
+        label_dict[dataset_name] = y_encoded
+        label_mappings[dataset_name] = {v: k for k, v in label_map.items()}
+        cpd_ids[dataset_name] = ids
+
+    return data_dict, label_dict, label_mappings, cpd_ids
 
 
 

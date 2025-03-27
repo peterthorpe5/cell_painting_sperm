@@ -276,60 +276,50 @@ def decode_labels(df, encoders, logger):
     return df
 
 
-def prepare_data_for_clipn_from_df(df):
-    """
-    Prepares input data for CLIPn training from a MultiIndex DataFrame.
+def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, epochs):
+    """Run the actual CLIPn integration logic."""
+    logger.info(f"Running CLIPn integration with param: {clipn_param}")
+    meta_cols = ["cpd_id", "cpd_type", "Library"]  # or any others
+    # Ensure all meta_columns exist before scaling
+    missing_meta = [col for col in meta_cols if col not in df.columns]
+    if missing_meta:
+        raise ValueError(f"Missing metadata columns in input DataFrame before scaling: {missing_meta}")
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame with MultiIndex (Dataset, Sample). Should contain numeric features and metadata.
+    df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
 
-    Returns
-    -------
-    tuple
-        data_dict : dict
-            Dictionary mapping dataset name to feature matrix (np.ndarray).
-        label_dict : dict
-            Dictionary mapping dataset name to label vector (np.ndarray).
-        label_mappings : dict
-            Dictionary mapping dataset name to {label_id: label_name}.
-        cpd_ids : dict
-            Dictionary mapping dataset name to list of compound IDs.
-    """
-    from collections import defaultdict
+    X, y, label_mappings, ids = prepare_data_for_clipn_from_df(df_scaled)
 
-    data_dict = {}
-    label_dict = {}
-    label_mappings = {}
-    cpd_ids = {}
+    data_dict, label_dict, label_mappings, cpd_ids = prepare_data_for_clipn_from_df(df_scaled)
 
-    # Ensure it's a MultiIndex
-    if not isinstance(df.index, pd.MultiIndex):
-        raise ValueError("Expected a MultiIndex DataFrame with levels ['Dataset', 'Sample']")
+    latent_dict = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
 
-    for dataset_name in df.index.levels[0]:
-        dataset_df = df.loc[dataset_name]
+    latent_frames = []
+    for name, array in latent_dict.items():
+        df = pd.DataFrame(array)
+        df.index = pd.MultiIndex.from_product([[name], range(len(df))], names=["Dataset", "Sample"])
+        latent_frames.append(df)
 
-        # Get feature columns (exclude metadata)
-        feature_cols = dataset_df.select_dtypes(include=[np.number]).columns.tolist()
-        meta_cols = ['cpd_id', 'cpd_type', 'Library']
-        feature_cols = [col for col in feature_cols if col not in meta_cols]
+    latent_combined = pd.concat(latent_frames)
 
-        X = dataset_df[feature_cols].to_numpy()
-        y = dataset_df['cpd_type'].astype(str).to_numpy()
-        ids = dataset_df['cpd_id'].astype(str).tolist()
 
-        unique_labels = sorted(set(y))
-        label_map = {label: idx for idx, label in enumerate(unique_labels)}
-        y_encoded = np.array([label_map[label] for label in y])
+    latent_file = Path(output_path) / "CLIPn_latent_representations.npz"
+    np.savez(latent_file, **latent_dict)
+    logger.info(f"Latent representations saved to: {latent_file}")
 
-        data_dict[dataset_name] = X
-        label_dict[dataset_name] = y_encoded
-        label_mappings[dataset_name] = {v: k for k, v in label_map.items()}
-        cpd_ids[dataset_name] = ids
 
-    return data_dict, label_dict, label_mappings, cpd_ids
+    for dataset, latent in latent_dict.items():
+        per_dataset_path = Path(output_path) / f"{dataset}_latent.csv"
+        latent_df = pd.DataFrame(latent)
+
+        # Add cpd_id back, if available
+        if dataset in cpd_ids:
+            latent_df[id_col] = cpd_ids[dataset]
+
+        latent_df.to_csv(per_dataset_path, index=False)
+        logger.info(f"Saved latent CSV for {dataset} to {per_dataset_path}")
+
+
+    return latent_combined, cpd_ids
 
 
 def main(args):
