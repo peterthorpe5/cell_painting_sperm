@@ -91,58 +91,89 @@ def detect_csv_delimiter(csv_path):
             return ','
 
 
-def load_and_harmonise_datasets(datasets_csv, logger):
+def load_and_harmonise_datasets(datasets_csv, logger, mode="integrate_all"):
     """
-    Load datasets from CSV and harmonise numeric feature columns,
-    while preserving metadata columns such as cpd_type, cpd_id, and Library.
+    Load datasets from CSV and process them for CLIPn.
+    In 'reference_only' mode, only reference datasets are loaded and harmonised.
+    In 'integrate_all' mode, all datasets are harmonised across numeric features.
 
     Parameters
     ----------
     datasets_csv : str
-        Path to the CSV file listing dataset names and their paths.
+        Path to the CSV listing dataset names and their paths.
     logger : logging.Logger
-        Logger instance for logging progress and messages.
+        Logger instance for logging.
+    mode : str
+        Either 'reference_only' or 'integrate_all'.
 
     Returns
     -------
     tuple
         dataframes : dict
-            Dictionary of harmonised pandas DataFrames indexed by dataset name.
+            Dictionary of processed DataFrames.
         common_cols : list
-            List of numeric feature columns that were harmonised across datasets.
+            List of harmonised numeric feature columns (empty if none).
     """
     delimiter = detect_csv_delimiter(datasets_csv)
-
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
     dataframes = {}
-    all_numeric_cols = set()
+    metadata_cols = ["cpd_type", "cpd_id", "Library"]
 
-    logger.info("Loading datasets")
+    if mode == "reference_only":
+        logger.info("Running in reference_only mode: loading and harmonising reference datasets only.")
+        reference_dataframes = {}
+        all_numeric_cols = set()
+        all_metadata_cols = set()
+
+        for name, path in dataset_paths.items():
+            if "reference" in name.lower():
+                df = pd.read_csv(path, index_col=0)
+                df = standardise_metadata_columns(df, logger)
+                reference_dataframes[name] = df
+                all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
+                all_metadata_cols.update(col for col in df.columns if col in metadata_cols)
+                logger.debug(f"Loaded reference dataset {name}: shape {df.shape}")
+
+        if not reference_dataframes:
+            raise ValueError("No reference datasets found in reference_only mode.")
+
+        # Harmonise numeric features across reference datasets
+        common_cols = sorted(list(all_numeric_cols.intersection(*[set(df.columns) for df in reference_dataframes.values()])))
+        logger.info(f"Harmonised feature columns across references: {len(common_cols)}")
+
+        final_cols = list(all_metadata_cols) + common_cols
+        for name in reference_dataframes:
+            df = reference_dataframes[name]
+            reference_dataframes[name] = df[[col for col in final_cols if col in df.columns]].copy()
+            logger.debug(f"Harmonised {name}: shape {reference_dataframes[name].shape}")
+
+        return reference_dataframes, common_cols
+
+    # integrate_all mode
+    logger.info("Running in integrate_all mode: loading and harmonising all datasets")
+    all_numeric_cols = set()
+    all_metadata_cols = set()
+
     for name, path in dataset_paths.items():
         df = pd.read_csv(path, index_col=0)
-        # covert weird col names to a standard
-        # Im sure we will find more to fix. 
-        df = standardise_metadata_columns(df)
-
+        df = standardise_metadata_columns(df, logger)
         dataframes[name] = df
         all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
+        all_metadata_cols.update(col for col in df.columns if col in metadata_cols)
         logger.debug(f"Loaded {name}: shape {df.shape}")
 
     common_cols = sorted(list(all_numeric_cols.intersection(*[set(df.columns) for df in dataframes.values()])))
-    logger.info(f"Harmonised feature columns count: {len(common_cols)}")
+    logger.info(f"Harmonised feature columns across all datasets: {len(common_cols)}")
 
-    # Metadata columns to preserve if present
-    metadata_cols = ["cpd_type", "cpd_id", "Library"]
-    final_cols = metadata_cols + common_cols
-
+    final_cols = list(all_metadata_cols) + common_cols
     for name in dataframes:
-        dataframes[name] = dataframes[name][[col for col in final_cols if col in dataframes[name].columns]].copy()
+        df = dataframes[name]
+        dataframes[name] = df[[col for col in final_cols if col in df.columns]].copy()
         logger.debug(f"Harmonised {name}: shape {dataframes[name].shape}")
 
     return dataframes, common_cols
-
 
 
 def encode_labels(df, logger):
@@ -164,10 +195,13 @@ def decode_labels(df, encoders, logger):
     return df
 
 
+
+
 def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, epochs):
     """Run the actual CLIPn integration logic."""
     logger.info(f"Running CLIPn integration with param: {clipn_param}")
-    data_dict, label_dict, label_mappings = prepare_data_for_clipn_from_df(df)
+    data_dict, label_dict, label_mappings, cpd_ids = prepare_data_for_clipn_from_df(df)
+
     latent_dict = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
 
     latent_combined = pd.concat(latent_dict.values(), keys=latent_dict.keys(), names=["Dataset", "Sample"])
@@ -176,19 +210,27 @@ def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, 
     np.savez(latent_file, **latent_dict)
     logger.info(f"Latent representations saved to: {latent_file}")
 
+
     for dataset, latent in latent_dict.items():
         per_dataset_path = Path(output_path) / f"{dataset}_latent.csv"
         latent_df = pd.DataFrame(latent)
-        latent_df.to_csv(per_dataset_path)
+
+        # Add cpd_id back, if available
+        if dataset in cpd_ids:
+            latent_df[id_col] = cpd_ids[dataset]
+
+        latent_df.to_csv(per_dataset_path, index=False)
         logger.info(f"Saved latent CSV for {dataset} to {per_dataset_path}")
 
-    return latent_combined
+
+    return latent_combined, cpd_ids
 
 def main(args):
     """Main function to execute CLIPn integration pipeline."""
     logger = setup_logging(args.out, args.experiment)
 
-    dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger)
+    dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
+
     combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
     logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
     
@@ -199,10 +241,14 @@ def main(args):
         reference_names = [name for name in dataframes if 'reference' in name.lower()]
         reference_df = combined_df.loc[reference_names]
         logger.info(f"Training CLIPn on references: {reference_names}")
-        latent_df = run_clipn_integration(reference_df, logger, args.clipn_param, args.out, args.latent_dim, args.lr, args.epoch)
+        latent_df, cpd_ids = run_clipn_integration(reference_df, logger, args.clipn_param, args.out, 
+                                                   args.latent_dim, args.lr, args.epoch)
+
     else:
         logger.info("Training and integrating CLIPn on all datasets")
-        latent_df = run_clipn_integration(combined_df, logger, args.clipn_param, args.out, args.latent_dim, args.lr, args.epoch)
+        latent_df, cpd_ids = run_clipn_integration(combined_df, logger, args.clipn_param, args.out, 
+                                                   args.latent_dim, args.lr, args.epoch)
+
 
   
     decoded_df = decode_labels(latent_df.copy(), encoders, logger)
@@ -213,9 +259,15 @@ def main(args):
     # Save renamed latent with original compound IDs (e.g., cpd_id)
     try:
         decoded_with_index = decoded_df.reset_index()
-        renamed_path = Path(args.out) / "CLIPn_latent_representations_with_cpd_id.csv"
+
+        # Add cpd_id from cpd_ids dict
+        decoded_with_index["cpd_id"] = decoded_with_index.apply(
+            lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
+            axis=1
+        )
+
+        renamed_path = Path(args.out) / f"{experiment}_CLIPn_latent_representations_with_cpd_id.csv"
         decoded_with_index.to_csv(renamed_path, index=False)
-        logger.info(f"Latent representations with original labels saved to {renamed_path}")
     except Exception as e:
         logger.warning(f"Failed to save renamed latent file: {e}")
     logger.info(f"Columns at this stage, encoded: {combined_df.columns.tolist()}")

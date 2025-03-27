@@ -719,52 +719,43 @@ def encode_cpd_data(dataframes, encode_labels=False):
     return results
 
 
-def prepare_data_for_clipn_from_df(df, label_col="cpd_type"):
+def prepare_data_for_clipn_from_df(df, label_col="cpd_type", id_col="cpd_id"):
     """
-    Prepare data for CLIPn using a single combined DataFrame with dataset names in the index.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Combined DataFrame with MultiIndex (Dataset, Sample). Must include label_col.
-    label_col : str
-        Column name to use as the label for each sample (default: 'cpd_type').
+    Prepare data for CLIPn using a combined DataFrame with MultiIndex (Dataset, Sample).
 
     Returns
     -------
     tuple
-        X (dict): Dictionary of data arrays for CLIPn.
+        X (dict): Dictionary of feature arrays for each dataset.
         y (dict): Dictionary of encoded label arrays.
-        label_mappings (dict): Mapping of label integers to original values.
+        label_mappings (dict): Mapping of encoded labels to original labels.
+        ids (dict): Dictionary of cpd_id arrays for each dataset.
     """
-    from sklearn.preprocessing import LabelEncoder
+    X, y, label_mappings, ids = {}, {}, {}, {}
 
-    X, y, label_mappings = {}, {}, {}
-
-    # Drop non-numeric metadata except label_col
-    exclude_cols = [label_col, "cpd_id", "Library"]
+    exclude_cols = [label_col, id_col, "Library"]
     numeric_cols = df.select_dtypes(include=[np.number]).columns
 
     for dataset in df.index.get_level_values(0).unique():
         subset = df.loc[dataset]
 
-        if subset.empty:
-            continue
+        # Check required columns
+        missing = [col for col in [label_col, id_col] if col not in subset.columns]
+        if missing:
+            raise ValueError(f"Dataset '{dataset}' is missing required column(s): {', '.join(missing)}")
 
-        # Get labels and features
         labels = subset[label_col]
         features = subset[numeric_cols]
+        ids[dataset] = subset[id_col].values
 
-        # Encode labels
         le = LabelEncoder()
         labels_encoded = le.fit_transform(labels)
 
-        # Save to dicts
         X[dataset] = features.values
         y[dataset] = labels_encoded
         label_mappings[dataset] = dict(zip(range(len(le.classes_)), le.classes_))
 
-    return X, y, label_mappings
+    return X, y, label_mappings, ids
 
 
 
