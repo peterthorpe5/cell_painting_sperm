@@ -719,6 +719,54 @@ def encode_cpd_data(dataframes, encode_labels=False):
     return results
 
 
+def prepare_data_for_clipn_from_df(df, label_col="cpd_type"):
+    """
+    Prepare data for CLIPn using a single combined DataFrame with dataset names in the index.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Combined DataFrame with MultiIndex (Dataset, Sample). Must include label_col.
+    label_col : str
+        Column name to use as the label for each sample (default: 'cpd_type').
+
+    Returns
+    -------
+    tuple
+        X (dict): Dictionary of data arrays for CLIPn.
+        y (dict): Dictionary of encoded label arrays.
+        label_mappings (dict): Mapping of label integers to original values.
+    """
+    from sklearn.preprocessing import LabelEncoder
+
+    X, y, label_mappings = {}, {}, {}
+
+    # Drop non-numeric metadata except label_col
+    exclude_cols = [label_col, "cpd_id", "Library"]
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+
+    for dataset in df.index.get_level_values(0).unique():
+        subset = df.loc[dataset]
+
+        if subset.empty:
+            continue
+
+        # Get labels and features
+        labels = subset[label_col]
+        features = subset[numeric_cols]
+
+        # Encode labels
+        le = LabelEncoder()
+        labels_encoded = le.fit_transform(labels)
+
+        # Save to dicts
+        X[dataset] = features.values
+        y[dataset] = labels_encoded
+        label_mappings[dataset] = dict(zip(range(len(le.classes_)), le.classes_))
+
+    return X, y, label_mappings
+
+
 
 def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experiment_label_mapping,
                            stb_data_imputed, stb_labels, stb_label_mapping):
@@ -810,6 +858,38 @@ def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experimen
     logger.info(f" Final dataset shapes being passed to CLIPn: { {k: v.shape for k, v in X.items()} }")
 
     return X, y, label_mappings, dataset_mapping
+
+
+def run_clipn_simple(X, y, latent_dim=20, lr=1e-5, epochs=300):
+    """
+    Run CLIPn training and return latent representations.
+
+    Parameters
+    ----------
+    X : dict
+        Dictionary of input feature arrays (one per dataset).
+    y : dict
+        Dictionary of encoded label arrays (one per dataset).
+    latent_dim : int
+        Dimensionality of the CLIPn latent space.
+    lr : float
+        Learning rate.
+    epochs : int
+        Number of training epochs.
+
+    Returns
+    -------
+    dict
+        Dictionary of latent representations for each dataset.
+    """
+    from clipn.model import CLIPn  # adjust this import based on your actual CLIPn class location
+
+    model = CLIPn(X, y, latent_dim=latent_dim)
+    model.fit(X, y, lr=lr, epochs=epochs)
+    latent = model.predict(X)
+
+    return latent
+
 
 
 def run_clipn(X, y, output_folder, args):

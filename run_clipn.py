@@ -40,8 +40,8 @@ from sklearn import set_config
 import csv
 from cell_painting.process_data import (
 
-        prepare_data_for_clipn,
-
+        prepare_data_for_clipn_from_df,
+        run_clipn_simple
 )
 
 
@@ -116,6 +116,7 @@ def load_and_harmonise_datasets(datasets_csv, logger):
 
     return dataframes, common_cols
 
+
 def encode_labels(df, logger):
     """Encode categorical columns and return encoders for decoding later."""
     encoders = {}
@@ -126,6 +127,7 @@ def encode_labels(df, logger):
         logger.debug(f"Encoded column {col}")
     return df, encoders
 
+
 def decode_labels(df, encoders, logger):
     """Decode categorical columns to original labels."""
     for col, le in encoders.items():
@@ -133,11 +135,12 @@ def decode_labels(df, encoders, logger):
         logger.debug(f"Decoded column {col}")
     return df
 
+
 def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, epochs):
     """Run the actual CLIPn integration logic."""
     logger.info(f"Running CLIPn integration with param: {clipn_param}")
-    data_dict, label_dict = prepare_data_for_clipn(df)
-    latent_dict = run_clipn(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
+    data_dict, label_dict, label_mappings = prepare_data_for_clipn_from_df(df)
+    latent_dict = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
 
     latent_combined = pd.concat(latent_dict.values(), keys=latent_dict.keys(), names=["Dataset", "Sample"])
 
