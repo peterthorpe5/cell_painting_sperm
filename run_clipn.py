@@ -92,53 +92,76 @@ def detect_csv_delimiter(csv_path):
 
 # this is the problem function when we loose cpd_id
 # I hate this function. 
-
-
 def load_single_dataset(name, path, logger, metadata_cols):
     """
-    Load a single dataset, explicitly log all column names, and verify metadata columns.
+    Load a single dataset, standardise metadata, and wrap it with a MultiIndex.
 
     Parameters
     ----------
     name : str
-        Dataset name.
+        Dataset name used to label the MultiIndex.
     path : str
-        Path to the dataset CSV file.
+        Path to the input CSV file.
     logger : logging.Logger
-        Logger instance.
+        Logger instance for status and error reporting.
     metadata_cols : list of str
-        Mandatory metadata column names.
+        List of required metadata column names.
 
     Returns
     -------
     pd.DataFrame
-        Loaded and standardised DataFrame with MultiIndex.
+        DataFrame with harmonised metadata and a MultiIndex ('Dataset', 'Sample').
 
     Raises
     ------
     ValueError
-        If mandatory metadata columns are missing after loading.
+        If any mandatory metadata column is missing after standardisation.
     """
     df = pd.read_csv(path, index_col=0)
 
     if logger:
         logger.debug(f"[{name}] Columns after initial load: {df.columns.tolist()}")
+        logger.debug(f"[{name}] Index name after initial load: {df.index.name}")
 
     df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
+    # Recover cpd_id from index if it is not in the columns
+    if 'cpd_id' not in df.columns:
+        if df.index.name == 'cpd_id':
+            df['cpd_id'] = df.index
+            logger.warning(f"[{name}] 'cpd_id' recovered from Index.")
+        else:
+            logger.error(f"[{name}] 'cpd_id' not found in columns or index.")
+    
+    # Check for all required metadata columns
     missing_cols = [col for col in metadata_cols if col not in df.columns]
     if missing_cols:
         for col in missing_cols:
             logger.error(f"[{name}] Mandatory column '{col}' missing after standardisation.")
-        raise ValueError(f"Mandatory column(s) '{missing_cols}' missing from dataset '{name}'.")
+        raise ValueError(f"[{name}] Mandatory column(s) {missing_cols} missing after standardisation.")
 
-    df.index = pd.MultiIndex.from_product([[name], df.index], names=["Dataset", "Sample"])
+    # Wrap in MultiIndex correctly
+    if not isinstance(df.index, pd.MultiIndex):
+        sample_index_name = df.index.name or "Sample"
+        df.index = pd.MultiIndex.from_product(
+            [[name], df.index],
+            names=["Dataset", sample_index_name]
+        )
+    else:
+        # Already MultiIndexed (less common), just prepend the dataset level
+        df.index = pd.MultiIndex.from_tuples(
+            [(name,) + idx if isinstance(idx, tuple) else (name, idx) for idx in df.index],
+            names=["Dataset"] + list(df.index.names)
+        )
 
     if logger:
         logger.debug(f"[{name}] Final columns: {df.columns.tolist()}")
         logger.debug(f"[{name}] Final shape: {df.shape}")
+        logger.debug(f"[{name}] Final index names: {df.index.names}")
 
     return df
+
+
 
 
 

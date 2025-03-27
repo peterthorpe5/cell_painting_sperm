@@ -227,64 +227,62 @@ def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # This function is a pain too!! 
-def standardise_metadata_columns(df, logger=None, dataset_name="unknown"):
+def standardise_metadata_columns(df, logger=None, dataset_name=None):
     """
-    Standardise metadata columns by ensuring 'cpd_id', 'cpd_type', and 'Library' are present.
+    Standardise column names for metadata and recover 'cpd_id' from index if necessary.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Input DataFrame with metadata and numeric features.
+        Input DataFrame to standardise.
     logger : logging.Logger, optional
-        Logger for debug messages.
-    dataset_name : str
-        Name of the dataset (for logging).
+        Logger instance for status messages.
+    dataset_name : str, optional
+        Dataset name used to infer 'cpd_type' if missing.
 
     Returns
     -------
     pd.DataFrame
-        Standardised DataFrame with guaranteed metadata columns.
+        DataFrame with standardised metadata columns.
 
     Raises
     ------
     ValueError
-        If required metadata columns are missing and cannot be recovered.
+        If mandatory metadata columns are missing and cannot be recovered.
     """
-    df = df.copy()
+    rename_map = {
+        "library": "Library",
+        "Library": "Library",
+        "compound_name": "cpd_id",
+        "COMPOUND_NAME": "cpd_id",
+        "Source_Plate_Barcode": "Plate_Metadata",
+        "Source_Well": "Well_Metadata"
+    }
 
-    # Try to recover cpd_id if it is in the index
+    # Rename columns using mapping
+    for old, new in rename_map.items():
+        if old in df.columns and new not in df.columns:
+            df.rename(columns={old: new}, inplace=True)
+            if logger:
+                logger.info(f"Renamed column '{old}' to '{new}'")
+
+    # Attempt to recover 'cpd_id' from index if not in columns
     if "cpd_id" not in df.columns:
-        if isinstance(df.index, pd.MultiIndex):
-            for level in df.index.names:
-                if level == "cpd_id":
-                    df["cpd_id"] = df.index.get_level_values(level)
-                    if logger:
-                        logger.warning(f"[{dataset_name}] 'cpd_id' recovered from MultiIndex level.")
-        elif df.index.name == "cpd_id":
+        if df.index.name == "cpd_id":
             df["cpd_id"] = df.index
             if logger:
                 logger.warning(f"[{dataset_name}] 'cpd_id' recovered from Index.")
+        else:
+            if logger:
+                logger.error(f"[{dataset_name}] 'cpd_id' not found in columns or index.")
+            raise ValueError(f"[{dataset_name}] 'cpd_id' not found in columns or index.")
 
-    # Ensure cpd_type is present (default to dataset_name if missing)
+    # Handle missing 'cpd_type' explicitly (but allow fallback)
     if "cpd_type" not in df.columns:
-        df["cpd_type"] = dataset_name
+        fallback_type = dataset_name if dataset_name else "unknown"
+        df["cpd_type"] = fallback_type
         if logger:
-            logger.warning(f"[{dataset_name}] 'cpd_type' missing, inferred as '{dataset_name}'.")
-
-    # Ensure Library is present (default to 'unknown')
-    if "Library" not in df.columns:
-        df["Library"] = "unknown"
-        if logger:
-            logger.warning(f"[{dataset_name}] 'Library' missing, filled with 'unknown'.")
-
-    # Final metadata column check
-    required = ["cpd_id", "cpd_type", "Library"]
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        msg = f"[{dataset_name}] Mandatory column(s) {missing} missing after standardisation."
-        if logger:
-            logger.error(msg)
-        raise ValueError(msg)
+            logger.warning(f"[{dataset_name}] 'cpd_type' missing, inferred as '{fallback_type}'.")
 
     return df
 
