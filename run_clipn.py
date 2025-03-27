@@ -93,77 +93,88 @@ def detect_csv_delimiter(csv_path):
 # this is the problem function when we loose cpd_id
 def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     """
-    Load datasets from CSV and harmonise numeric feature columns,
-    explicitly indexing by 'cpd_id' and preserving metadata.
+    Load datasets from CSV, harmonise numeric columns, explicitly retaining metadata.
 
     Parameters
     ----------
     datasets_csv : str
-        Path to the CSV file listing dataset names and their paths.
+        Path to CSV listing dataset names and their paths.
     logger : logging.Logger
-        Logger instance for logging progress and messages.
+        Logger instance.
     mode : str, optional
-        Mode flag ('reference_only') to control which datasets to harmonise.
+        Control which datasets to harmonise ('reference_only' or all).
 
     Returns
     -------
     tuple
         dataframes : dict
-            Dictionary of harmonised DataFrames indexed by dataset name.
-        common_cols : list
-            List of numeric feature columns harmonised across datasets.
+            Harmonised DataFrames with MultiIndex (Dataset, Sample).
+        common_numeric_cols : list
+            Numeric columns harmonised across datasets.
     """
     delimiter = detect_csv_delimiter(datasets_csv)
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
     dataframes = {}
-    metadata_cols = ["cpd_type", "Library"]  # cpd_id will be index
+    numeric_cols_dict = {}
+    metadata_cols = ["cpd_id", "cpd_type", "Library"]
 
-    logger.info("Loading datasets and explicitly indexing by 'cpd_id'")
+    logger.info("Loading datasets and setting MultiIndex ('Dataset', 'Sample')")
+
     for name, path in dataset_paths.items():
-        df = pd.read_csv(path)
-
-        # Ensure 'cpd_id' exists and set as index explicitly
-        if "cpd_id" not in df.columns:
-            raise ValueError(f"'cpd_id' column missing from {name}, cannot proceed.")
-        df.set_index("cpd_id", inplace=True)
-        
+        df = pd.read_csv(path, index_col=0)
         df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
-        # Check for 'cpd_type' explicitly and default to dataset name if missing
-        if "cpd_type" not in df.columns:
-            df["cpd_type"] = name
-            logger.warning(f"'cpd_type' missing from {name}, defaulted to dataset name.")
+        # Ensure metadata columns are present, add if missing
+        for col in metadata_cols:
+            if col not in df.columns:
+                df[col] = name
+                logger.warning(f"Column '{col}' was missing — defaulted to dataset name: '{name}'")
 
+        # Set MultiIndex explicitly: (Dataset, Sample)
+        df.index.name = 'Sample'
+        df['Dataset'] = name
+        df.set_index('Dataset', append=True, inplace=True)
+        df = df.reorder_levels(['Dataset', 'Sample'])
+
+        # Save DataFrame
         dataframes[name] = df
-        logger.debug(f"Loaded {name} with shape {df.shape} and columns {df.columns.tolist()}")
+        numeric_cols_dict[name] = set(df.select_dtypes(include=[np.number]).columns)
 
-    # Harmonise numeric columns
+        logger.debug(f"Loaded '{name}', shape: {df.shape}, cols: {df.columns.tolist()}")
+
+    # Decide which datasets to harmonise
     if mode == "reference_only":
-        reference_dfs = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
-        common_cols = sorted(list(set.intersection(
-            *(set(df.select_dtypes(include=[np.number]).columns) for df in reference_dfs.values())
-        )))
-        logger.info(f"Harmonised numeric columns across references: {len(common_cols)}")
+        datasets_to_harmonise = {k: v for k, v in dataframes.items() if 'reference' in k.lower()}
+    else:
+        datasets_to_harmonise = dataframes
 
-        for name in reference_dfs:
-            df = reference_dfs[name][common_cols + metadata_cols]
-            dataframes[name] = df
+    # Find common numeric columns explicitly
+    common_numeric_cols = sorted(list(set.intersection(*numeric_cols_dict.values())))
+    logger.info(f"Harmonised numeric columns across datasets: {len(common_numeric_cols)}")
 
-        return dataframes, common_cols
+    # Explicitly subset numeric data and immediately reattach metadata via MultiIndex
+    for name in datasets_to_harmonise:
+        df = datasets_to_harmonise[name]
 
-    # For integrate_all mode
-    common_cols = sorted(list(set.intersection(
-        *(set(df.select_dtypes(include=[np.number]).columns) for df in dataframes.values())
-    )))
-    logger.info(f"Harmonised numeric columns across all datasets: {len(common_cols)}")
+        # subset numeric explicitly
+        numeric_df = df[common_numeric_cols].copy()
 
-    for name in dataframes:
-        df = dataframes[name][common_cols + metadata_cols]
-        dataframes[name] = df
+        # Explicitly reattach metadata using MultiIndex alignment
+        metadata_df = df[metadata_cols]
+        numeric_df = numeric_df.join(metadata_df, how='left')
 
-    return dataframes, common_cols
+        # Sanity check immediately after reattachment
+        missing_after_concat = [col for col in metadata_cols if col not in numeric_df.columns]
+        if missing_after_concat:
+            raise ValueError(f"After metadata reattachment, missing cols in '{name}': {missing_after_concat}")
+
+        dataframes[name] = numeric_df
+        logger.debug(f"After reattaching metadata, '{name}' columns: {numeric_df.columns.tolist()}")
+
+    return dataframes, common_numeric_cols
+
 
 
 def standardise_numeric_columns_preserving_metadata(
