@@ -91,30 +91,53 @@ def detect_csv_delimiter(csv_path):
 
 
 def load_and_harmonise_datasets(datasets_csv, logger):
-    """Load datasets from CSV and harmonise columns."""
+    """
+    Load datasets from CSV and harmonise numeric feature columns,
+    while preserving metadata columns such as cpd_type, cpd_id, and Library.
+
+    Parameters
+    ----------
+    datasets_csv : str
+        Path to the CSV file listing dataset names and their paths.
+    logger : logging.Logger
+        Logger instance for logging progress and messages.
+
+    Returns
+    -------
+    tuple
+        dataframes : dict
+            Dictionary of harmonised pandas DataFrames indexed by dataset name.
+        common_cols : list
+            List of numeric feature columns that were harmonised across datasets.
+    """
     delimiter = detect_csv_delimiter(datasets_csv)
 
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
     dataframes = {}
-    all_cols = set()
+    all_numeric_cols = set()
 
     logger.info("Loading datasets")
     for name, path in dataset_paths.items():
         df = pd.read_csv(path, index_col=0)
         dataframes[name] = df
-        all_cols.update(df.columns)
+        all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
         logger.debug(f"Loaded {name}: shape {df.shape}")
 
-    common_cols = sorted(list(all_cols.intersection(*[set(df.columns) for df in dataframes.values()])))
-    logger.info(f"Harmonised columns count: {len(common_cols)}")
+    common_cols = sorted(list(all_numeric_cols.intersection(*[set(df.columns) for df in dataframes.values()])))
+    logger.info(f"Harmonised feature columns count: {len(common_cols)}")
+
+    # Metadata columns to preserve if present
+    metadata_cols = ["cpd_type", "cpd_id", "Library"]
+    final_cols = metadata_cols + common_cols
 
     for name in dataframes:
-        dataframes[name] = dataframes[name][common_cols]
+        dataframes[name] = dataframes[name][[col for col in final_cols if col in dataframes[name].columns]].copy()
         logger.debug(f"Harmonised {name}: shape {dataframes[name].shape}")
 
     return dataframes, common_cols
+
 
 
 def encode_labels(df, logger):
@@ -162,7 +185,9 @@ def main(args):
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger)
     combined_df = pd.concat(dataframes.values(), keys=dataframes.keys(), names=['Dataset', 'Sample'])
-    logger(f"Columns at this stage, combined:" {combined_df.columns.tolist()})
+    logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
+
+    
 
     combined_df, encoders = encode_labels(combined_df, logger)
 
@@ -189,7 +214,8 @@ def main(args):
         logger.info(f"Latent representations with original labels saved to {renamed_path}")
     except Exception as e:
         logger.warning(f"Failed to save renamed latent file: {e}")
-    logger(f"Columns at this stage, endoded:" {combined_df.columns.tolist()})
+    logger.info(f"Columns at this stage, encoded: {combined_df.columns.tolist()}")
+
     # Save label encoder mappings
     try:
         mapping_dir = Path(args.out)
