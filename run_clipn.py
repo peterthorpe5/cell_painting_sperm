@@ -90,7 +90,7 @@ def detect_csv_delimiter(csv_path):
             # default to comma if both are found or none
             return ','
 
-
+# this is the problem function when we loose cpd_id
 def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     """
     Load datasets from CSV and harmonise numeric feature columns,
@@ -118,71 +118,64 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
     dataframes = {}
+    metadata_dict = {}
     all_numeric_cols = set()
+    metadata_cols = ["cpd_id", "cpd_type", "Library"]
 
     logger.info("Loading datasets")
     for name, path in dataset_paths.items():
         df = pd.read_csv(path, index_col=0)
 
-        # Check early if cpd_id is already there
-        if "cpd_id" not in df.columns:
-            logger.warning(f"[{name}] 'cpd_id' is MISSING right after loading!")
-        else:
-            logger.debug(f"[{name}] 'cpd_id' is present after loading.")
-
-        # Standardise metadata columns
         df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
-        # Check again after standardisation
-        if "cpd_id" not in df.columns:
-            logger.error(f"[{name}] 'cpd_id' is STILL missing after standardisation!")
-        else:
-            logger.debug(f"[{name}] 'cpd_id' is present after standardisation.")
+        # Stash metadata separately before subsetting
+        available_metadata = [col for col in metadata_cols if col in df.columns]
+        metadata_dict[name] = df[available_metadata].copy()
 
         logger.debug(f"After standardisation, columns in '{name}': {df.columns.tolist()}")
         dataframes[name] = df
         all_numeric_cols.update(df.select_dtypes(include=[np.number]).columns)
         logger.debug(f"Loaded {name}: shape {df.shape}")
 
-    # Harmonise feature columns only across reference datasets if in reference_only mode
     if mode == "reference_only":
         logger.info("Running in reference_only mode: loading and harmonising reference datasets only.")
         reference_dfs = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
 
-        # Compute common numeric columns across references
         common_cols = sorted(list(
             set.intersection(*(set(df.select_dtypes(include=[np.number]).columns) for df in reference_dfs.values()))
         ))
         logger.info(f"Harmonised feature columns across references: {len(common_cols)}")
 
-        # Subset and debug column presence
         for name in reference_dfs:
             df = reference_dfs[name]
             logger.debug(f"[{name}] Columns BEFORE subsetting: {df.columns.tolist()}")
-            required_metadata = ["cpd_id", "cpd_type", "Library"]
-            available_cols = df.columns.tolist()
-            missing_cols = [col for col in required_metadata if col not in available_cols]
-            if missing_cols:
-                logger.warning(f"[{name}] Missing metadata column(s): {missing_cols}")
-            subset_cols = [col for col in common_cols + required_metadata if col in df.columns]
-            dataframes[name] = df[subset_cols].copy()
-            logger.debug(f"[{name}] Columns AFTER subsetting: {dataframes[name].columns.tolist()}")
+            df = df[common_cols].copy()
+
+            # Reattach metadata
+            if name in metadata_dict:
+                df = pd.concat([df, metadata_dict[name]], axis=1)
+                logger.debug(f"[{name}] Metadata reattached. Final columns: {df.columns.tolist()}")
+
+            dataframes[name] = df
 
         return dataframes, common_cols
 
-    # Otherwise, harmonise across all datasets
-    common_cols = sorted(list(all_numeric_cols.intersection(*[set(df.columns) for df in dataframes.values()])))
+    # For integrate_all mode
+    common_cols = sorted(list(
+        all_numeric_cols.intersection(*[set(df.columns) for df in dataframes.values()])
+    ))
     logger.info(f"Harmonised feature columns count: {len(common_cols)}")
-
-    metadata_cols = ["cpd_type", "cpd_id", "Library"]
-    final_cols = metadata_cols + common_cols
 
     for name in dataframes:
         df = dataframes[name]
         logger.debug(f"[{name}] Columns BEFORE subsetting: {df.columns.tolist()}")
-        subset_cols = [col for col in final_cols if col in df.columns]
-        dataframes[name] = df[subset_cols].copy()
-        logger.debug(f"[{name}] Columns AFTER subsetting: {dataframes[name].columns.tolist()}")
+        df = df[common_cols].copy()
+
+        if name in metadata_dict:
+            df = pd.concat([df, metadata_dict[name]], axis=1)
+            logger.debug(f"[{name}] Metadata reattached. Final columns: {df.columns.tolist()}")
+
+        dataframes[name] = df
 
     return dataframes, common_cols
 
