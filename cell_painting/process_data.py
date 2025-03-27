@@ -226,85 +226,74 @@ def standardise_annotation_columns(annotation_df: pd.DataFrame) -> pd.DataFrame:
     return annotation_df
 
 
-def standardise_metadata_columns(df: pd.DataFrame, logger=None, dataset_name=None) -> pd.DataFrame:
+def standardise_metadata_columns(df, logger=None, dataset_name=None):
     """
-    Standardise metadata columns, ensuring mandatory columns ('cpd_id', 'cpd_type') 
-    are retained explicitly, recovering from MultiIndex if necessary.
+    Standardises metadata column names and attempts recovery of critical columns.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Input DataFrame potentially with MultiIndex.
+        Input DataFrame containing feature and metadata columns.
     logger : logging.Logger, optional
-        Logger instance for detailed debugging.
+        Logger instance for logging progress and warnings.
     dataset_name : str, optional
-        Name of the dataset currently being processed.
+        Dataset name, used for fallback metadata inference.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with standardised metadata columns.
+        DataFrame with renamed and validated metadata columns.
 
     Raises
     ------
     ValueError
-        If mandatory metadata columns ('cpd_id') are still missing after recovery attempt.
+        If mandatory metadata columns are missing after processing.
     """
+    df = df.copy()
     rename_map = {
-        "library": "Library",
         "compound_name": "cpd_id",
         "COMPOUND_NAME": "cpd_id",
+        "library": "Library",
+        "Library_Name": "Library",
         "Source_Plate_Barcode": "Plate_Metadata",
         "Source_Well": "Well_Metadata"
     }
 
-    mandatory_cols = ['cpd_id', 'cpd_type']
+    if logger:
+        logger.debug(f"[{dataset_name}] Initial columns: {df.columns.tolist()}")
+
+    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
 
     if logger:
-        logger.debug(f"[{dataset_name}] Columns initially: {df.columns.tolist()}")
+        logger.debug(f"[{dataset_name}] After renaming: {df.columns.tolist()}")
 
-    # Perform renaming explicitly
-    df.rename(columns={old: new for old, new in rename_map.items() if old in df.columns}, inplace=True)
-    
-    if logger:
-        logger.debug(f"[{dataset_name}] Columns after renaming: {df.columns.tolist()}")
+    # Recover 'cpd_id' from index if lost
+    if "cpd_id" not in df.columns:
+        if isinstance(df.index, pd.MultiIndex):
+            if "cpd_id" in df.index.names:
+                df.reset_index("cpd_id", inplace=True)
+                if logger:
+                    logger.warning(f"[{dataset_name}] Recovered 'cpd_id' from index.")
+            else:
+                if logger:
+                    logger.error(f"[{dataset_name}] No MultiIndex present for 'cpd_id' recovery.")
+        else:
+            if logger:
+                logger.error(f"[{dataset_name}] 'cpd_id' not found in columns or index.")
 
-    # Assign 'cpd_type' using dataset name if missing
-    if 'cpd_type' not in df.columns:
-        df['cpd_type'] = dataset_name
+    # Infer cpd_type if missing
+    if "cpd_type" not in df.columns:
+        df["cpd_type"] = dataset_name or "unknown"
         if logger:
             logger.warning(f"[{dataset_name}] 'cpd_type' missing, inferred as '{dataset_name}'.")
 
-    # Attempt recovery from MultiIndex if cpd_id is missing
-    if 'cpd_id' not in df.columns:
-        if isinstance(df.index, pd.MultiIndex):
-            # Check if 'cpd_id' is a MultiIndex level
-            if 'cpd_id' in df.index.names:
-                df = df.reset_index('cpd_id')
-                if logger:
-                    logger.info(f"[{dataset_name}] Recovered 'cpd_id' from MultiIndex.")
-            elif df.index.nlevels == 2:
-                # Assume second level is cpd_id by convention
-                df = df.reset_index(level=1).rename(columns={'level_1': 'cpd_id', 'Sample': 'cpd_id'})
-                if logger:
-                    logger.warning(f"[{dataset_name}] Assumed second MultiIndex level as 'cpd_id' by convention.")
-            else:
-                if logger:
-                    logger.error(f"[{dataset_name}] Cannot recover 'cpd_id' from MultiIndex due to unexpected structure.")
-        else:
-            if logger:
-                logger.error(f"[{dataset_name}] No MultiIndex present for 'cpd_id' recovery.")
-
-    # Final verification step for mandatory columns
-    missing_cols = [col for col in mandatory_cols if col not in df.columns]
-    if missing_cols:
-        msg = f"[{dataset_name}] Mandatory column(s) {missing_cols} missing after standardisation."
+    # Final mandatory check
+    missing = [col for col in ["cpd_id"] if col not in df.columns]
+    if missing:
+        msg = f"[{dataset_name}] Mandatory column(s) {missing} missing after standardisation."
         if logger:
             logger.error(msg)
         raise ValueError(msg)
-
-    if logger:
-        logger.debug(f"[{dataset_name}] Final columns after standardisation: {df.columns.tolist()}")
 
     return df
 
