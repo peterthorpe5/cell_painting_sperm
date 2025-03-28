@@ -497,7 +497,8 @@ def main(args):
                 dataset_key_mapping[new_key] = name
             
             # Extend model.encoders with identity mappings for query datasets
-            reference_encoder_key = list(dataset_key_mapping.keys())[0]
+            reference_encoder_key = next(k for k, v in dataset_key_mapping.items() if v in reference_names)
+
             extend_model_encoders(model, new_keys, reference_encoder_key, logger)
 
             logger.debug(f"Number of unique cpd_id in query: {latent_query_df['cpd_id'].nunique()}")
@@ -525,8 +526,6 @@ def main(args):
             projected_frames = []
             query_cpd_ids = {}
             # Rebuild latent_query_df and update query_cpd_ids
-            projected_frames = []
-            query_cpd_ids = {}
             for i, latent in projected_dict.items():
                 name = dataset_key_mapping[i]
                 df_proj = pd.DataFrame(latent)
