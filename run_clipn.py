@@ -451,11 +451,14 @@ def main(args):
             query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
 
 
-            # Invert mapping from the current model (contains only reference datasets)
-            dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
+            # Extend dataset_key_mapping to include query datasets
+            max_existing_key = max(dataset_key_mapping.keys(), default=-1)
+            new_keys = range(max_existing_key + 1, max_existing_key + 1 + len(query_names))
 
-            # Use inverse mapping to look up keys used by the model for projection
-            # Do NOT assign new keys
+            for new_key, name in zip(new_keys, query_names):
+                dataset_key_mapping[new_key] = name
+
+            # Invert after adding new keys
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
 
             query_groups = query_df.groupby(level="Dataset")
