@@ -255,10 +255,16 @@ def standardise_numeric_columns_preserving_metadata(df: pd.DataFrame, meta_colum
 
 
 def decode_labels(df, encoders, logger):
-    """Decode categorical columns to original labels."""
+    """
+    Decode categorical columns to original labels.
+    Skips decoding if unseen labels are present.
+    """
     for col, le in encoders.items():
-        df[col] = le.inverse_transform(df[col])
-        logger.debug(f"Decoded column {col}")
+        try:
+            df[col] = le.inverse_transform(df[col])
+            logger.debug(f"Decoded column {col}")
+        except ValueError as e:
+            logger.warning(f"Skipping decoding for column {col} due to unseen labels: {e}")
     return df
 
 
