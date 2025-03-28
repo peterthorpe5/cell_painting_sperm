@@ -458,6 +458,9 @@ def main(args):
             # Rebuild latent_query_df and update query_cpd_ids
             projected_frames = []
             query_cpd_ids = {}
+            # Rebuild latent_query_df and update query_cpd_ids
+            projected_frames = []
+            query_cpd_ids = {}
             for i, latent in projected_dict.items():
                 name = dataset_key_mapping[i]
                 df_proj = pd.DataFrame(latent)
@@ -468,12 +471,13 @@ def main(args):
 
             latent_query_df = pd.concat(projected_frames)
 
-            # Add cpd_id to the query projections
+            # Now safe to reset index and assign cpd_id
             latent_query_df = latent_query_df.reset_index()
             latent_query_df["cpd_id"] = latent_query_df.apply(
                 lambda row: query_cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
                 axis=1
             )
+
 
             # Save file
             query_output_path = Path(args.out) / "query_only" / f"{args.experiment}_query_only_latent.csv"
