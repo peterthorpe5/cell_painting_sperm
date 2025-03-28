@@ -254,17 +254,6 @@ def standardise_numeric_columns_preserving_metadata(df: pd.DataFrame, meta_colum
 
 
 
-def encode_labels(df, logger):
-    """Encode categorical columns and return encoders for decoding later."""
-    encoders = {}
-    for col in df.select_dtypes(include=['object', 'category']).columns:
-        le = LabelEncoder()
-        df[col] = le.fit_transform(df[col])
-        encoders[col] = le
-        logger.debug(f"Encoded column {col}")
-    return df, encoders
-
-
 def decode_labels(df, encoders, logger):
     """Decode categorical columns to original labels."""
     for col, le in encoders.items():
@@ -273,9 +262,38 @@ def decode_labels(df, encoders, logger):
     return df
 
 
-def safe_get_cpd_id(row, cpd_ids):
-    cpd_list = cpd_ids.get(row["Dataset"], [])
-    return cpd_list[row["Sample"]] if row["Sample"] < len(cpd_list) else None
+def encode_labels(df, logger):
+    """
+    Encode categorical columns (excluding 'cpd_id') using LabelEncoder.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to encode.
+    logger : logging.Logger
+        Logger for debug information.
+
+    Returns
+    -------
+    df : pd.DataFrame
+        Encoded DataFrame.
+    encoders : dict
+        Mapping of column names to LabelEncoders.
+    """
+    encoders = {}
+    skip_columns = {"cpd_id"}  # Do not encode cpd_id
+    for col in df.select_dtypes(include=['object', 'category']).columns:
+        if col in skip_columns:
+            logger.debug(f"Skipping encoding for {col}")
+            continue
+        le = LabelEncoder()
+        df[col] = le.fit_transform(df[col])
+        encoders[col] = le
+        logger.debug(f"Encoded column {col}")
+    return df, encoders
+
+
+
 
 def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode, latent_dim, lr, epochs):
     """
