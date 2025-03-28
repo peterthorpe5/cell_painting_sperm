@@ -415,14 +415,23 @@ def main(args):
 
         training_metadata_df = metadata_df[metadata_df['Dataset'].isin(reference_names)]
 
-        latent_training_df = pd.merge(latent_training_df, training_metadata_df, on=["Dataset", "Sample"], how="left")
+        # Add cpd_id from cpd_ids dict explicitly
+        latent_training_df["cpd_id"] = latent_training_df.apply(
+            lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
+            axis=1
+            )
+
+        latent_query_df = latent_query_df.reset_index()
+        latent_query_df["cpd_id"] = latent_query_df.apply(
+            lambda row: query_cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
+            axis=1
+            )
 
         
         training_output_path = Path(args.out) / "training"
         training_output_path.mkdir(parents=True, exist_ok=True)
 
         latent_training_df.to_csv(training_output_path / "training_only_latent.csv", index=False)
-
 
         if not query_df.empty:
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
@@ -431,35 +440,53 @@ def main(args):
             # Prepare query data
             query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
 
-            # Create mapping: dataset_name → integer key
-            dataset_name_to_key = {v: k for k, v in dataset_key_mapping.items()}
+            # Invert the mapping so we can go from dataset name → int key
+            dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
 
-            # Convert dataset names in query_data_dict to numeric keys
-            query_data_dict_corrected = query_data_dict
+            # Create a query dict with integer keys matching the model's encoder
+            query_groups = query_df.groupby(level="Dataset")
+            query_data_dict_corrected = {
+                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"])
+                for name, group in query_groups
+                if name in dataset_key_mapping_inv
+            }
+
             # Predict using model
-            latent_query_df, query_cpd_ids = project_query_to_latent(model, query_df)
-
-            # projected_dict = model.predict(query_data_dict_corrected)
+            projected_dict = model.predict(query_data_dict_corrected)
             logger.debug(f"Projected {len(projected_dict)} datasets into latent space.")
 
-            # Re-map keys back to dataset names and build DataFrame
+            # Rebuild latent_query_df and update query_cpd_ids
             projected_frames = []
+            query_cpd_ids = {}
             for i, latent in projected_dict.items():
                 name = dataset_key_mapping[i]
                 df_proj = pd.DataFrame(latent)
                 df_proj.index = pd.MultiIndex.from_product([[name], range(len(df_proj))], names=["Dataset", "Sample"])
                 projected_frames.append(df_proj)
 
-            latent_query_df = pd.concat(projected_frames)
-            latent_df = pd.concat([latent_df, latent_query_df])
-            cpd_ids.update(query_cpd_ids)
+                query_cpd_ids[name] = query_df.loc[name]["cpd_id"].tolist()
 
-            # Save query-only projections
+            latent_query_df = pd.concat(projected_frames)
+
+            # Add cpd_id to the query projections
+            latent_query_df = latent_query_df.reset_index()
+            latent_query_df["cpd_id"] = latent_query_df.apply(
+                lambda row: query_cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
+                axis=1
+            )
+
+            # Save file
             query_output_path = Path(args.out) / "query_only" / f"{args.experiment}_query_only_latent.csv"
             query_output_path.parent.mkdir(parents=True, exist_ok=True)
-            latent_query_df.to_csv(query_output_path)
+            latent_query_df.to_csv(query_output_path, index=False)
             logger.info(f"Query-only latent data saved to {query_output_path}")
             logger.info(f"Total query samples projected: {latent_query_df.shape[0]}")
+
+            # Add to final merged latent
+            latent_df = pd.concat([latent_df, latent_query_df.set_index(["Dataset", "Sample"])])
+            cpd_ids.update(query_cpd_ids)
+
+
 
 
     else:
