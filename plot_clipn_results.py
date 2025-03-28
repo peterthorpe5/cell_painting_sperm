@@ -29,6 +29,8 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+from sklearn import set_config
+set_config(transform_output="pandas")
 from cell_painting.plot import (
     plot_distance_heatmap,
     plot_dendrogram,
@@ -74,7 +76,7 @@ def main(args):
     logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
 
     logger.info(f"Reading latent TSV: {args.latent_csv}")
-    df = pd.read_csv(args.latent_csv, sep="\t", index_col=["cpd_id", "Library", "cpd_type"])
+    df = pd.read_csv(args.latent_csv, sep="\t")
     df = clean_and_reorder_latent_df(df)
 
     # Generate UMAP
@@ -107,7 +109,7 @@ def main(args):
     if "Cluster" in umap_df.columns:
         logger.info("Generating UMAP cluster summary")
         umap_summary_csv = os.path.join(args.plots, "umap_cluster_summary.tsv")
-        umap_df.reset_index().groupby("Cluster").agg({
+        umap_df.groupby("Cluster").agg({
             "cpd_type": lambda x: sorted(set(x)),
             "cpd_id": lambda x: sorted(set(x))
         }).to_csv(umap_summary_csv, sep="\t")
