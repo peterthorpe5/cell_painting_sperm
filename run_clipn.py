@@ -394,7 +394,7 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
-    latent_file = post_clipn_dir / "f"{experiment}_{mode}_CLIPn_latent_representations.npz"
+    latent_file = post_clipn_dir / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
     np.savez(latent_file, **latent_dict_str_keys)
 
 
