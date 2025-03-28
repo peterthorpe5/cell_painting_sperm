@@ -435,10 +435,7 @@ def main(args):
             dataset_name_to_key = {v: k for k, v in dataset_key_mapping.items()}
 
             # Convert dataset names in query_data_dict to numeric keys
-            query_data_dict_corrected = {
-                dataset_name_to_key[name]: data for name, data in query_data_dict.items()
-            }
-
+            query_data_dict_corrected = query_data_dict
             # Predict using model
             projected_dict = model.predict(query_data_dict_corrected)
             logger.debug(f"Projected {len(projected_dict)} datasets into latent space.")
