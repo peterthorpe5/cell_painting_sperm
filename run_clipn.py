@@ -315,8 +315,8 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
 
     data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
 
-    model = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
-
+    latent_dict, model, loss = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
+    logger.info(f"cplin loss = {loss}")
     latent_dict = model.predict(data_dict)
 
     latent_frames = []
