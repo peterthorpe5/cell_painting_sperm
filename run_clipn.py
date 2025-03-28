@@ -316,8 +316,11 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
     data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
 
     latent_dict, model, loss = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
-    logger.info(f"cplin loss = {loss}")
-    latent_dict = model.predict(data_dict)
+    if isinstance(loss, (list, np.ndarray)):
+        logger.info(f"CLIPn final loss: {loss[-1]:.6f}")
+    else:
+        logger.info(f"CLIPn loss: {loss}")
+
 
     latent_frames = []
     for i, latent in latent_dict.items():
@@ -410,7 +413,14 @@ def main(args):
                                                    args.mode,
                                                    args.latent_dim, 
                                                    args.lr, args.epoch)
-  
+        
+    metadata_df = decode_labels(combined_df.copy(), encoders, logger)[["cpd_id", "cpd_type", "Library"]]
+    metadata_df = metadata_df.reset_index()
+
+    latent_df = latent_df.reset_index()
+    latent_df = pd.merge(latent_df, metadata_df, on=["Dataset", "Sample"], how="left")
+
+    
     decoded_df = decode_labels(latent_df.copy(), encoders, logger)
     decoded_path = Path(args.out) / f"{args.experiment}_decoded.csv"
     decoded_df.to_csv(decoded_path)
