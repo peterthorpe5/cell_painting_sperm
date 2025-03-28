@@ -366,7 +366,7 @@ def main(args):
     if args.mode == "reference_only":
         # Define exactly which dataset to train on
         reference_names = args.reference_names
-        logger.info(f"Using {args.reference_name} as the training dataset, then project others onto this")
+        logger.info(f"Using {args.reference_names} as the training dataset, then project others onto this")
 
 
 
