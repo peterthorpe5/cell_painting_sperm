@@ -407,8 +407,14 @@ def main(args):
     """Main function to execute CLIPn integration pipeline."""
     logger = setup_logging(args.out, args.experiment)
 
+
+
+    mapping_dir = Path(args.out) / "post_clipn"
+    mapping_dir.mkdir(parents=True, exist_ok=True)
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
+
+
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
 
