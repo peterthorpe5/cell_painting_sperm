@@ -43,7 +43,7 @@ def main(args):
     logger.info(f"Using Logfile: {log_filename}")
     logger.info(f"Logging initialized at {time.asctime()}")
 
-    combined_latent_df = load_latent_data(os.path.join(args.input, "CLIPn_latent_representations_with_cpd_id.csv"))
+    combined_latent_df = load_latent_data(args.latent_csv)
 
     # UMAP Visualisation
     umap_file = os.path.join(args.plots, "clipn_UMAP.pdf")
@@ -81,8 +81,9 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualise CLIPn outputs.")
-    parser.add_argument("--input", required=True, help="Folder with CLIPn outputs.")
+    parser.add_argument("--latent_csv", required=True, help="CLIPn latent space with compound IDs (CSV).")
     parser.add_argument("--plots", required=True, help="Output folder for plots.")
+
 
     args = parser.parse_args()
     main(args)
