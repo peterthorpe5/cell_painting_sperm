@@ -207,10 +207,6 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
             logger.error(f"Loading dataset '{name}' failed: {e}")
             raise
 
-    if mode == "reference_only":
-        dataframes = {k: v for k, v in dataframes.items() if "reference" in k.lower()}
-        logger.info("Running in 'reference_only' mode, filtered datasets accordingly.")
-
     return harmonise_numeric_columns(dataframes, logger)
 
 
@@ -385,7 +381,8 @@ def main(args):
 
 
         logger.info(f"Training CLIPn on references: {reference_names}")
-        latent_df, cpd_ids, model, dataset_key_mapping = run_clipn_integration(reference_df, logger, 
+        latent_df, cpd_ids, model, \
+                        dataset_key_mapping = run_clipn_integration(reference_df, logger, 
                                                                     args.clipn_param, 
                                                                     args.out,
                                                                     args.experiment,
@@ -403,19 +400,18 @@ def main(args):
             projected_frames = []
             for i, latent in projected_dict.items():
                 name = query_key_map[i]
-                logger.info(f"Projected dataset '{name}' with shape {latent.shape}")
                 df_proj = pd.DataFrame(latent)
                 df_proj.index = pd.MultiIndex.from_product([[name], range(len(df_proj))], names=["Dataset", "Sample"])
                 projected_frames.append(df_proj)
 
-            # Save query-only projections separately
-            query_only_path = Path(args.out) / f"{args.experiment}_query_only_latent.csv"
-            latent_query_df.to_csv(query_only_path)
-            logger.info(f"Query-only latent representations saved to: {query_only_path}")
-
-            # Append to full latent dataframe
+            latent_query_df = pd.concat(projected_frames)
             latent_df = pd.concat([latent_df, latent_query_df])
             cpd_ids.update(query_cpd_ids)
+            # Save query-only projections
+            query_output_path = Path(args.out) / f"{args.experiment}_query_only_latent.csv"
+            latent_query_df.to_csv(query_output_path)
+            logger.info(f"Query-only latent data saved to {query_output_path}")
+
 
     else:
         # run on all data, not projected onto the reference ...
