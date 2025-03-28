@@ -398,6 +398,9 @@ def main(args):
                                                                     args.mode,
                                                                     args.latent_dim, 
                                                                     args.lr, args.epoch)
+        latent_training_df = latent_df[latent_df['Dataset'].isin(reference_names)]
+        latent_training_df.to_csv(Path(args.out) / "training_only_latent.csv", index=False)
+
 
         if not query_df.empty:
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
