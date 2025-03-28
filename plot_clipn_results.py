@@ -19,6 +19,7 @@ Outputs:
 import argparse
 import logging
 import os
+import sys
 import numpy as np
 import pandas as pd
 from cell_painting.plot import (

@@ -391,6 +391,13 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
     # Combine and save
     np.savez(latent_file_id, **latent_dict_str_keys, **cpd_ids_array)
 
+    post_clipn_dir = Path(args.out) / "post_clipn"
+    post_clipn_dir.mkdir(parents=True, exist_ok=True)
+
+    latent_file = post_clipn_dir / "f"{experiment}_{mode}_CLIPn_latent_representations.npz"
+    np.savez(latent_file, **latent_dict_str_keys)
+
+
 
     return latent_combined, cpd_ids, model, dataset_key_mapping
 
@@ -399,6 +406,9 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
 def main(args):
     """Main function to execute CLIPn integration pipeline."""
     logger = setup_logging(args.out, args.experiment)
+
+    post_clipn_dir = Path(args.out) / "post_clipn"
+    post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
 
@@ -614,6 +624,24 @@ def main(args):
         renamed_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
 
         decoded_with_index.to_csv(renamed_path, index=False)
+
+        cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
+        decoded_with_index.to_csv(cpd_csv_file, index=False)
+        # Generate combined label mapping from decoded data
+        try:
+            label_mapping_combined = decoded_with_index.copy()
+            label_mapping_combined = label_mapping_combined[["Dataset", "Sample", "cpd_type"]]
+            label_mapping_wide = (
+                label_mapping_combined
+                .pivot(index="Sample", columns="Dataset", values="cpd_type")
+                .T
+            )
+            label_mapping_wide.to_csv(post_clipn_dir / "label_mappings.csv")
+            logger.info("Saved label mappings to post_clipn/label_mappings.csv")
+        except Exception as e:
+            logger.warning(f"Failed to generate label mapping CSV: {e}")
+
+
     except Exception as e:
         logger.warning(f"Failed to save renamed latent file: {e}")
     logger.info(f"Columns at this stage, encoded: {combined_df.columns.tolist()}")
