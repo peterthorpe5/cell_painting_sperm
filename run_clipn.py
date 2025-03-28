@@ -455,6 +455,9 @@ def main(args):
         latent_training_df = latent_df.reset_index()
         latent_training_df = latent_training_df[latent_training_df['Dataset'].isin(reference_names)]
 
+        logger.debug(f"Model encoders keys after training: {list(model.encoders.keys())}")
+
+
         training_metadata_df = metadata_df[metadata_df['Dataset'].isin(reference_names)]
 
         # Add cpd_id from cpd_ids dict explicitly
@@ -497,11 +500,19 @@ def main(args):
                 dataset_key_mapping[new_key] = name
             
             # Extend model.encoders with identity mappings for query datasets
-            reference_encoder_key = next(k for k, v in dataset_key_mapping.items() if v in reference_names)
+            try:
+                reference_encoder_key = next(
+                    k for k, v in dataset_key_mapping.items()
+                    if v in reference_names and k in model.encoders
+                )
+            except StopIteration:
+                logger.error("No valid reference_encoder_key found. None of the reference datasets matched trained encoders.")
+                raise
+
 
             extend_model_encoders(model, new_keys, reference_encoder_key, logger)
 
-            logger.debug(f"Number of unique cpd_id in query: {latent_query_df['cpd_id'].nunique()}")
+
 
             # Invert after adding new keys
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
@@ -544,6 +555,7 @@ def main(args):
                 axis=1
             )
 
+            logger.debug(f"Number of unique cpd_id in query: {latent_query_df['cpd_id'].nunique()}")
 
             # Save file
             query_output_path = Path(args.out) / "query_only" / f"{args.experiment}_query_only_latent.csv"
