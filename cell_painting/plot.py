@@ -194,6 +194,9 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
 
     # Perform UMAP dimensionality reduction
     umap_model = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.1, n_components=2, random_state=42)
+    numeric_df = combined_latent_df.select_dtypes(include=[np.number])
+    latent_umap = umap_model.fit_transform(numeric_df)
+
 
     latent_umap = umap_model.fit_transform(combined_latent_df.drop(columns=["dataset"], errors="ignore"))
 

@@ -28,6 +28,7 @@ import logging
 import os
 import sys
 import numpy as np
+from sklearn import set_config
 import pandas as pd
 from cell_painting.plot import (
     plot_distance_heatmap,
@@ -38,6 +39,8 @@ from cell_painting.process_data import (
     generate_similarity_summary,
     compute_pairwise_distances
 )
+
+set_config(transform_output="pandas")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
