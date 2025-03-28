@@ -334,6 +334,17 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
 
     logger.info(f"Latent representations saved to: {latent_file}")
 
+    latent_file_id = Path(output_path) / f"{experiment}_{mode}_CLIPn_latent_representations_cpd_id.npz"
+    # Convert latent space and cpd_ids into savable format
+    latent_dict_str_keys = {str(k): v for k, v in latent_dict.items()}
+
+    # Also store cpd_ids dictionary as arrays
+    cpd_ids_array = {f"cpd_ids_{k}": np.array(v) for k, v in cpd_ids.items()}
+
+    # Combine and save
+    np.savez(latent_file_id, **latent_dict_str_keys, **cpd_ids_array)
+
+
     return latent_combined, cpd_ids, model, dataset_key_mapping
 
 
@@ -412,18 +423,30 @@ def main(args):
 
         latent_training_df.to_csv(training_output_path / "training_only_latent.csv", index=False)
 
+
         if not query_df.empty:
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
             logger.debug(f"Query DataFrame shape: {query_df.shape}")
-            query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
-            latent_query_df, query_cpd_ids = project_query_to_latent(model, query_df)
 
-            # projected_dict = model.predict(query_data_dict)
+            # Prepare query data
+            query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
+
+            # Create mapping: dataset_name → integer key
+            dataset_name_to_key = {v: k for k, v in dataset_key_mapping.items()}
+
+            # Convert dataset names in query_data_dict to numeric keys
+            query_data_dict_corrected = {
+                dataset_name_to_key[name]: data for name, data in query_data_dict.items()
+            }
+
+            # Predict using model
+            projected_dict = model.predict(query_data_dict_corrected)
             logger.debug(f"Projected {len(projected_dict)} datasets into latent space.")
 
+            # Re-map keys back to dataset names and build DataFrame
             projected_frames = []
             for i, latent in projected_dict.items():
-                name = query_key_map[i]
+                name = dataset_key_mapping[i]
                 df_proj = pd.DataFrame(latent)
                 df_proj.index = pd.MultiIndex.from_product([[name], range(len(df_proj))], names=["Dataset", "Sample"])
                 projected_frames.append(df_proj)
@@ -431,13 +454,13 @@ def main(args):
             latent_query_df = pd.concat(projected_frames)
             latent_df = pd.concat([latent_df, latent_query_df])
             cpd_ids.update(query_cpd_ids)
+
             # Save query-only projections
-            query_output_path = Path(args.out) /  "query_only" / f"{args.experiment}_query_only_latent.csv"
+            query_output_path = Path(args.out) / "query_only" / f"{args.experiment}_query_only_latent.csv"
             query_output_path.parent.mkdir(parents=True, exist_ok=True)
             latent_query_df.to_csv(query_output_path)
             logger.info(f"Query-only latent data saved to {query_output_path}")
             logger.info(f"Total query samples projected: {latent_query_df.shape[0]}")
-
 
 
     else:
