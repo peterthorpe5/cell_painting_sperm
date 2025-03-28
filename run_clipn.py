@@ -367,11 +367,16 @@ def main(args):
         # Define exactly which dataset to train on
         reference_names = ['reference1']
 
+        if not set(reference_names).issubset(dataframes):
+            raise ValueError(f"Reference dataset(s) {reference_names} not found in input datasets.")
+
+
         # All others will be treated as projection targets
         query_names = [name for name in dataframes if name not in reference_names]
 
-        logger.info(f"CLIPn training on: {reference_names}")
-        logger.info(f"CLIPn projecting onto reference latent space: {query_names}")
+
+        logger.info(f"CLIPn training on: {reference_names} ({len(reference_names)} datasets)")
+        logger.info(f"CLIPn projecting onto reference latent space: {query_names} ({len(query_names)} datasets)")
         logger.debug(f"All dataset names: {list(dataframes.keys())}")
 
 
@@ -408,7 +413,8 @@ def main(args):
             latent_df = pd.concat([latent_df, latent_query_df])
             cpd_ids.update(query_cpd_ids)
             # Save query-only projections
-            query_output_path = Path(args.out) / f"{args.experiment}_query_only_latent.csv"
+            query_output_path = Path(args.out) /  "query_only" / f"{args.experiment}_query_only_latent.csv"
+            query_output_path.parent.mkdir(parents=True, exist_ok=True)
             latent_query_df.to_csv(query_output_path)
             logger.info(f"Query-only latent data saved to {query_output_path}")
 
