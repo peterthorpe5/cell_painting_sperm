@@ -28,8 +28,9 @@ from cell_painting.plot import (
     plot_umap_coloured_by_experiment,
     load_latent_data
 )
-from process_data import (
-    generate_similarity_summary, compute_pairwise_distances
+from cell_painting.process_data import (
+    generate_similarity_summary, 
+    compute_pairwise_distances
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
