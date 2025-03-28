@@ -366,7 +366,9 @@ def main(args):
     if args.mode == "reference_only":
         # Define exactly which dataset to train on
         reference_names = [args.reference_name]
-        logger.info(f"Using {args.reference_name} as the trianing dataset, then project others onto this")
+        logger.info(f"Using {args.reference_name} as the training dataset, then project others onto this")
+
+
 
 
         if not set(reference_names).issubset(dataframes):
