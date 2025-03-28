@@ -309,9 +309,8 @@ def extend_model_encoders(model, new_keys, reference_key, logger):
         Logger instance for debug messages.
     """
     for new_key in new_keys:
-        model.encoders[new_key] = model.encoders[reference_key]
+        model.model.encoders[new_key] = model.model.encoders[reference_key]
         logger.debug(f"Assigned encoder for dataset key {new_key} using reference encoder {reference_key}")
-
 
 
 
@@ -455,7 +454,9 @@ def main(args):
         latent_training_df = latent_df.reset_index()
         latent_training_df = latent_training_df[latent_training_df['Dataset'].isin(reference_names)]
 
-        logger.debug(f"Model encoders keys after training: {list(model.encoders.keys())}")
+        # nice coding guys!
+        logger.debug(f"Model encoders keys after training: {list(model.model.encoders.keys())}")
+
 
 
         training_metadata_df = metadata_df[metadata_df['Dataset'].isin(reference_names)]
@@ -503,7 +504,7 @@ def main(args):
             try:
                 reference_encoder_key = next(
                     k for k, v in dataset_key_mapping.items()
-                    if v in reference_names and k in model.encoders
+                    if v in reference_names and k in model.model.encoders
                 )
             except StopIteration:
                 logger.error("No valid reference_encoder_key found. None of the reference datasets matched trained encoders.")
