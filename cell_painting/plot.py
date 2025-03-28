@@ -193,15 +193,17 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
     logger.info(f"Generating UMAP visualization with n_neighbors={n_neighbors} and {num_clusters} clusters.")
 
     # Perform UMAP dimensionality reduction
-    umap_model = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.1, n_components=2, random_state=42)
+    # Drop non-numeric columns (like 'Dataset', 'Sample', 'cpd_id', etc.)
     numeric_df = combined_latent_df.select_dtypes(include=[np.number])
+
+    if numeric_df.empty:
+        raise ValueError("No numeric columns found for UMAP projection.")
+
+    umap_model = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.1, n_components=2, random_state=42)
     latent_umap = umap_model.fit_transform(numeric_df)
 
 
-
-
     latent_umap = umap_model.fit_transform(combined_latent_df.drop(columns=["dataset"], errors="ignore"))
-
 
     # Create DataFrame with MultiIndex
     umap_df = pd.DataFrame(latent_umap, columns=["UMAP1", "UMAP2"], index=combined_latent_df.index)
