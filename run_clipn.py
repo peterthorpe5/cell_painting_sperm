@@ -366,9 +366,7 @@ def main(args):
     if args.mode == "reference_only":
         # Define exactly which dataset to train on
         reference_names = args.reference_names
-        logger.info(f"Using {args.reference_names} as the training dataset, then project others onto this")
-
-
+        logger.info(f"Using reference datasets {reference_names} for training, projecting others onto shared latent space.")
 
 
         if not set(reference_names).issubset(dataframes):
@@ -400,6 +398,12 @@ def main(args):
                                                                     args.lr, args.epoch)
         latent_training_df = latent_df.reset_index()
         latent_training_df = latent_training_df[latent_training_df['Dataset'].isin(reference_names)]
+
+        training_metadata_df = metadata_df[metadata_df['Dataset'].isin(reference_names)]
+
+        latent_training_df = pd.merge(latent_training_df, training_metadata_df, on=["Dataset", "Sample"], how="left")
+
+        
         training_output_path = Path(args.out) / "training"
         training_output_path.mkdir(parents=True, exist_ok=True)
 
@@ -409,7 +413,9 @@ def main(args):
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
             logger.debug(f"Query DataFrame shape: {query_df.shape}")
             query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
-            projected_dict = model.predict(query_data_dict)
+            latent_query_df, query_cpd_ids = project_query_to_latent(model, query_df)
+
+            # projected_dict = model.predict(query_data_dict)
             logger.debug(f"Projected {len(projected_dict)} datasets into latent space.")
 
             projected_frames = []
