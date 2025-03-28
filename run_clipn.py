@@ -278,49 +278,65 @@ def decode_labels(df, encoders, logger):
 
 
 def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, epochs):
-    """Run the actual CLIPn integration logic."""
-    logger.info(f"Running CLIPn integration with param: {clipn_param}")
-    meta_cols = ["cpd_id", "cpd_type", "Library"]  # or any others
-    # Ensure all meta_columns exist before scaling
-    missing_meta = [col for col in meta_cols if col not in df.columns]
-    if missing_meta:
-        raise ValueError(f"Missing metadata columns in input DataFrame before scaling: {missing_meta}")
+    """
+    Train CLIPn model on input data and return latent space.
 
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Combined input dataframe (MultiIndex: Dataset, Sample).
+    logger : logging.Logger
+        Logging instance.
+    clipn_param : str
+        Optional parameter for tuning.
+    output_path : str or Path
+        Directory to save latent data.
+    latent_dim : int
+        Dimensionality of latent space.
+    lr : float
+        Learning rate.
+    epochs : int
+        Training epochs.
+
+    Returns
+    -------
+    latent_df : pd.DataFrame
+        Combined latent DataFrame with MultiIndex.
+    cpd_ids : dict
+        Dictionary of compound IDs by original dataset name.
+    model : CLIPn
+        Trained CLIPn model instance.
+    dataset_key_mapping : dict
+        Mapping of integer dataset index to original dataset name.
+    """
+    logger.info(f"Running CLIPn integration with param: {clipn_param}")
+    meta_cols = ["cpd_id", "cpd_type", "Library"]
     df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
 
+    data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
 
-    data_dict, label_dict, label_mappings, cpd_ids = prepare_data_for_clipn_from_df(df_scaled)
+    model = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
 
-    latent_dict = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
+    latent_dict = model.predict(data_dict)
 
     latent_frames = []
-    for name, array in latent_dict.items():
-        df = pd.DataFrame(array)
-        df.index = pd.MultiIndex.from_product([[name], range(len(df))], names=["Dataset", "Sample"])
-        latent_frames.append(df)
+    for i, latent in latent_dict.items():
+        name = dataset_key_mapping[i]
+        df_latent = pd.DataFrame(latent)
+        df_latent.index = pd.MultiIndex.from_product([[name], range(len(df_latent))], names=["Dataset", "Sample"])
+        latent_frames.append(df_latent)
 
     latent_combined = pd.concat(latent_frames)
 
+    latent_file = Path(output_path) / f"{args.experiment}_{args.mode}_CLIPn_latent_representations.npz"
+    # Save using string keys to comply with np.savez requirements
+    latent_dict_str_keys = {str(k): v for k, v in latent_dict.items()}
+    np.savez(latent_file, **latent_dict_str_keys)
 
-    latent_file = Path(output_path) / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
-    np.savez(latent_file, **{str(k): v for k, v in latent_dict.items()})
     logger.info(f"Latent representations saved to: {latent_file}")
 
+    return latent_combined, cpd_ids, model, dataset_key_mapping
 
-
-    for dataset, latent in latent_dict.items():
-        per_dataset_path = Path(output_path) / f"{dataset}_latent.csv"
-        latent_df = pd.DataFrame(latent)
-
-        # Add cpd_id back, if available
-        if dataset in cpd_ids:
-            latent_df[id_col] = cpd_ids[dataset]
-
-        latent_df.to_csv(per_dataset_path, index=False)
-        logger.info(f"Saved latent CSV for {dataset} to {per_dataset_path}")
-
-
-    return latent_combined, cpd_ids
 
 
 def main(args):
@@ -356,27 +372,25 @@ def main(args):
         query_df = combined_df.loc[query_names]
 
         logger.info(f"Training CLIPn on references: {reference_names}")
-        latent_df, cpd_ids, model = run_clipn_integration(reference_df, logger, args.clipn_param, args.out, 
-                                                        args.latent_dim, args.lr, args.epoch)
+        latent_df, cpd_ids, model, key_map = run_clipn_integration(reference_df, logger, args.clipn_param, args.out,
+                                                                args.latent_dim, args.lr, args.epoch)
 
-        # Project query samples
         if not query_df.empty:
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
-            query_data_dict, _, _, query_cpd_ids = prepare_data_for_clipn_from_df(query_df)
+            query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
             projected_dict = model.predict(query_data_dict)
 
-            # Convert projections to DataFrame with MultiIndex
             projected_frames = []
-            for name, array in projected_dict.items():
-                df_proj = pd.DataFrame(array)
+            for i, latent in projected_dict.items():
+                name = query_key_map[i]
+                df_proj = pd.DataFrame(latent)
                 df_proj.index = pd.MultiIndex.from_product([[name], range(len(df_proj))], names=["Dataset", "Sample"])
                 projected_frames.append(df_proj)
 
             latent_query_df = pd.concat(projected_frames)
-
-            # Merge with reference
             latent_df = pd.concat([latent_df, latent_query_df])
             cpd_ids.update(query_cpd_ids)
+
 
 
     else:

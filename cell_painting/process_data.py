@@ -751,7 +751,6 @@ def encode_cpd_data(dataframes, encode_labels=False):
         results[name] = output
     return results
 
-
 def prepare_data_for_clipn_from_df(df):
     """
     Prepares input data for CLIPn training from a MultiIndex DataFrame.
@@ -807,7 +806,12 @@ def prepare_data_for_clipn_from_df(df):
         label_mappings[dataset_name] = {v: k for k, v in label_map.items()}
         cpd_ids[dataset_name] = ids
 
-    return data_dict, label_dict, label_mappings, cpd_ids
+    # Reindex with integers for CLIPn compatibility
+    indexed_data_dict = {i: data_dict[k] for i, k in enumerate(data_dict)}
+    indexed_label_dict = {i: label_dict[k] for i, k in enumerate(label_dict)}
+    dataset_key_mapping = {i: k for i, k in enumerate(data_dict)}
+
+    return indexed_data_dict, indexed_label_dict, label_mappings, cpd_ids, dataset_key_mapping
 
 
 
@@ -903,19 +907,18 @@ def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experimen
     return X, y, label_mappings, dataset_mapping
 
 
-
 def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     """
-    Run CLIPn training and return the trained model and latent representations.
+    Runs CLIPn training given input features and labels.
 
     Parameters
     ----------
     data_dict : dict
-        Dictionary of dataset_name -> feature matrix (np.ndarray).
+        Mapping from dataset names to np.ndarray of features.
     label_dict : dict
-        Dictionary of dataset_name -> label vector (np.ndarray).
+        Mapping from dataset names to np.ndarray of label ids.
     latent_dim : int
-        Dimensionality of latent space.
+        Dimensionality of the latent space.
     lr : float
         Learning rate.
     epochs : int
@@ -923,19 +926,24 @@ def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
 
     Returns
     -------
-    model : CLIPn
-        Trained CLIPn model.
-    latent_dict : dict
-        Dictionary of dataset_name -> latent embedding (np.ndarray).
+    dict
+        Dictionary mapping dataset name to latent representations.
     """
-    from clipn import CLIPn
+    indexed_data_dict = {i: data_dict[k] for i, k in enumerate(data_dict)}
+    indexed_label_dict = {i: label_dict[k] for i, k in enumerate(label_dict)}
+    reverse_mapping = {i: k for i, k in enumerate(data_dict)}
 
-    print("Running CLIPn ...")
-    model = CLIPn(data_dict, label_dict, latent_dim=latent_dim)
-    model.fit(data_dict, label_dict, lr=lr, epochs=epochs)
-    latent_dict = model.predict(data_dict)
+    model = CLIPn(indexed_data_dict, indexed_label_dict, latent_dim=latent_dim)
+    model.fit(indexed_data_dict, indexed_label_dict, lr=lr, epochs=epochs)
 
-    return model, latent_dict
+    # Project training data back into latent space
+    latent_dict = model.predict(indexed_data_dict)
+    # Convert back to dataset-name keys
+    latent_named_dict = {reverse_mapping[i]: latent_dict[i] for i in latent_dict}
+
+    return latent_named_dict, model
+
+
 
 def project_query_to_latent(model, query_df):
     """
