@@ -72,7 +72,7 @@ def main(args):
     logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
 
     logger.info(f"Reading latent CSV: {args.latent_csv}")
-    df = pd.read_csv(args.latent_csv)
+    df = pd.read_csv(args.latent_csv, sep="\t")
     df = clean_and_reorder_latent_df(df)
 
 

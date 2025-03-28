@@ -631,8 +631,8 @@ def main(args):
 
         decoded_with_index.to_csv(renamed_path, index=False)
 
-        cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
-        decoded_with_index.to_csv(cpd_csv_file, index=False)
+        cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.tsv"
+        decoded_with_index.to_csv(cpd_csv_file, sep="\t", index=False)
         # Generate combined label mapping from decoded data
         try:
             label_mapping_combined = decoded_with_index.copy()
@@ -642,7 +642,7 @@ def main(args):
                 .pivot(index="Sample", columns="Dataset", values="cpd_type")
                 .T
             )
-            label_mapping_wide.to_csv(post_clipn_dir / "label_mappings.csv")
+            label_mapping_wide.to_csv(post_clipn_dir / "label_mappings.tsv", sep="\t")
             logger.info("Saved label mappings to post_clipn/label_mappings.csv")
         except Exception as e:
             logger.warning(f"Failed to generate label mapping CSV: {e}")
