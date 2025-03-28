@@ -365,7 +365,9 @@ def main(args):
 
     if args.mode == "reference_only":
         # Define exactly which dataset to train on
-        reference_names = ['reference1']
+        reference_names = [args.reference_name]
+        logger.info(f"Using {args.reference_name} as the trianing dataset, then project others onto this")
+
 
         if not set(reference_names).issubset(dataframes):
             raise ValueError(f"Reference dataset(s) {reference_names} not found in input datasets.")
@@ -417,6 +419,8 @@ def main(args):
             query_output_path.parent.mkdir(parents=True, exist_ok=True)
             latent_query_df.to_csv(query_output_path)
             logger.info(f"Query-only latent data saved to {query_output_path}")
+            logger.info(f"Total query samples projected: {latent_query_df.shape[0]}")
+
 
 
     else:
@@ -494,6 +498,9 @@ if __name__ == "__main__":
                         help="Learning rate for CLIPn (default: 1e-5)")
     parser.add_argument("--epoch", type=int, default=300,
                         help="Number of training epochs (default: 300)")
+    parser.add_argument("--reference_name", type=str, default="reference1",
+                    help="Dataset name to use as training reference (only in reference_only mode)")
+
 
     args = parser.parse_args()
     main(args)
