@@ -75,10 +75,13 @@ def main(args):
     df = pd.read_csv(args.latent_csv)
     df = clean_and_reorder_latent_df(df)
 
+
+
+
     # Generate UMAP
     logger.info("Generating UMAP visualisation")
     umap_file = os.path.join(args.plots, "clipn_UMAP.pdf")
-    umap_df = generate_umap(df, output_path=umap_file, args=args, add_labels=True)
+    umap_df = generate_umap(df, args.plots, umap_file, args=args, add_labels=True)
 
     # Pairwise distances
     logger.info("Computing pairwise distances")

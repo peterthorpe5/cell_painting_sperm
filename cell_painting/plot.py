@@ -155,9 +155,6 @@ def plot_distance_heatmap(dist_df, output_path):
     plt.close()
 
 
-
-
-
 def generate_umap(combined_latent_df, output_folder, umap_plot_file, args, 
                   n_neighbors=15, num_clusters=10, add_labels=False
 ):
