@@ -198,6 +198,8 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
     latent_umap = umap_model.fit_transform(numeric_df)
 
 
+
+
     latent_umap = umap_model.fit_transform(combined_latent_df.drop(columns=["dataset"], errors="ignore"))
 
 
