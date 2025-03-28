@@ -437,7 +437,9 @@ def main(args):
             # Convert dataset names in query_data_dict to numeric keys
             query_data_dict_corrected = query_data_dict
             # Predict using model
-            projected_dict = model.predict(query_data_dict_corrected)
+            latent_query_df, query_cpd_ids = project_query_to_latent(model, query_df)
+
+            # projected_dict = model.predict(query_data_dict_corrected)
             logger.debug(f"Projected {len(projected_dict)} datasets into latent space.")
 
             # Re-map keys back to dataset names and build DataFrame
