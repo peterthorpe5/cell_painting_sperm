@@ -433,10 +433,17 @@ def main(args):
             # Prepare query data
             query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
 
-            # Invert the mapping so we can go from dataset name → int key
+            # Invert the original mapping: dataset name → int
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
 
-            # Create a query dict with integer keys matching the model's encoder
+            # Extend mapping to include query datasets (required for model.predict())
+            query_start_key = max(dataset_key_mapping.keys()) + 1
+            for i, query_name in enumerate(query_names):
+                new_key = query_start_key + i
+                dataset_key_mapping[new_key] = query_name
+                dataset_key_mapping_inv[query_name] = new_key
+
+            # Group queries and construct input with correct keys
             query_groups = query_df.groupby(level="Dataset")
             query_data_dict_corrected = {
                 dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"])
@@ -446,9 +453,12 @@ def main(args):
 
             # Predict using model
             projected_dict = model.predict(query_data_dict_corrected)
-            logger.debug(f"Projected {len(projected_dict)} datasets into latent space.")
+            if not projected_dict:
+                logger.warning("model.predict() returned an empty dictionary. Check dataset keys and input formatting.")
+            else:
+                logger.debug(f"Projected {len(projected_dict)} datasets into latent space: {list(projected_dict.keys())}")
 
-            # Rebuild latent_query_df and update query_cpd_ids
+                        # Rebuild latent_query_df and update query_cpd_ids
             projected_frames = []
             query_cpd_ids = {}
             # Rebuild latent_query_df and update query_cpd_ids
