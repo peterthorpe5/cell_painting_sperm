@@ -416,10 +416,8 @@ def main(args):
         training_metadata_df = metadata_df[metadata_df['Dataset'].isin(reference_names)]
 
         # Add cpd_id from cpd_ids dict explicitly
-        latent_training_df["cpd_id"] = latent_training_df.apply(
-            lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
-            axis=1
-            )
+        latent_training_df = latent_training_df.merge(training_metadata_df, on=["Dataset", "Sample"], how="left")
+
        
         training_output_path = Path(args.out) / "training"
         training_output_path.mkdir(parents=True, exist_ok=True)
@@ -446,10 +444,12 @@ def main(args):
             # Group queries and construct input with correct keys
             query_groups = query_df.groupby(level="Dataset")
             query_data_dict_corrected = {
-                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"])
+                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"]).to_numpy()
                 for name, group in query_groups
                 if name in dataset_key_mapping_inv
             }
+
+
 
             # Predict using model
             projected_dict = model.predict(query_data_dict_corrected)
