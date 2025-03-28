@@ -475,6 +475,13 @@ def main(args):
 
             for new_key, name in zip(new_keys, query_names):
                 dataset_key_mapping[new_key] = name
+            
+            # Extend model.encoders with identity mappings for query datasets
+            # (assumes using the encoder from reference1 for all queries)
+            reference_encoder_key = list(dataset_key_mapping.keys())[0]
+            for new_key in new_keys:
+                model.encoders[new_key] = model.encoders[reference_encoder_key]
+
 
             # Invert after adding new keys
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
