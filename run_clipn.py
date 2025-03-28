@@ -277,7 +277,7 @@ def decode_labels(df, encoders, logger):
     return df
 
 
-def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, epochs):
+def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode, latent_dim, lr, epochs):
     """
     Train CLIPn model on input data and return latent space.
 
@@ -328,7 +328,7 @@ def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, 
 
     latent_combined = pd.concat(latent_frames)
 
-    latent_file = Path(output_path) / f"{args.experiment}_{args.mode}_CLIPn_latent_representations.npz"
+    latent_file = Path(output_path) / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
     # Save using string keys to comply with np.savez requirements
     latent_dict_str_keys = {str(k): v for k, v in latent_dict.items()}
     np.savez(latent_file, **latent_dict_str_keys)
@@ -371,9 +371,15 @@ def main(args):
         reference_df = combined_df.loc[reference_names]
         query_df = combined_df.loc[query_names]
 
+
         logger.info(f"Training CLIPn on references: {reference_names}")
-        latent_df, cpd_ids, model, key_map = run_clipn_integration(reference_df, logger, args.clipn_param, args.out,
-                                                                args.latent_dim, args.lr, args.epoch)
+        latent_df, cpd_ids, model, dataset_key_mapping = run_clipn_integration(reference_df, logger, 
+                                                                    args.clipn_param, 
+                                                                    args.out,
+                                                                    args.experiment,
+                                                                    args.mode
+                                                                    args.latent_dim, 
+                                                                    args.lr, args.epoch)
 
         if not query_df.empty:
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
@@ -395,10 +401,15 @@ def main(args):
 
     else:
         logger.info("Training and integrating CLIPn on all datasets")
-        latent_df, cpd_ids = run_clipn_integration(combined_df, logger, args.clipn_param, args.out, 
-                                                   args.latent_dim, args.lr, args.epoch)
-
-
+        latent_df, cpd_ids, model, \
+            dataset_key_mapping = run_clipn_integration(combined_df, 
+                                                   logger, 
+                                                   args.clipn_param, 
+                                                   args.out, 
+                                                   args.experiment,
+                                                   args.mode
+                                                   args.latent_dim, 
+                                                   args.lr, args.epoch)
   
     decoded_df = decode_labels(latent_df.copy(), encoders, logger)
     decoded_path = Path(args.out) / f"{args.experiment}_decoded.csv"
