@@ -293,6 +293,26 @@ def encode_labels(df, logger):
     return df, encoders
 
 
+def extend_model_encoders(model, new_keys, reference_key, logger):
+    """
+    Extend CLIPn model's encoder mapping for new datasets using a reference encoder.
+
+    Parameters
+    ----------
+    model : CLIPn
+        The trained CLIPn model object.
+    new_keys : iterable
+        Keys of new datasets to be projected.
+    reference_key : int
+        Key of the reference dataset to copy the encoder from.
+    logger : logging.Logger
+        Logger instance for debug messages.
+    """
+    for new_key in new_keys:
+        model.encoders[new_key] = model.encoders[reference_key]
+        logger.debug(f"Assigned encoder for dataset key {new_key} using reference encoder {reference_key}")
+
+
 
 
 def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode, latent_dim, lr, epochs):
@@ -477,11 +497,10 @@ def main(args):
                 dataset_key_mapping[new_key] = name
             
             # Extend model.encoders with identity mappings for query datasets
-            # (assumes using the encoder from reference1 for all queries)
             reference_encoder_key = list(dataset_key_mapping.keys())[0]
-            for new_key in new_keys:
-                model.encoders[new_key] = model.encoders[reference_encoder_key]
+            extend_model_encoders(model, new_keys, reference_encoder_key, logger)
 
+            logger.debug(f"Number of unique cpd_id in query: {latent_query_df['cpd_id'].nunique()}")
 
             # Invert after adding new keys
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
