@@ -377,7 +377,7 @@ def main(args):
                                                                     args.clipn_param, 
                                                                     args.out,
                                                                     args.experiment,
-                                                                    args.mode
+                                                                    args.mode,
                                                                     args.latent_dim, 
                                                                     args.lr, args.epoch)
 
@@ -407,7 +407,7 @@ def main(args):
                                                    args.clipn_param, 
                                                    args.out, 
                                                    args.experiment,
-                                                   args.mode
+                                                   args.mode,
                                                    args.latent_dim, 
                                                    args.lr, args.epoch)
   
