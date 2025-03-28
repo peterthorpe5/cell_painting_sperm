@@ -430,10 +430,18 @@ def main(args):
         logger.debug(f"Example row: {latent_training_df.iloc[0].to_dict()}")
         assert all(name in cpd_ids for name in latent_training_df["Dataset"].unique()), "Missing cpd_id mappings for some datasets"
 
-
-        latent_training_df["cpd_id"] = latent_training_df.apply(lambda row: safe_get_cpd_id(row, cpd_ids), axis=1)
+        # Correctly inject cpd_id using the known dictionary
+        latent_training_df["cpd_id"] = latent_training_df.apply(
+            lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]]
+            if row["Sample"] < len(cpd_ids.get(row["Dataset"], [])) else None,
+            axis=1
+        )
 
         latent_training_df.to_csv(training_output_path / "training_only_latent.csv", index=False)
+
+        logger.debug("First 10 cpd_id values:\n%s", latent_training_df["cpd_id"].head(10).to_string(index=False))
+        logger.debug("Unique cpd_id values (first 10): %s", latent_training_df["cpd_id"].unique()[:10])
+
 
         if not query_df.empty:
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
@@ -446,12 +454,16 @@ def main(args):
             # Invert mapping from the current model (contains only reference datasets)
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
 
-            # Extend the dataset_key_mapping to include query datasets
-            query_start_key = max(dataset_key_mapping.keys()) + 1
-            for i, query_name in enumerate(query_names):
-                new_key = query_start_key + i
-                dataset_key_mapping[new_key] = query_name
-                dataset_key_mapping_inv[query_name] = new_key
+            # Use inverse mapping to look up keys used by the model for projection
+            # Do NOT assign new keys
+            dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
+
+            query_groups = query_df.groupby(level="Dataset")
+            query_data_dict_corrected = {
+                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"]).values
+                for name, group in query_groups
+                if name in dataset_key_mapping_inv
+}
 
 
             query_groups = query_df.groupby(level="Dataset")
