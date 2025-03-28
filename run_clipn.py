@@ -273,6 +273,10 @@ def decode_labels(df, encoders, logger):
     return df
 
 
+def safe_get_cpd_id(row, cpd_ids):
+    cpd_list = cpd_ids.get(row["Dataset"], [])
+    return cpd_list[row["Sample"]] if row["Sample"] < len(cpd_list) else None
+
 def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode, latent_dim, lr, epochs):
     """
     Train CLIPn model on input data and return latent space.
@@ -421,6 +425,13 @@ def main(args):
        
         training_output_path = Path(args.out) / "training"
         training_output_path.mkdir(parents=True, exist_ok=True)
+        # Debug output
+        logger.debug(f"cpd_ids keys: {list(cpd_ids.keys())}")
+        logger.debug(f"Example row: {latent_training_df.iloc[0].to_dict()}")
+        assert all(name in cpd_ids for name in latent_training_df["Dataset"].unique()), "Missing cpd_id mappings for some datasets"
+
+
+        latent_training_df["cpd_id"] = latent_training_df.apply(lambda row: safe_get_cpd_id(row, cpd_ids), axis=1)
 
         latent_training_df.to_csv(training_output_path / "training_only_latent.csv", index=False)
 
@@ -431,20 +442,21 @@ def main(args):
             # Prepare query data
             query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
 
-            # Invert the original mapping: dataset name → int
+
+            # Invert mapping from the current model (contains only reference datasets)
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
 
-            # Extend mapping to include query datasets (required for model.predict())
+            # Extend the dataset_key_mapping to include query datasets
             query_start_key = max(dataset_key_mapping.keys()) + 1
             for i, query_name in enumerate(query_names):
                 new_key = query_start_key + i
                 dataset_key_mapping[new_key] = query_name
                 dataset_key_mapping_inv[query_name] = new_key
 
-            # Group queries and construct input with correct keys
+
             query_groups = query_df.groupby(level="Dataset")
             query_data_dict_corrected = {
-                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"]).to_numpy()
+                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"]).values
                 for name, group in query_groups
                 if name in dataset_key_mapping_inv
             }
