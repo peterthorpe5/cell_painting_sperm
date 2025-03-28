@@ -463,14 +463,6 @@ def main(args):
                 dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"]).values
                 for name, group in query_groups
                 if name in dataset_key_mapping_inv
-}
-
-
-            query_groups = query_df.groupby(level="Dataset")
-            query_data_dict_corrected = {
-                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=["cpd_id", "cpd_type", "Library"]).values
-                for name, group in query_groups
-                if name in dataset_key_mapping_inv
             }
 
 
