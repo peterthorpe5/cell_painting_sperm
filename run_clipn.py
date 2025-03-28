@@ -368,8 +368,17 @@ def main(args):
     combined_df, encoders = encode_labels(combined_df, logger)
 
     if args.mode == "reference_only":
-        reference_names = [name for name in dataframes if 'reference' in name.lower()]
+        # Define exactly which dataset to train on
+        reference_names = ['reference1']
+
+        # All others will be treated as projection targets
         query_names = [name for name in dataframes if name not in reference_names]
+
+        logger.info(f"CLIPn training on: {reference_names}")
+        logger.info(f"CLIPn projecting onto reference latent space: {query_names}")
+        logger.debug(f"All dataset names: {list(dataframes.keys())}")
+
+
 
         reference_df = combined_df.loc[reference_names]
         query_df = combined_df.loc[query_names]
@@ -386,23 +395,31 @@ def main(args):
 
         if not query_df.empty:
             logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
+            logger.debug(f"Query DataFrame shape: {query_df.shape}")
             query_data_dict, _, _, query_cpd_ids, query_key_map = prepare_data_for_clipn_from_df(query_df)
             projected_dict = model.predict(query_data_dict)
+            logger.debug(f"Projected {len(projected_dict)} datasets into latent space.")
 
             projected_frames = []
             for i, latent in projected_dict.items():
                 name = query_key_map[i]
+                logger.info(f"Projected dataset '{name}' with shape {latent.shape}")
                 df_proj = pd.DataFrame(latent)
                 df_proj.index = pd.MultiIndex.from_product([[name], range(len(df_proj))], names=["Dataset", "Sample"])
                 projected_frames.append(df_proj)
 
-            latent_query_df = pd.concat(projected_frames)
+            # Save query-only projections separately
+            query_only_path = Path(args.out) / f"{args.experiment}_query_only_latent.csv"
+            latent_query_df.to_csv(query_only_path)
+            logger.info(f"Query-only latent representations saved to: {query_only_path}")
+
+            # Append to full latent dataframe
             latent_df = pd.concat([latent_df, latent_query_df])
             cpd_ids.update(query_cpd_ids)
 
-
-
     else:
+        # run on all data, not projected onto the reference ...
+        # but the reference is included in all the training
         logger.info("Training and integrating CLIPn on all datasets")
         latent_df, cpd_ids, model, \
             dataset_key_mapping = run_clipn_integration(combined_df, 
