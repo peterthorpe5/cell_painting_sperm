@@ -631,6 +631,7 @@ def main(args):
             })
             mapping_df.to_csv(mapping_path, index=False)
             logger.info(f"Saved label mapping for {column} to {mapping_path}")
+            logger.info(f"clipn intergration completed. If this ran .. there is a god")
     except Exception as e:
         logger.warning(f"Failed to save label encoder mappings: {e}")
 

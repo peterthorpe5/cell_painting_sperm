@@ -21,7 +21,7 @@ import logging
 import os
 import numpy as np
 import pandas as pd
-from plot import (
+from cell_painting.plot import (
     plot_distance_heatmap, 
     plot_dendrogram,
     generate_umap, 
