@@ -43,7 +43,8 @@ from cell_painting.process_data import (
 
         prepare_data_for_clipn_from_df,
         run_clipn_simple,
-        standardise_metadata_columns
+        standardise_metadata_columns,
+        project_query_to_latent
 )
 
 
@@ -301,9 +302,10 @@ def run_clipn_integration(df, logger, clipn_param, output_path, latent_dim, lr, 
     latent_combined = pd.concat(latent_frames)
 
 
-    latent_file = Path(output_path) / "CLIPn_latent_representations.npz"
-    np.savez(latent_file, **latent_dict)
+    latent_file = Path(output_path) / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
+    np.savez(latent_file, **{str(k): v for k, v in latent_dict.items()})
     logger.info(f"Latent representations saved to: {latent_file}")
+
 
 
     for dataset, latent in latent_dict.items():
@@ -348,10 +350,34 @@ def main(args):
 
     if args.mode == "reference_only":
         reference_names = [name for name in dataframes if 'reference' in name.lower()]
-        reference_df = combined_df.loc[reference_names] if len(reference_names) > 1 else combined_df.loc[[reference_names[0]]]
+        query_names = [name for name in dataframes if name not in reference_names]
+
+        reference_df = combined_df.loc[reference_names]
+        query_df = combined_df.loc[query_names]
+
         logger.info(f"Training CLIPn on references: {reference_names}")
-        latent_df, cpd_ids = run_clipn_integration(reference_df, logger, args.clipn_param, args.out, 
-                                                   args.latent_dim, args.lr, args.epoch)
+        latent_df, cpd_ids, model = run_clipn_integration(reference_df, logger, args.clipn_param, args.out, 
+                                                        args.latent_dim, args.lr, args.epoch)
+
+        # Project query samples
+        if not query_df.empty:
+            logger.info(f"Projecting query datasets onto reference latent space: {query_names}")
+            query_data_dict, _, _, query_cpd_ids = prepare_data_for_clipn_from_df(query_df)
+            projected_dict = model.predict(query_data_dict)
+
+            # Convert projections to DataFrame with MultiIndex
+            projected_frames = []
+            for name, array in projected_dict.items():
+                df_proj = pd.DataFrame(array)
+                df_proj.index = pd.MultiIndex.from_product([[name], range(len(df_proj))], names=["Dataset", "Sample"])
+                projected_frames.append(df_proj)
+
+            latent_query_df = pd.concat(projected_frames)
+
+            # Merge with reference
+            latent_df = pd.concat([latent_df, latent_query_df])
+            cpd_ids.update(query_cpd_ids)
+
 
     else:
         logger.info("Training and integrating CLIPn on all datasets")

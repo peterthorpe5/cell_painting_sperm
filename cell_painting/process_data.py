@@ -765,13 +765,13 @@ def prepare_data_for_clipn_from_df(df):
     -------
     tuple
         data_dict : dict
-            Dictionary mapping integer index to feature matrix (np.ndarray).
+            Dictionary mapping dataset name to feature matrix (np.ndarray).
         label_dict : dict
-            Dictionary mapping integer index to label vector (np.ndarray).
+            Dictionary mapping dataset name to label vector (np.ndarray).
         label_mappings : dict
-            Dictionary mapping integer index to {label_id: label_name}.
+            Dictionary mapping dataset name to {label_id: label_name}.
         cpd_ids : dict
-            Dictionary mapping integer index to list of compound IDs.
+            Dictionary mapping dataset name to list of compound IDs.
     """
     from collections import defaultdict
 
@@ -784,9 +784,9 @@ def prepare_data_for_clipn_from_df(df):
     if not isinstance(df.index, pd.MultiIndex):
         raise ValueError("Expected a MultiIndex DataFrame with levels ['Dataset', 'Sample']")
 
-    dataset_keys = list(df.index.levels[0])
+    dataset_keys = df.index.get_level_values('Dataset').unique()
 
-    for i, dataset_name in enumerate(dataset_keys):
+    for dataset_name in dataset_keys:
         dataset_df = df.loc[dataset_name]
 
         # Get feature columns (exclude metadata)
@@ -802,12 +802,13 @@ def prepare_data_for_clipn_from_df(df):
         label_map = {label: idx for idx, label in enumerate(unique_labels)}
         y_encoded = np.array([label_map[label] for label in y])
 
-        data_dict[i] = X
-        label_dict[i] = y_encoded
-        label_mappings[i] = {v: k for k, v in label_map.items()}
-        cpd_ids[i] = ids
+        data_dict[dataset_name] = X
+        label_dict[dataset_name] = y_encoded
+        label_mappings[dataset_name] = {v: k for k, v in label_map.items()}
+        cpd_ids[dataset_name] = ids
 
     return data_dict, label_dict, label_mappings, cpd_ids
+
 
 
 def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experiment_label_mapping,
@@ -902,18 +903,19 @@ def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experimen
     return X, y, label_mappings, dataset_mapping
 
 
-def run_clipn_simple(X, y, latent_dim=20, lr=1e-5, epochs=300):
+
+def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     """
-    Run CLIPn training and return latent representations.
+    Run CLIPn training and return the trained model and latent representations.
 
     Parameters
     ----------
-    X : dict
-        Dictionary of input feature arrays (one per dataset).
-    y : dict
-        Dictionary of encoded label arrays (one per dataset).
+    data_dict : dict
+        Dictionary of dataset_name -> feature matrix (np.ndarray).
+    label_dict : dict
+        Dictionary of dataset_name -> label vector (np.ndarray).
     latent_dim : int
-        Dimensionality of the CLIPn latent space.
+        Dimensionality of latent space.
     lr : float
         Learning rate.
     epochs : int
@@ -921,17 +923,51 @@ def run_clipn_simple(X, y, latent_dim=20, lr=1e-5, epochs=300):
 
     Returns
     -------
-    dict
-        Dictionary of latent representations for each dataset.
+    model : CLIPn
+        Trained CLIPn model.
+    latent_dict : dict
+        Dictionary of dataset_name -> latent embedding (np.ndarray).
     """
-    from clipn.model import CLIPn  # adjust this import based on your actual CLIPn class location
+    from clipn import CLIPn
 
-    model = CLIPn(X, y, latent_dim=latent_dim)
-    model.fit(X, y, lr=lr, epochs=epochs)
-    latent = model.predict(X)
+    print("Running CLIPn ...")
+    model = CLIPn(data_dict, label_dict, latent_dim=latent_dim)
+    model.fit(data_dict, label_dict, lr=lr, epochs=epochs)
+    latent_dict = model.predict(data_dict)
 
-    return latent
+    return model, latent_dict
 
+def project_query_to_latent(model, query_df):
+    """
+    Projects query samples into the trained CLIPn latent space.
+
+    Parameters
+    ----------
+    model : CLIPn
+        Trained CLIPn model.
+    query_df : pd.DataFrame
+        MultiIndex DataFrame with numeric features and metadata.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping dataset name to latent embedding array (np.ndarray).
+    """
+    from collections import defaultdict
+
+    projected = {}
+    dataset_keys = query_df.index.get_level_values("Dataset").unique()
+
+    for dataset in dataset_keys:
+        dataset_df = query_df.loc[dataset]
+        meta_cols = ['cpd_id', 'cpd_type', 'Library']
+        feature_cols = dataset_df.select_dtypes(include=[np.number]).columns.tolist()
+        feature_cols = [col for col in feature_cols if col not in meta_cols]
+        X_query = dataset_df[feature_cols].to_numpy()
+
+        projected[dataset] = model.predict({dataset: X_query})[dataset]
+
+    return projected
 
 
 def run_clipn(X, y, output_folder, args):
