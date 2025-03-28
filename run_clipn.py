@@ -420,14 +420,7 @@ def main(args):
             lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
             axis=1
             )
-
-        latent_query_df = latent_query_df.reset_index()
-        latent_query_df["cpd_id"] = latent_query_df.apply(
-            lambda row: query_cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
-            axis=1
-            )
-
-        
+       
         training_output_path = Path(args.out) / "training"
         training_output_path.mkdir(parents=True, exist_ok=True)
 
@@ -470,6 +463,12 @@ def main(args):
                 query_cpd_ids[name] = query_df.loc[name]["cpd_id"].tolist()
 
             latent_query_df = pd.concat(projected_frames)
+            # NOW it's safe to restore the cpd_id
+            latent_query_df = latent_query_df.reset_index()
+            latent_query_df["cpd_id"] = latent_query_df.apply(
+                lambda row: query_cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
+                axis=1
+)
 
             # Now safe to reset index and assign cpd_id
             latent_query_df = latent_query_df.reset_index()
