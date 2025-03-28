@@ -362,6 +362,9 @@ def main(args):
         
 
     combined_df, encoders = encode_labels(combined_df, logger)
+    metadata_df = decode_labels(combined_df.copy(), encoders, logger)[["cpd_id", "cpd_type", "Library"]]
+    metadata_df = metadata_df.reset_index()
+
 
     if args.mode == "reference_only":
         # Define exactly which dataset to train on
@@ -451,8 +454,6 @@ def main(args):
                                                    args.latent_dim, 
                                                    args.lr, args.epoch)
         
-    metadata_df = decode_labels(combined_df.copy(), encoders, logger)[["cpd_id", "cpd_type", "Library"]]
-    metadata_df = metadata_df.reset_index()
 
     latent_df = latent_df.reset_index()
     latent_df = pd.merge(latent_df, metadata_df, on=["Dataset", "Sample"], how="left")
