@@ -365,7 +365,7 @@ def main(args):
 
     if args.mode == "reference_only":
         # Define exactly which dataset to train on
-        reference_names = [args.reference_name]
+        reference_names = args.reference_names
         logger.info(f"Using {args.reference_name} as the training dataset, then project others onto this")
 
 
@@ -500,9 +500,9 @@ if __name__ == "__main__":
                         help="Learning rate for CLIPn (default: 1e-5)")
     parser.add_argument("--epoch", type=int, default=300,
                         help="Number of training epochs (default: 300)")
-    parser.add_argument("--reference_name", type=str, default="reference1",
-                    help="Dataset name to use as training reference (only in reference_only mode)")
-
+   
+    parser.add_argument("--reference_names", nargs='+', default=["reference1", "reference2"],
+                    help="List of dataset names to use for training the CLIPn model.")
 
     args = parser.parse_args()
     main(args)
