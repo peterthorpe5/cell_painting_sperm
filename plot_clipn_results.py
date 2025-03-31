@@ -84,7 +84,7 @@ def main(args):
     logger.info("Generating UMAP visualisation")
     umap_file = os.path.join(args.plots, "clipn_UMAP.pdf")
     try:
-        _ = generate_umap(df, args.plots, umap_file, args=args, add_labels=False)
+        _ = generate_umap(df.copy(), args.plots, umap_file, args=args, add_labels=False)
     except ValueError as e:
         logger.error(f"UMAP failed: {e}")
         return
@@ -93,7 +93,7 @@ def main(args):
     logger.info("Generating UMAP visualisation with labels")
     umap_file_labeled = os.path.join(args.plots, "clipn_UMAP_labeled.pdf")
     try:
-        umap_df = generate_umap(df, args.plots, umap_file_labeled, args=args, add_labels=True)
+        umap_df = generate_umap(df.copy(), args.plots, umap_file_labeled, args=args, add_labels=True)
     except ValueError as e:
         logger.error(f"Labeled UMAP failed: {e}")
         return
