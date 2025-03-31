@@ -155,84 +155,98 @@ def plot_distance_heatmap(dist_df, output_path):
     plt.close()
 
 
-def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
-                  n_neighbors=15, num_clusters=10, add_labels=False):
+def generate_umap(
+    combined_latent_df,
+    output_folder,
+    umap_plot_file,
+    args,
+    add_labels=False
+):
     """
     Generates UMAP embeddings, performs KMeans clustering, and saves the results.
 
     Parameters
     ----------
     combined_latent_df : pd.DataFrame
-        Latent representations with compound metadata.
+        Full DataFrame containing both metadata and latent features.
+
     output_folder : str
-        Path to save UMAP plots and coordinates.
+        Folder to save plots and coordinates.
+
     umap_plot_file : str
-        Path to save the UMAP plot.
+        Full path to save the UMAP plot (PDF).
+
     args : argparse.Namespace
-        Command-line args, optionally including latent_dim, lr, epoch.
-    n_neighbors : int
-        UMAP neighbourhood size.
-    num_clusters : int
-        Number of clusters for KMeans.
-    add_labels : bool
-        Whether to annotate the UMAP plot with cpd_id labels.
+        Parsed CLI arguments with UMAP and clustering parameters.
+
+    add_labels : bool, optional
+        Whether to add cpd_id labels to the UMAP plot (default: False).
 
     Returns
     -------
     pd.DataFrame
-        UMAP coordinates + cluster labels, same index as input.
+        UMAP coordinates + cluster assignments + metadata.
     """
-    logger.info(f"Generating UMAP visualization with n_neighbors={n_neighbors} and {num_clusters} clusters.")
+    import matplotlib.pyplot as plt
+    import umap.umap_ as umap
+    from sklearn.cluster import KMeans
 
-    # Extract numeric features only
-    numeric_df = combined_latent_df.select_dtypes(include=[np.number])
-    if numeric_df.empty:
-        raise ValueError("No numeric columns found for UMAP projection.")
+    logger.info(f"Generating UMAP visualization with n_neighbors={args.umap_n_neighbors}, "
+                f"min_dist={args.umap_min_dist}, metric={args.umap_metric} and "
+                f"{args.num_clusters} clusters.")
 
-    # Run UMAP
-    umap_model = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.1, n_components=2, random_state=42)
-    latent_umap = umap_model.fit_transform(numeric_df)
+    metadata_cols = ["cpd_id", "cpd_type", "Library", "Dataset", "Sample"]
+    metadata = combined_latent_df[metadata_cols].copy()
+    latent_features = combined_latent_df.drop(columns=metadata_cols, errors="ignore")
+
+    if latent_features.empty:
+        raise ValueError("No numeric latent features available for UMAP projection.")
+
+    umap_model = umap.UMAP(
+        n_neighbors=args.umap_n_neighbors,
+        min_dist=args.umap_min_dist,
+        metric=args.umap_metric,
+        n_components=2,
+        random_state=42
+    )
+    latent_umap = umap_model.fit_transform(latent_features)
+
+    logger.info(f"Running KMeans clustering with {args.num_clusters} clusters.")
+    kmeans = KMeans(n_clusters=args.num_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(latent_umap)
 
     # Build output DataFrame
-    umap_df = pd.DataFrame(latent_umap, columns=["UMAP1", "UMAP2"], index=combined_latent_df.index)
-
-    # Run clustering
-    logger.info(f"Running KMeans clustering with {num_clusters} clusters.")
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-    cluster_labels = kmeans.fit_predict(latent_umap)
+    umap_df = metadata.copy()
+    umap_df["UMAP1"] = latent_umap[:, 0]
+    umap_df["UMAP2"] = latent_umap[:, 1]
     umap_df["Cluster"] = cluster_labels
 
-    # Ensure cpd_id column is present
-    if "cpd_id" in combined_latent_df.columns:
-        umap_df["cpd_id"] = combined_latent_df["cpd_id"].values
-    elif isinstance(combined_latent_df.index, pd.MultiIndex) and "cpd_id" in combined_latent_df.index.names:
-        umap_df["cpd_id"] = combined_latent_df.index.get_level_values("cpd_id")
-    else:
-        logger.warning("cpd_id not found in index or columns; UMAP output will lack readable IDs.")
-
-    # Save UMAP coordinates
-    umap_outfile = os.path.join(output_folder, "clipn_umap_coordinates.tsv")
-    umap_df.to_csv(umap_outfile, sep="\t", index=False)
-    logger.info(f"UMAP coordinates saved to '{umap_outfile}'.")
+    # Save coordinate table
+    coords_file = os.path.join(output_folder, "clipn_umap_coordinates.tsv")
+    umap_df.to_csv(coords_file, sep="\t", index=False)
+    logger.info(f"UMAP coordinates saved to '{coords_file}'.")
 
     # Plot
     plt.figure(figsize=(12, 8))
-    scatter = plt.scatter(umap_df["UMAP1"], umap_df["UMAP2"], alpha=0.7, s=5, c=cluster_labels, cmap="tab10")
+    scatter = plt.scatter(
+        umap_df["UMAP1"],
+        umap_df["UMAP2"],
+        s=5,
+        alpha=0.7,
+        c=cluster_labels,
+        cmap="tab10"
+    )
     plt.xlabel("UMAP 1")
     plt.ylabel("UMAP 2")
-    plt.title("CLIPn UMAP Visualisation (coloured by Cluster)")
+    plt.title("CLIPn UMAP: Clustered")
     plt.colorbar(scatter, label="Cluster ID")
 
-    # Add labels if requested
     if add_labels:
         logger.info("Adding `cpd_id` labels to UMAP plot.")
-        for x, y, label in zip(umap_df["UMAP1"], umap_df["UMAP2"], umap_df["cpd_id"]):
-            plt.text(x, y, str(label), fontsize=2, alpha=0.7)
+        for _, row in umap_df.iterrows():
+            plt.text(row["UMAP1"], row["UMAP2"], str(row["cpd_id"]), fontsize=2, alpha=0.6)
+        umap_plot_file = umap_plot_file.replace(".pdf", "_labeled.pdf")
 
-        if umap_plot_file.endswith(".pdf"):
-            umap_plot_file = umap_plot_file.replace(".pdf", "_labeled.pdf")
-
-    # Save plot
     plt.savefig(umap_plot_file, dpi=1200)
     plt.close()
     logger.info(f"UMAP plot saved to '{umap_plot_file}'.")

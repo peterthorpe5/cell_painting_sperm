@@ -131,5 +131,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualise CLIPn outputs.")
     parser.add_argument("--latent_csv", required=True, help="TSV with latent space + metadata from CLIPn.")
     parser.add_argument("--plots", required=True, help="Directory to store visualisation outputs.")
+    parser.add_argument("--umap_n_neighbors", type=int, default=15,
+                    help="Number of neighbours to use for UMAP (default: 15).")
+    parser.add_argument("--umap_min_dist", type=float, default=0.25,
+                        help="Minimum distance parameter for UMAP (default: 0.25).")
+    parser.add_argument("--umap_metric", type=str, default="euclidean",
+                        help="Distance metric for UMAP (e.g., euclidean, cosine, manhattan).")
+    parser.add_argument("--num_clusters", type=int, default=15,
+                        help="Number of clusters for KMeans (default: 15).")
+
     args = parser.parse_args()
     main(args)
