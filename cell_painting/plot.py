@@ -231,8 +231,8 @@ def generate_umap(
     scatter = plt.scatter(
         umap_df["UMAP1"],
         umap_df["UMAP2"],
-        s=5,
-        alpha=0.7,
+        s=3,
+        alpha=0.5,
         c=cluster_labels,
         cmap="tab10"
     )
@@ -244,7 +244,7 @@ def generate_umap(
     if add_labels:
         logger.info("Adding `cpd_id` labels to UMAP plot.")
         for _, row in umap_df.iterrows():
-            plt.text(row["UMAP1"], row["UMAP2"], str(row["cpd_id"]), fontsize=2, alpha=0.6)
+            plt.text(row["UMAP1"], row["UMAP2"], str(row["cpd_id"]), fontsize=1, alpha=0.6)
         umap_plot_file = umap_plot_file.replace(".pdf", "_labeled.pdf")
 
     plt.savefig(umap_plot_file, dpi=1200)
