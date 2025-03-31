@@ -107,6 +107,7 @@ def main(args):
 
     # Heatmap and dendrogram
     logger.info("Generating heatmap and dendrogram")
+    logger.info("this takes a long time ...")
     plot_distance_heatmap(dist_df, os.path.join(args.plots, "compound_distance_heatmap.pdf"))
     plot_dendrogram(dist_df, os.path.join(args.plots, "compound_clustering_dendrogram.pdf"))
 
