@@ -1,22 +1,31 @@
-
 #!/usr/bin/env python3
 """
 CLIPn Post-Analysis Script
 ---------------------------
-This script performs post-analysis on CLIPn latent representations.
+Performs post-analysis of CLIPn latent space embeddings.
+
+Features
+--------
+- Cluster summaries by Cluster, Dataset, cpd_type
+- Test compound proximity to reference dataset
+- Nearest neighbours analysis
+- Optional interactive network output (via pyvis)
+- Logging and future-ready for toxic tagging & enrichment stats
 
 Inputs
 ------
---latent_csv : Path to a TSV file with latent space coordinates, compound metadata (cpd_id, cpd_type, Dataset, etc.)
---output_dir : Directory to save all outputs (plots, summaries, network HTML)
+--latent_csv           TSV with latent embeddings + metadata
+--output_dir           Output folder
+--test_dataset         One or more test dataset names
+--reference_dataset    One or more reference dataset names
+--threshold            Distance threshold for network edges
 
 Outputs
 -------
-- Cluster summary (per cluster, per dataset, per cpd_type)
-- Nearest neighbours table
-- Interactive compound similarity network (if successful)
-- Test-to-reference neighbour analysis (optional)
-- Full logging throughout the run
+- Cluster summary TSV
+- Nearest neighbours TSV
+- Test compound proximity report
+- Interactive compound similarity network (if pyvis works)
 
 Author: Auto-generated for custom CLIPn analysis
 """
@@ -29,163 +38,139 @@ import numpy as np
 from sklearn.neighbors import NearestNeighbors
 import networkx as nx
 
-# Configure logging
+# Try to import pyvis
+try:
+    from pyvis.network import Network
+    PYVIS_AVAILABLE = True
+except Exception:
+    PYVIS_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def compute_nearest_neighbours(df, n_neighbours=5):
-    """Compute nearest neighbours from numeric columns."""
-    numeric = df.select_dtypes(include=[np.number])
-    nn = NearestNeighbors(n_neighbors=n_neighbours + 1, metric="euclidean").fit(numeric)
-    distances, indices = nn.kneighbors(numeric)
-
-    neighbour_table = []
-    for i, row in enumerate(indices):
-        focal = df.iloc[i]["cpd_id"]
-        for j in row[1:]:  # skip self
-            neighbour = df.iloc[j]["cpd_id"]
-            dist = np.linalg.norm(numeric.iloc[i] - numeric.iloc[j])
-            neighbour_table.append({
-                "cpd_id": focal,
-                "neighbour_id": neighbour,
-                "distance": dist
-            })
-
-    return pd.DataFrame(neighbour_table)
-
-
 def summarise_clusters(df, output_dir):
-    """Create cluster summary grouped by Cluster, cpd_type, and Dataset."""
+    """
+    Summarise clusters by cluster, cpd_type, and Dataset.
+    """
     if "Cluster" not in df.columns:
         logger.warning("No Cluster column found in input. Skipping summary.")
         return
 
-    summary = df.groupby(["Cluster", "cpd_type", "Dataset"]).agg({
-        "cpd_id": "count"
-    }).reset_index()
-
-    summary.to_csv(os.path.join(output_dir, "cluster_summary_by_type_and_dataset.tsv"),
-                   sep="\t", index=False)
-    logger.info("Cluster summary saved.")
+    logger.info("Creating cluster summary...")
+    cluster_summary = df.groupby(["Cluster", "cpd_type", "Dataset"]).agg({"cpd_id": "count"}).reset_index()
+    summary_path = os.path.join(output_dir, "cluster_summary_by_type_and_dataset.tsv")
+    cluster_summary.to_csv(summary_path, sep="\t", index=False)
+    logger.info(f"Cluster summary saved to {summary_path}")
 
 
-def compute_test_to_reference_neighbour_overlap(df, test_label, reference_label, n_neighbours=5):
+def compute_nearest_neighbours(df, n_neighbours=5):
     """
-    For each test compound, count how many of its nearest neighbours are from the reference dataset.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe with latent space columns and 'Dataset' column.
-    test_label : str
-        Label identifying test dataset (e.g. 'SelleckChem').
-    reference_label : str
-        Label identifying reference dataset (e.g. 'stb').
-    n_neighbours : int
-        Number of neighbours to check for each test compound.
-
-    Returns
-    -------
-    pd.DataFrame
-        Test compounds with counts of reference neighbours.
+    Compute nearest neighbours for each compound using Euclidean distance.
     """
+    logger.info("Computing nearest neighbours...")
     numeric = df.select_dtypes(include=[np.number])
     nn = NearestNeighbors(n_neighbors=n_neighbours + 1, metric="euclidean").fit(numeric)
     distances, indices = nn.kneighbors(numeric)
 
-    test_mask = df["Dataset"] == test_label
-    test_indices = df[test_mask].index
+    rows = []
+    for i, row in enumerate(indices):
+        source = df.iloc[i]["cpd_id"]
+        for j in row[1:]:
+            neighbour = df.iloc[j]["cpd_id"]
+            dist = np.linalg.norm(numeric.iloc[i] - numeric.iloc[j])
+            rows.append({"cpd_id": source, "neighbour_id": neighbour, "distance": dist})
 
-    results = []
-    for idx in test_indices:
-        neighbour_ids = indices[idx][1:]  # exclude self
-        neighbour_datasets = df.iloc[neighbour_ids]["Dataset"].values
-        reference_count = np.sum(neighbour_datasets == reference_label)
-        results.append({
-            "cpd_id": df.iloc[idx]["cpd_id"],
-            "test_dataset": test_label,
-            "reference_neighbours": reference_count,
-            "total_checked": n_neighbours
-        })
-
-    return pd.DataFrame(results)
+    return pd.DataFrame(rows)
 
 
-def generate_similarity_network(df, output_html, threshold=0.3):
-    """Generate interactive compound network based on nearest neighbour distances."""
-    try:
-        from pyvis.network import Network
-    except ImportError:
-        logger.error("pyvis is not installed. Skipping network generation.")
-        return
-
+def analyse_test_vs_reference(df, test_datasets, reference_datasets, output_dir):
+    """
+    For each test compound, determine how many of its top N neighbours are from reference.
+    """
+    logger.info("Evaluating test compound proximity to reference dataset...")
     numeric = df.select_dtypes(include=[np.number])
-    nn = NearestNeighbors(n_neighbors=6, metric="euclidean").fit(numeric)
+    nn = NearestNeighbors(n_neighbors=6).fit(numeric)
     distances, indices = nn.kneighbors(numeric)
 
-    g = nx.Graph()
-    for idx, neighbours in enumerate(indices):
-        source = df.iloc[idx]["cpd_id"]
-        g.add_node(source)
-        for j in neighbours[1:]:
-            target = df.iloc[j]["cpd_id"]
-            dist = np.linalg.norm(numeric.iloc[idx] - numeric.iloc[j])
-            if dist < threshold:
-                g.add_edge(source, target, weight=dist)
+    results = []
+    for i, row in enumerate(indices):
+        focal = df.iloc[i]
+        if focal["Dataset"] not in test_datasets:
+            continue
+        focal_id = focal["cpd_id"]
+        reference_hits = 0
+        for j in row[1:]:  # skip self
+            neighbour = df.iloc[j]
+            if neighbour["Dataset"] in reference_datasets:
+                reference_hits += 1
+        results.append({"cpd_id": focal_id, "reference_neighbours": reference_hits})
 
-    net = Network(height="800px", width="100%", notebook=False)
-    net.from_nx(g)
+    out_path = os.path.join(output_dir, "test_reference_neighbour_overlap.tsv")
+    pd.DataFrame(results).to_csv(out_path, sep="\t", index=False)
+    logger.info(f"Test compound reference neighbour stats saved to {out_path}")
+
+
+def generate_network(df, output_dir, threshold):
+    """
+    Generate an interactive similarity network (if pyvis is installed).
+    """
+    logger.info("Generating interactive network (if pyvis is installed)...")
+    if not PYVIS_AVAILABLE:
+        logger.warning("Pyvis not available or failed to import. Skipping network visualisation.")
+        return
 
     try:
-        net.show(output_html)
+        numeric = df.select_dtypes(include=[np.number])
+        nn = NearestNeighbors(n_neighbors=6).fit(numeric)
+        distances, indices = nn.kneighbors(numeric)
+
+        g = nx.Graph()
+        for i, row in enumerate(indices):
+            source = df.iloc[i]["cpd_id"]
+            g.add_node(source)
+            for j in row[1:]:
+                target = df.iloc[j]["cpd_id"]
+                dist = np.linalg.norm(numeric.iloc[i] - numeric.iloc[j])
+                if dist < threshold:
+                    g.add_edge(source, target, weight=dist)
+
+        net = Network(height="800px", width="100%")
+        net.from_nx(g)
+
+        output_html = os.path.join(output_dir, "compound_similarity_network.html")
+        net.write_html(output_html)
         logger.info(f"Interactive network visualisation saved to '{output_html}'.")
-    except AttributeError:
-        logger.error("Failed to render HTML with pyvis (template missing). Skipping.")
+
+    except Exception as e:
+        logger.error(f"Failed to render HTML with pyvis (template missing?). Skipping. Error: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Post-analysis for CLIPn latent space.")
-    parser.add_argument("--latent_csv", required=True,
-                        help="TSV with latent coordinates and compound metadata.")
-    parser.add_argument("--output_dir", required=True,
-                        help="Directory to save outputs.")
-    parser.add_argument("--threshold", type=float, default=0.3,
-                        help="Distance threshold for network edges.")
-    parser.add_argument("--test_dataset", type=str, default="SelleckChem",
-                        help="Label of test dataset in Dataset column.")
-    parser.add_argument("--reference_dataset", type=str, default="stb",
-                        help="Label of reference dataset in Dataset column.")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="CLIPn Latent Post-Analysis")
+    parser.add_argument("--latent_csv", required=True, help="TSV with latent space and metadata")
+    parser.add_argument("--output_dir", required=True, help="Output directory")
+    parser.add_argument("--threshold", type=float, default=0.3, help="Distance threshold for network edges")
+    parser.add_argument("--test_dataset", nargs="+", help="Test dataset(s) to evaluate proximity")
+    parser.add_argument("--reference_dataset", nargs="+", help="Reference dataset(s) to compare with")
 
+    args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
     logger.info(f"Reading latent CSV: {args.latent_csv}")
     df = pd.read_csv(args.latent_csv, sep="\t")
 
-    logger.info("Performing cluster summary...")
     summarise_clusters(df, args.output_dir)
 
-    logger.info("Computing nearest neighbours...")
     nn_df = compute_nearest_neighbours(df)
-    nn_file = os.path.join(args.output_dir, "nearest_neighbours.tsv")
-    nn_df.to_csv(nn_file, sep="\t", index=False)
-    logger.info(f"Nearest neighbours saved to {nn_file}")
+    nn_out = os.path.join(args.output_dir, "nearest_neighbours.tsv")
+    nn_df.to_csv(nn_out, sep="\t", index=False)
+    logger.info(f"Nearest neighbours saved to {nn_out}")
 
-    logger.info("Evaluating test compound proximity to reference dataset...")
-    overlap_df = compute_test_to_reference_neighbour_overlap(
-        df,
-        test_label=args.test_dataset,
-        reference_label=args.reference_dataset,
-        n_neighbours=5
-    )
-    overlap_file = os.path.join(args.output_dir, "test_reference_neighbour_overlap.tsv")
-    overlap_df.to_csv(overlap_file, sep="\t", index=False)
-    logger.info(f"Test compound reference neighbour stats saved to {overlap_file}")
+    if args.test_dataset and args.reference_dataset:
+        analyse_test_vs_reference(df, args.test_dataset, args.reference_dataset, args.output_dir)
 
-    logger.info("Generating interactive network (if pyvis is installed)...")
-    network_html = os.path.join(args.output_dir, "compound_similarity_network.html")
-    generate_similarity_network(df, network_html, threshold=args.threshold)
+    generate_network(df, args.output_dir, threshold=args.threshold)
 
     logger.info("Post-analysis complete.")
 
