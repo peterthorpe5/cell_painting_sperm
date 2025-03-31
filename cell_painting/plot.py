@@ -205,6 +205,8 @@ def generate_umap(combined_latent_df, output_folder, umap_plot_file, args,
 
     latent_umap = umap_model.fit_transform(combined_latent_df.drop(columns=["dataset"], errors="ignore"))
 
+
+
     # Create DataFrame with MultiIndex
     umap_df = pd.DataFrame(latent_umap, columns=["UMAP1", "UMAP2"], index=combined_latent_df.index)
 

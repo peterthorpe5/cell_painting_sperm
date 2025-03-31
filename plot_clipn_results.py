@@ -16,6 +16,7 @@ Inputs:
 
 Output files:
     - clipn_UMAP.pdf
+    - clipn_UMAP_labeled.pdf
     - compound_distance_heatmap.pdf
     - compound_clustering_dendrogram.pdf
     - compound_similarity_summary.tsv
@@ -64,7 +65,7 @@ def clean_and_reorder_latent_df(df: pd.DataFrame) -> pd.DataFrame:
 
     meta_cols = ["cpd_id", "cpd_type", "Library", "Dataset", "Sample"]
     meta_cols = [col for col in meta_cols if col in df.columns]
-    other_cols = [col for col in df.columns if col not in meta_cols]
+    other_cols = [col for col in df.columns if col not in meta_cols and pd.api.types.is_numeric_dtype(df[col])]
     df = df[meta_cols + other_cols]
 
     return df
@@ -79,13 +80,22 @@ def main(args):
     df = pd.read_csv(args.latent_csv, sep="\t")
     df = clean_and_reorder_latent_df(df)
 
-    # Generate UMAP
+    # Generate UMAP without labels
     logger.info("Generating UMAP visualisation")
     umap_file = os.path.join(args.plots, "clipn_UMAP.pdf")
     try:
-        umap_df = generate_umap(df, args.plots, umap_file, args=args, add_labels=True)
+        _ = generate_umap(df, args.plots, umap_file, args=args, add_labels=False)
     except ValueError as e:
         logger.error(f"UMAP failed: {e}")
+        return
+
+    # Generate UMAP with labels
+    logger.info("Generating UMAP visualisation with labels")
+    umap_file_labeled = os.path.join(args.plots, "clipn_UMAP_labeled.pdf")
+    try:
+        umap_df = generate_umap(df, args.plots, umap_file_labeled, args=args, add_labels=True)
+    except ValueError as e:
+        logger.error(f"Labeled UMAP failed: {e}")
         return
 
     # Pairwise distances
@@ -109,7 +119,7 @@ def main(args):
     if "Cluster" in umap_df.columns:
         logger.info("Generating UMAP cluster summary")
         umap_summary_csv = os.path.join(args.plots, "umap_cluster_summary.tsv")
-        umap_df.groupby("Cluster").agg({
+        umap_df.reset_index().groupby("Cluster").agg({
             "cpd_type": lambda x: sorted(set(x)),
             "cpd_id": lambda x: sorted(set(x))
         }).to_csv(umap_summary_csv, sep="\t")
