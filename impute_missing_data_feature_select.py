@@ -157,6 +157,18 @@ if __name__ == "__main__":
         df.rename(columns={"library": "Library"}, inplace=True)
         logger.info("Renamed column 'library' to 'Library' for consistency.")
 
+    # Extra to fix more errors
+    # Ensure 'Library' column is standardised and present
+    if "Library" not in df.columns:
+        candidates = [col for col in df.columns if col.lower() == "library"]
+        if candidates:
+            df.rename(columns={candidates[0]: "Library"}, inplace=True)
+            logger.info(f"Renamed column '{candidates[0]}' to 'Library' for consistency.")
+        else:
+            logger.warning("No 'Library' column found in input data. Adding 'Library' column using experiment name.")
+            df["Library"] = args.experiment
+
+
     logger.info(f"Initial data shape: {df.shape}")
 
     df = standardise_metadata_columns(df)
