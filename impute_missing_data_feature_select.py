@@ -186,6 +186,29 @@ if __name__ == "__main__":
             logger.warning(f"Annotation file could not be processed: {e}")
 
 
+    # === Save ungrouped version after correlation + variance filter, keeping metadata ===
+    logger.info("Creating a version of the data with correlation and variance filtering before grouping.")
+    try:
+        # Identify and separate metadata columns
+        metadata_cols = ["cpd_id", "Library", "cpd_type"]
+        metadata_df = df[metadata_cols].copy()
+        feature_df = df.drop(columns=metadata_cols)
+
+        # Apply correlation and variance filters
+        filtered_features = correlation_filter(feature_df.copy(), threshold=args.correlation_threshold)
+        filtered_features = variance_threshold_selector(filtered_features)
+
+        # Join metadata back
+        df_ungrouped_filtered = pd.concat([metadata_df, filtered_features], axis=1)
+
+        ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.csv"
+        df_ungrouped_filtered.to_csv(ungrouped_filtered_path, index=False)
+        logger.info(f"Ungrouped, correlation- and variance-filtered data (with metadata) saved to {ungrouped_filtered_path}")
+    except Exception as e:
+        logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
+
+
+
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
     try:
