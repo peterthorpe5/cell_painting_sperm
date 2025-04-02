@@ -155,13 +155,8 @@ def plot_distance_heatmap(dist_df, output_path):
     plt.close()
 
 
-def generate_umap(
-    combined_latent_df,
-    output_folder,
-    umap_plot_file,
-    args,
-    add_labels=False
-):
+def generate_umap(combined_latent_df, output_folder,
+                  umap_plot_file, args, add_labels=False):
     """
     Generates UMAP embeddings, performs KMeans clustering, and saves the results.
 

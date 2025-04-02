@@ -168,6 +168,13 @@ if __name__ == "__main__":
 
     # === Imputation ===
     imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
+    # Refresh numeric_cols to reflect columns still present after dropna
+    numeric_cols = [col for col in numeric_cols if col in df.columns]
+
+    if not numeric_cols:
+        logger.error("No numeric columns available for imputation after removing all-NaN columns.")
+        sys.exit(1)
+    # Proceed with imputation
     df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
     logger.info(f"Imputation ({args.impute}) completed.")
 
