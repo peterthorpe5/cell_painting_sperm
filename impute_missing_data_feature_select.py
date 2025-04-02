@@ -189,13 +189,12 @@ if __name__ == "__main__":
     # === Save ungrouped version after correlation + variance filter, keeping metadata ===
     logger.info("Creating a version of the data with correlation and variance filtering before grouping.")
     try:
-        # Identify and separate metadata columns
-        metadata_cols = ["cpd_id", "Library", "cpd_type"]
-        metadata_df = df[metadata_cols].copy()
-        feature_df = df.drop(columns=metadata_cols)
+        # Identify metadata columns (non-numeric)
+        metadata_df = df.select_dtypes(exclude=[np.number]).copy()
+        feature_df = df.select_dtypes(include=[np.number]).copy()
 
         # Apply correlation and variance filters
-        filtered_features = correlation_filter(feature_df.copy(), threshold=args.correlation_threshold)
+        filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
         filtered_features = variance_threshold_selector(filtered_features)
 
         # Join metadata back
