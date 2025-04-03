@@ -42,8 +42,7 @@ import argparse
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import matplotlib.cm as cm
+from matplotlib import colormaps
 import umap.umap_ as umap
 import plotly.express as px
 from sklearn.cluster import KMeans
@@ -94,7 +93,8 @@ def run_umap_analysis(input_path, output_dir, args):
         df = pd.merge(df, compound_meta, on="cpd_id", how="left")
         compound_columns = [col for col in compound_meta.columns if col != "cpd_id"]
 
-    latent_features = df.select_dtypes(include=["number"]).copy()
+    # Only select columns that are pure digit names, i.e., latent dimensions like '0', '1', ..., '19'
+    latent_features = df[[col for col in df.columns if col.isdigit()]].copy()
     print(f"[INFO] Using {latent_features.shape[1]} numeric columns for UMAP:")
     print(latent_features.columns.tolist())
 
@@ -133,7 +133,7 @@ def run_umap_analysis(input_path, output_dir, args):
             unique_vals = df[colour_col].unique()
             colour_map = {val: idx for idx, val in enumerate(unique_vals)}
             colours = df[colour_col].map(colour_map)
-            cmap = plt.cm.get_cmap('tab10', len(unique_vals))
+            cmap = colormaps.get_cmap('tab10', len(unique_vals))
         else:
             colours = "grey"
             cmap = None
