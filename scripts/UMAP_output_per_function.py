@@ -42,9 +42,12 @@ import argparse
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.cm as cm
 import umap.umap_ as umap
 import plotly.express as px
 from sklearn.cluster import KMeans
+import numpy as np
 
 def summarise_clusters(df, outdir, compound_columns):
     """Summarise cluster composition by cpd_type and compound metadata columns.
@@ -125,13 +128,23 @@ def run_umap_analysis(input_path, output_dir, args):
         df.to_csv(coords_file, sep='\t', index=False)
 
         plt.figure(figsize=(12, 8))
+
+        if colour_col:
+            unique_vals = df[colour_col].unique()
+            colour_map = {val: idx for idx, val in enumerate(unique_vals)}
+            colours = df[colour_col].map(colour_map)
+            cmap = plt.cm.get_cmap('tab10', len(unique_vals))
+        else:
+            colours = "grey"
+            cmap = None
+
         scatter = plt.scatter(
             df["UMAP1"],
             df["UMAP2"],
             s=5,
             alpha=0.6,
-            c=df[colour_col] if colour_col else "grey",
-            cmap="tab10"
+            c=colours,
+            cmap=cmap
         )
         plt.xlabel("UMAP 1")
         plt.ylabel("UMAP 2")
