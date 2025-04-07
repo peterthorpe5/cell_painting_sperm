@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
-import clipn
+ from clipn.model import CLIPn
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn import set_config
@@ -54,6 +54,7 @@ from cell_painting.process_data import (
 
 
 set_config(transform_output="pandas")
+torch.serialization.add_safe_globals([CLIPn])
 
 def setup_logging(out_dir, experiment):
     """Configure logging with stream and file handlers."""
@@ -638,9 +639,12 @@ def main(args):
         # run on all data, not projected onto the reference ...
         # but the reference is included in all the training
         logger.info("Training and integrating CLIPn on all datasets")
+
         if args.load_model:
+            from clipn.model import CLIPn  
+            torch.serialization.add_safe_globals([CLIPn])
             logger.info(f"Loading pre-trained CLIPn model from: {args.load_model}")
-            model = torch.load(args.load_model)
+            model = torch.load(args.load_model, weights_only=False)
 
             # Standardise and prepare input data
             df_scaled = standardise_numeric_columns_preserving_metadata(combined_df, meta_columns=["cpd_id", "cpd_type", "Library"])
