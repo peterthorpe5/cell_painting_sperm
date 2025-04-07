@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
- from clipn.model import CLIPn
+from clipn.model import CLIPn
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn import set_config
