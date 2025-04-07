@@ -475,6 +475,7 @@ def main(args):
         # Check for model loading
         if args.load_model:
             logger.info(f"Loading pre-trained CLIPn model from: {args.load_model}")
+            torch.serialization.add_safe_globals([CLIPn])
             model = torch.load(args.load_model, weights_only=False)
 
 
