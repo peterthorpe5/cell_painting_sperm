@@ -49,17 +49,7 @@ from sklearn.cluster import KMeans
 import numpy as np
 
 def summarise_clusters(df, outdir, compound_columns):
-    """Summarise cluster composition by cpd_type and compound metadata columns.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame containing UMAP results and metadata.
-    outdir : str
-        Directory to write summary files.
-    compound_columns : list
-        Additional metadata columns to summarise (e.g., compound function).
-    """
+    """Summarise cluster composition by cpd_type and compound metadata columns."""
     if "Cluster" not in df.columns or df["Cluster"].nunique() <= 1:
         return
 
@@ -72,17 +62,7 @@ def summarise_clusters(df, outdir, compound_columns):
         func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
 
 def run_umap_analysis(input_path, output_dir, args):
-    """Perform UMAP projection and optional clustering, saving outputs and plots.
-
-    Parameters
-    ----------
-    input_path : str
-        Path to input TSV containing latent features and metadata.
-    output_dir : str
-        Directory to save all outputs.
-    args : argparse.Namespace
-        Parsed arguments with UMAP and plotting options.
-    """
+    """Perform UMAP projection and optional clustering, saving outputs and plots."""
     os.makedirs(output_dir, exist_ok=True)
 
     df = pd.read_csv(input_path, sep='\t')
@@ -93,7 +73,6 @@ def run_umap_analysis(input_path, output_dir, args):
         df = pd.merge(df, compound_meta, on="cpd_id", how="left")
         compound_columns = [col for col in compound_meta.columns if col != "cpd_id"]
 
-    # Only select columns that are pure digit names, i.e., latent dimensions like '0', '1', ..., '19'
     latent_features = df[[col for col in df.columns if col.isdigit()]].copy()
     print(f"[INFO] Using {latent_features.shape[1]} numeric columns for UMAP:")
     print(latent_features.columns.tolist())
@@ -133,7 +112,7 @@ def run_umap_analysis(input_path, output_dir, args):
             unique_vals = df[colour_col].unique()
             colour_map = {val: idx for idx, val in enumerate(unique_vals)}
             colours = df[colour_col].map(colour_map)
-            cmap = colormaps.get_cmap('tab10', len(unique_vals))
+            cmap = colormaps['tab10']
         else:
             colours = "grey"
             cmap = None
@@ -159,7 +138,7 @@ def run_umap_analysis(input_path, output_dir, args):
         plt.close()
 
         base_hover = ["cpd_id", "cpd_type", "Library"]
-        hover_cols = base_hover + compound_columns
+        hover_cols = [col for col in base_hover + compound_columns if col in df.columns]
 
         fig = px.scatter(
             df,
@@ -183,13 +162,7 @@ def run_umap_analysis(input_path, output_dir, args):
         print(f"Saved coordinates: {coords_file}")
 
 def parse_args():
-    """Parse command-line arguments for UMAP plotting script.
-
-    Returns
-    -------
-    argparse.Namespace
-        Parsed command-line arguments.
-    """
+    """Parse command-line arguments for UMAP plotting script."""
     parser = argparse.ArgumentParser(description="Flexible UMAP Projection for CLIPn Latent Data")
     parser.add_argument("--input", required=True, help="Path to input TSV with latent + metadata")
     parser.add_argument("--output_dir", required=True, help="Directory to save UMAP plot and coordinates")
