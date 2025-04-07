@@ -23,6 +23,8 @@ Command-line arguments:
     --latent_dim        : Dimensionality of latent space (default: 20).
     --lr                : Learning rate for CLIPn (default: 1e-5).
     --epoch             : Number of training epochs (default: 300).
+    --save_model        : If set, save the trained CLIPn model after training.
+    --load_model        : Path to a previously saved CLIPn model to load and reuse.
 
 Logging:
 --------
@@ -39,6 +41,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn import set_config
 import csv
+import torch
 from cell_painting.process_data import (
 
         prepare_data_for_clipn_from_df,
@@ -465,14 +468,50 @@ def main(args):
 
 
         logger.info(f"Training CLIPn on references: {reference_names}")
-        latent_df, cpd_ids, model, \
-                        dataset_key_mapping = run_clipn_integration(reference_df, logger, 
-                                                                    args.clipn_param, 
-                                                                    args.out,
-                                                                    args.experiment,
-                                                                    args.mode,
-                                                                    args.latent_dim, 
-                                                                    args.lr, args.epoch)
+
+
+
+        # Check for model loading
+        if args.load_model:
+            logger.info(f"Loading pre-trained CLIPn model from: {args.load_model}")
+            model = torch.load(args.load_model)
+
+            # Still need to prepare data (e.g. scaling and projection input)
+            df_scaled = standardise_numeric_columns_preserving_metadata(reference_df, meta_columns=["cpd_id", "cpd_type", "Library"])
+            data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
+
+            # Generate latent space without re-training
+            latent_dict = model.predict(data_dict)
+
+            latent_frames = []
+            for i, latent in latent_dict.items():
+                name = dataset_key_mapping[i]
+                df_latent = pd.DataFrame(latent)
+                df_latent.index = pd.MultiIndex.from_product([[name], range(len(df_latent))], names=["Dataset", "Sample"])
+                latent_frames.append(df_latent)
+
+            latent_df = pd.concat(latent_frames)
+
+        else:
+            # Train as before
+            latent_df, cpd_ids, model, dataset_key_mapping = run_clipn_integration(reference_df,
+                                                                                    logger,
+                                                                                    args.clipn_param,
+                                                                                    args.out,
+                                                                                    args.experiment,
+                                                                                    args.mode,
+                                                                                    args.latent_dim,
+                                                                                    args.lr,
+                                                                                    args.epoch
+                                                                                    )
+            
+            if args.save_model:
+                model_path = Path(args.out) / f"{args.experiment}_clipn_model.pt"
+                torch.save(model, model_path)
+                logger.info(f"Trained CLIPn model saved to: {model_path}")
+
+
+
         latent_training_df = latent_df.reset_index()
         latent_training_df = latent_training_df[latent_training_df['Dataset'].isin(reference_names)]
 
@@ -591,22 +630,49 @@ def main(args):
             latent_df = pd.concat([latent_df, latent_query_df.set_index(["Dataset", "Sample"])])
             cpd_ids.update(query_cpd_ids)
 
-
-
-
     else:
         # run on all data, not projected onto the reference ...
         # but the reference is included in all the training
         logger.info("Training and integrating CLIPn on all datasets")
-        latent_df, cpd_ids, model, \
-            dataset_key_mapping = run_clipn_integration(combined_df, 
-                                                   logger, 
-                                                   args.clipn_param, 
-                                                   args.out, 
-                                                   args.experiment,
-                                                   args.mode,
-                                                   args.latent_dim, 
-                                                   args.lr, args.epoch)
+        if args.load_model:
+            logger.info(f"Loading pre-trained CLIPn model from: {args.load_model}")
+            model = torch.load(args.load_model)
+
+            # Standardise and prepare input data
+            df_scaled = standardise_numeric_columns_preserving_metadata(combined_df, meta_columns=["cpd_id", "cpd_type", "Library"])
+            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
+
+            # Predict latent space using loaded model
+            latent_dict = model.predict(data_dict)
+
+            latent_frames = []
+            for i, latent in latent_dict.items():
+                name = dataset_key_mapping[i]
+                df_latent = pd.DataFrame(latent)
+                df_latent.index = pd.MultiIndex.from_product([[name], range(len(df_latent))], names=["Dataset", "Sample"])
+                latent_frames.append(df_latent)
+
+            latent_df = pd.concat(latent_frames)
+
+        else:
+            logger.info("Training and integrating CLIPn on all datasets")
+            latent_df, cpd_ids, model, \
+                dataset_key_mapping = run_clipn_integration(combined_df, 
+                                                    logger, 
+                                                    args.clipn_param, 
+                                                    args.out, 
+                                                    args.experiment,
+                                                    args.mode,
+                                                    args.latent_dim, 
+                                                    args.lr, args.epoch)
+            
+            if args.save_model:
+                model_path = Path(args.out) / f"{args.experiment}_clipn_model.pt"
+                torch.save(model, model_path)
+                logger.info(f"Trained CLIPn model saved to: {model_path}")
+
+    
+
         
 
     latent_df = latent_df.reset_index()
@@ -686,6 +752,15 @@ if __name__ == "__main__":
                         help="Learning rate for CLIPn (default: 1e-5)")
     parser.add_argument("--epoch", type=int, default=300,
                         help="Number of training epochs (default: 300)")
+    parser.add_argument("--save_model",
+                        action="store_true",
+                        help="If set, save the trained CLIPn model after training.")
+
+    parser.add_argument("--load_model",
+                        type=str,
+                        default=None,
+                        help="Path to a previously saved CLIPn model (for skipping training and directly projecting query datasets).")
+
    
     parser.add_argument("--reference_names", nargs='+', default=["reference1", "reference2"],
                     help="List of dataset names to use for training the CLIPn model.")
