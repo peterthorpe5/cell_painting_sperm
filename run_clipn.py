@@ -42,6 +42,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn import set_config
 import csv
 import torch
+import torch.serialization
 from cell_painting.process_data import (
 
         prepare_data_for_clipn_from_df,
@@ -474,7 +475,8 @@ def main(args):
         # Check for model loading
         if args.load_model:
             logger.info(f"Loading pre-trained CLIPn model from: {args.load_model}")
-            model = torch.load(args.load_model)
+            model = torch.load(args.load_model, weights_only=False)
+
 
             # Still need to prepare data (e.g. scaling and projection input)
             df_scaled = standardise_numeric_columns_preserving_metadata(reference_df, meta_columns=["cpd_id", "cpd_type", "Library"])
@@ -750,8 +752,8 @@ if __name__ == "__main__":
                         help="Dimensionality of latent space (default: 20)")
     parser.add_argument("--lr", type=float, default=1e-5,
                         help="Learning rate for CLIPn (default: 1e-5)")
-    parser.add_argument("--epoch", type=int, default=300,
-                        help="Number of training epochs (default: 300)")
+    parser.add_argument("--epoch", type=int, default=500,
+                        help="Number of training epochs (default: 500)")
     parser.add_argument("--save_model",
                         action="store_true",
                         help="If set, save the trained CLIPn model after training.")
