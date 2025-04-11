@@ -172,6 +172,8 @@ if __name__ == "__main__":
     logger.info(f"Initial data shape: {df.shape}")
 
     df = standardise_metadata_columns(df)
+    df = ensure_multiindex(df, logger=logger, dataset_name=args.experiment)
+
 
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
