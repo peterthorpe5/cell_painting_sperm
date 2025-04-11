@@ -182,16 +182,34 @@ if __name__ == "__main__":
     df.dropna(axis=1, how='all', inplace=True)
 
     # === Imputation ===
-    imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
-    # Refresh numeric_cols to reflect columns still present after dropna
-    numeric_cols = [col for col in numeric_cols if col in df.columns]
+    logger.info("Starting imputation.")
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-    if not numeric_cols:
-        logger.error("No numeric columns available for imputation after removing all-NaN columns.")
-        sys.exit(1)
-    # Proceed with imputation
-    df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
-    logger.info(f"Imputation ({args.impute}) completed.")
+    # Backup index if it exists
+    index_backup = df.index.to_frame(index=False) if isinstance(df.index, pd.MultiIndex) else None
+
+    # Reset index temporarily
+    df = df.reset_index(drop=True)
+
+    # Extract numeric part
+    numeric_df = df[numeric_cols].copy()
+    imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
+    imputed_numeric_df = imputer.fit_transform(numeric_df)
+
+    # Convert back to DataFrame
+    numeric_df = pd.DataFrame(imputed_numeric_df, columns=numeric_cols)
+
+    # Merge numeric and non-numeric
+    non_numeric_df = df.drop(columns=numeric_cols)
+    df = pd.concat([non_numeric_df, numeric_df], axis=1)
+
+    # Restore MultiIndex
+    if index_backup is not None:
+        df = pd.concat([index_backup, df], axis=1)
+        df.set_index(["cpd_id", "Library", "cpd_type"], inplace=True)
+        logger.info(f"{args.experiment}: MultiIndex restored using columns ('cpd_id', 'Library', 'cpd_type')")
+
+    logger.info(f"Imputation ({args.impute}) completed. Final shape: {df.shape}")
 
     # === Optional Annotation Merge ===
     if args.annotation_file:
