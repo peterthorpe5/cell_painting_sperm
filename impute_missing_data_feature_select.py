@@ -57,7 +57,8 @@ from cell_painting.process_data import (
     variance_threshold_selector,
     correlation_filter,
     load_annotation,
-    standardise_annotation_columns
+    standardise_annotation_columns,
+    ensure_multiindex
 )
 
 
