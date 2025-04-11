@@ -310,9 +310,9 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
 
     # Drop known non-feature metadata columns
     filter_cols = df.columns[df.columns.str.contains(
-        r"Source_Plate_Barcode|COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
+        r"COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
         r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_[XYZ]|"
-        r"no_|fn_|Source_Well|Source_Plate_Well|Source_Well|Well_Metadata", case=False
+        r"no_|fn_|Source_Well|Source_Plate_Well|Source_Well", case=False
     )]
 
     df = df.drop(columns=filter_cols, errors="ignore")
@@ -322,6 +322,9 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     df_numeric = df[numeric_cols]
 
     # Group by cpd_id and Library while preserving as index
+    # Group by all index levels (to keep Plate_Metadata and Well_Metadata)
+    grouped = df_numeric.groupby(level=df.index.names).mean()
+
     grouped = df_numeric.groupby(["cpd_id", "Library"], as_index=True).mean()
 
     return grouped
