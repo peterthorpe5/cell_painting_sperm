@@ -287,7 +287,6 @@ def standardise_metadata_columns(df, logger=None, dataset_name=None):
     return df
 
 
-
 def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Groups data by cpd_id and Library, averages numeric features,
@@ -317,7 +316,6 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
         r"no_|fn_|Source_Well|Source_Plate_Well|Source_Well", case=False
     )]
 
-    
     df = df.drop(columns=filter_cols, errors="ignore")
 
     # Preserve Plate_Metadata and Well_Metadata before grouping
