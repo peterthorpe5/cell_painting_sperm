@@ -60,6 +60,83 @@ from cell_painting.process_data import (
     standardise_annotation_columns
 )
 
+def merge_annotation_by_plate_and_well_and_cpd(
+    df: pd.DataFrame,
+    annotation_file: str,
+    logger: logging.Logger,
+    drop_all_na_columns: bool = True
+) -> pd.DataFrame:
+    """
+    Merge annotation data into a Cell Painting dataframe using Plate_Metadata,
+    Well_Metadata, and optionally cpd_id if available in both dataframes.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Main dataframe with Plate_Metadata, Well_Metadata, and cpd_id columns.
+
+    annotation_file : str
+        Path to annotation CSV with at least 'Plate' and 'Well' columns.
+
+    logger : logging.Logger
+        Logger for status and diagnostics.
+
+    drop_all_na_columns : bool, optional
+        If True, drop annotation columns that are entirely NaN.
+
+    Returns
+    -------
+    pd.DataFrame
+        Annotated dataframe with merged metadata.
+    """
+    try:
+        annotation_df = pd.read_csv(annotation_file, sep=None, engine="python")
+        logger.info(f"Loaded annotation file: {annotation_file} with shape {annotation_df.shape}")
+
+        # Rename columns to standard names
+        annotation_df.rename(columns={
+            "Plate": "Plate_Metadata",
+            "Well": "Well_Metadata"
+        }, inplace=True)
+
+        # Clean string formatting
+        for col in ["Plate_Metadata", "Well_Metadata", "cpd_id"]:
+            if col in annotation_df.columns:
+                annotation_df[col] = annotation_df[col].astype(str).str.strip()
+        for col in ["Plate_Metadata", "Well_Metadata", "cpd_id"]:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
+
+        # Determine merge keys
+        merge_keys = ["Plate_Metadata", "Well_Metadata"]
+        if "cpd_id" in df.columns and "cpd_id" in annotation_df.columns:
+            merge_keys.append("cpd_id")
+            logger.info("Using Plate, Well, and cpd_id as merge keys.")
+        else:
+            logger.info("Using only Plate and Well as merge keys (cpd_id not present in both).")
+
+        # Sanity check overlap
+        for key in merge_keys:
+            shared = set(df[key]).intersection(annotation_df[key])
+            logger.info(f"Shared '{key}' values: {len(shared)} / {df[key].nunique()} in main data")
+
+        # Perform merge
+        df_annotated = df.merge(annotation_df, on=merge_keys, how="left")
+        logger.info(f"Merged annotation. Final shape: {df_annotated.shape}")
+
+        if drop_all_na_columns:
+            pre_drop = df_annotated.shape[1]
+            df_annotated.dropna(axis=1, how="all", inplace=True)
+            post_drop = df_annotated.shape[1]
+            logger.info(f"Dropped {pre_drop - post_drop} fully-empty columns.")
+
+        return df_annotated
+
+    except Exception as e:
+        logger.error(f"Annotation merge failed: {e}")
+        return df
+
+
 
 if sys.version_info[:1] != (3,):
     # e.g. sys.version_info(major=3, minor=9, micro=7,
@@ -192,17 +269,8 @@ if __name__ == "__main__":
 
     # === Optional Annotation Merge ===
     if args.annotation_file:
-        try:
-            annotation_df = pd.read_csv(args.annotation_file)
-            logger.info(f"Annotation file loaded: {args.annotation_file}")
-            annotation_df = standardise_annotation_columns(annotation_df)
+        df = merge_annotation_by_plate_and_well_and_cpd(df, args.annotation_file, logger)
 
-            # Set appropriate index for joining
-            annotation_df = annotation_df.set_index(["Plate_Metadata", "Well_Metadata"])
-            df = df.join(annotation_df, how="inner")
-            logger.info(f"Data merged with annotation. New shape: {df.shape}")
-        except Exception as e:
-            logger.warning(f"Annotation file could not be processed: {e}")
 
 
     # === Save ungrouped version after correlation + variance filter, keeping metadata ===
@@ -230,7 +298,6 @@ if __name__ == "__main__":
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
     try:
-        from cell_painting.process_data import group_and_filter_data
 
         required_cols = ["cpd_id", "Library", "cpd_type"]
         if not isinstance(df.index, pd.MultiIndex):
