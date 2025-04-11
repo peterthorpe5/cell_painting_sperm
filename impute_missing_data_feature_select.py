@@ -58,7 +58,8 @@ from cell_painting.process_data import (
     correlation_filter,
     load_annotation,
     standardise_annotation_columns,
-    ensure_multiindex
+    ensure_multiindex,
+    restore_multiindex
 )
 
 
