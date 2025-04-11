@@ -303,13 +303,15 @@ if __name__ == "__main__":
         metadata_cols = [col for col in metadata_cols_to_preserve if col in df.columns]
         metadata_df = df[metadata_cols].copy()
         feature_df = df.drop(columns=metadata_cols, errors="ignore").select_dtypes(include=[np.number]).copy()
-        logger.debug(f"Preserved metadata columns: {metadata_df.columns.tolist()}")
-        logger.debug(f"Feature columns after filtering: {filtered_features.columns.tolist()}")
+
 
 
         # Apply correlation and variance filters
         filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
         filtered_features = variance_threshold_selector(filtered_features)
+
+        logger.debug(f"Preserved metadata columns: {metadata_df.columns.tolist()}")
+        logger.debug(f"Feature columns after filtering: {filtered_features.columns.tolist()}")
 
         # Join metadata back
         df_ungrouped_filtered = pd.concat([metadata_df, filtered_features], axis=1)
