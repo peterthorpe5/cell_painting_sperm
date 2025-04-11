@@ -290,7 +290,9 @@ def standardise_metadata_columns(df, logger=None, dataset_name=None):
 
 def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Groups data by cpd_id and Library, drops known metadata columns, and averages numeric features.
+    Groups data by cpd_id and Library, averages numeric features,
+    and preserves a representative Plate_Metadata and Well_Metadata
+    for potential annotation use later.
 
     Parameters
     ----------
@@ -308,26 +310,32 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df.index, pd.MultiIndex):
         raise ValueError("Expected a MultiIndex DataFrame with ['cpd_id', 'Library', 'cpd_type'].")
 
-    # Drop known non-feature metadata columns
+    # Drop noisy metadata columns (but keep Plate_Metadata and Well_Metadata)
     filter_cols = df.columns[df.columns.str.contains(
         r"COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
-        r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_[XYZ]|"
+        r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate$|Well$|Field|Center_[XYZ]|"
         r"no_|fn_|Source_Well|Source_Plate_Well|Source_Well", case=False
     )]
 
+    
     df = df.drop(columns=filter_cols, errors="ignore")
 
-    # Select numeric columns for grouping
+    # Preserve Plate_Metadata and Well_Metadata before grouping
+    meta_df = df.reset_index()[["cpd_id", "Library", "Plate_Metadata", "Well_Metadata"]].drop_duplicates()
+    meta_df = meta_df.groupby(["cpd_id", "Library"], as_index=False).first()
+    meta_df.set_index(["cpd_id", "Library"], inplace=True)
+
+    # Group numeric features
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df_numeric = df[numeric_cols]
-
-    # Group by cpd_id and Library while preserving as index
-    # Group by all index levels (to keep Plate_Metadata and Well_Metadata)
-    grouped = df_numeric.groupby(level=df.index.names).mean()
-
     grouped = df_numeric.groupby(["cpd_id", "Library"], as_index=True).mean()
 
+    # Join metadata back (Plate_Metadata and Well_Metadata)
+    grouped = grouped.join(meta_df, how="left")
+
     return grouped
+
+
 
 
 

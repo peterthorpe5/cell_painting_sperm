@@ -94,10 +94,20 @@ def merge_annotation_by_plate_and_well_and_cpd(
         logger.info(f"Loaded annotation file: {annotation_file} with shape {annotation_df.shape}")
 
         # Rename columns to standard names
-        annotation_df.rename(columns={
-            "Plate": "Plate_Metadata",
-            "Well": "Well_Metadata"
-        }, inplace=True)
+        # Flexible renaming for Plate and Well
+        plate_cols = [col for col in annotation_df.columns if col.strip().lower() == "plate"]
+        well_cols = [col for col in annotation_df.columns if col.strip().lower() == "well"]
+
+        if plate_cols:
+            annotation_df.rename(columns={plate_cols[0]: "Plate_Metadata"}, inplace=True)
+        else:
+            raise KeyError("Could not find a Plate column in annotation file")
+
+        if well_cols:
+            annotation_df.rename(columns={well_cols[0]: "Well_Metadata"}, inplace=True)
+        else:
+            raise KeyError("Could not find a Well column in annotation file")
+
 
         # Clean string formatting
         for col in ["Plate_Metadata", "Well_Metadata", "cpd_id"]:
@@ -123,6 +133,9 @@ def merge_annotation_by_plate_and_well_and_cpd(
         # Perform merge
         df_annotated = df.merge(annotation_df, on=merge_keys, how="left")
         logger.info(f"Merged annotation. Final shape: {df_annotated.shape}")
+        added_cols = set(df_annotated.columns) - set(df.columns)
+        logger.info(f"Added annotation columns: {sorted(added_cols)}")
+
 
         if drop_all_na_columns:
             pre_drop = df_annotated.shape[1]
