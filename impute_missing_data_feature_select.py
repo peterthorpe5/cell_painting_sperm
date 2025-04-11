@@ -263,7 +263,14 @@ if __name__ == "__main__":
 
     logger.info(f"Initial data shape: {df.shape}")
 
-    df = standardise_metadata_columns(df)
+    logger.info("Calling standardise_metadata_columns()")
+    try:
+        df = standardise_metadata_columns(df)
+        logger.info("standardise_metadata_columns() completed.")
+    except Exception as e:
+        logger.error(f"standardise_metadata_columns() failed: {e}")
+        sys.exit(1)
+
 
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -354,9 +361,10 @@ if __name__ == "__main__":
     df_selected = correlation_filter(numeric_df, threshold=args.correlation_threshold)
     df_selected = variance_threshold_selector(df_selected)
 
-    # Optional: reattach Plate_Metadata and Well_Metadata (and other metadata) if needed
-    for col in ["Plate_Metadata", "Well_Metadata"]:
-        if col in grouped_filtered_df.columns:
+    # reattach Plate_Metadata and Well_Metadata (and other metadata) if needed
+
+    for col in metadata_cols_to_preserve:
+        if col in grouped_filtered_df.columns and col not in df_selected.columns:
             df_selected[col] = grouped_filtered_df[col]
 
     logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
