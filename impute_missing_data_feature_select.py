@@ -205,9 +205,7 @@ if __name__ == "__main__":
 
     # Restore MultiIndex
     if index_backup is not None:
-        df = pd.concat([index_backup, df], axis=1)
-        df.set_index(["cpd_id", "Library", "cpd_type"], inplace=True)
-        logger.info(f"{args.experiment}: MultiIndex restored using columns ('cpd_id', 'Library', 'cpd_type')")
+        df = restore_multiindex(df, index_backup=index_backup, dataset_name=args.experiment)
 
     logger.info(f"Imputation ({args.impute}) completed. Final shape: {df.shape}")
 
