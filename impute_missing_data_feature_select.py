@@ -212,8 +212,18 @@ if __name__ == "__main__":
     logger.info("Creating a version of the data with correlation and variance filtering before grouping.")
     try:
         # Identify metadata columns (non-numeric)
-        metadata_df = df.select_dtypes(exclude=[np.number]).copy()
-        feature_df = df.select_dtypes(include=[np.number]).copy()
+        # Explicitly preserve known metadata (including those possibly numeric)
+        metadata_cols_to_preserve = [
+            "cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"
+        ]
+        metadata_cols = [col for col in metadata_cols_to_preserve if col in df.columns]
+        metadata_df = df[metadata_cols].copy()
+
+        # Drop only those columns explicitly
+        feature_df = df.drop(columns=metadata_cols, errors="ignore").select_dtypes(include=[np.number]).copy()
+
+        logger.debug(f"Preserved metadata columns: {metadata_df.columns.tolist()}")
+        logger.debug(f"Filtered features for ungrouped output: {feature_df.columns.tolist()}")
 
         # Apply correlation and variance filters
         filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
@@ -223,7 +233,10 @@ if __name__ == "__main__":
         df_ungrouped_filtered = pd.concat([metadata_df, filtered_features], axis=1)
 
         ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.csv"
+        # Ensure MultiIndex is preserved in output
+        df_ungrouped_filtered = df_ungrouped_filtered.reset_index()
         df_ungrouped_filtered.to_csv(ungrouped_filtered_path, index=False)
+
         logger.info(f"Ungrouped, correlation- and variance-filtered data (with metadata) saved to {ungrouped_filtered_path}")
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
