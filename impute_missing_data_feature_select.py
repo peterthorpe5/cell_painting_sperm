@@ -211,30 +211,35 @@ if __name__ == "__main__":
     # === Save ungrouped version after correlation + variance filter, keeping metadata ===
     logger.info("Creating a version of the data with correlation and variance filtering before grouping.")
     try:
-        # Extract metadata from MultiIndex (if present)
+        # Restore MultiIndex as columns
         if isinstance(df.index, pd.MultiIndex):
             index_df = df.index.to_frame(index=False)
             df = df.reset_index(drop=True)
-        else:
-            index_df = pd.DataFrame()
+            df = pd.concat([index_df, df], axis=1)
 
-        # Preserve essential metadata columns if they exist
-        metadata_cols_to_preserve = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+        # Explicitly preserve metadata columns
+        metadata_cols_to_preserve = [
+            "cpd_id", "cpd_type", "Library",
+            "Plate_Metadata", "Well_Metadata"
+        ]
         metadata_cols = [col for col in metadata_cols_to_preserve if col in df.columns]
         metadata_df = df[metadata_cols].copy()
 
-        # Filter numeric features
+        # Debug: Check for blank or missing cpd_id
+        if metadata_df["cpd_id"].isnull().any() or (metadata_df["cpd_id"] == "").any():
+            logger.warning("Some cpd_id values are blank or null in the metadata.")
+
+        # Select numeric columns only for feature filtering
         feature_df = df.select_dtypes(include=[np.number]).copy()
 
-        # Apply correlation and variance filtering
+        # Apply correlation and variance filters
         filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
         filtered_features = variance_threshold_selector(filtered_features)
 
-        # Combine index-derived metadata if present
-        if not index_df.empty:
-            metadata_df = pd.concat([index_df, metadata_df], axis=1)
+        logger.debug(f"Preserved metadata columns: {metadata_df.columns.tolist()}")
+        logger.debug(f"Filtered feature columns: {filtered_features.columns.tolist()}")
 
-        # Final ungrouped result
+        # Join metadata and features
         df_ungrouped_filtered = pd.concat([metadata_df, filtered_features], axis=1)
 
         ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.csv"
