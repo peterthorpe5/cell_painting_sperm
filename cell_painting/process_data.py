@@ -1084,46 +1084,33 @@ def restore_multiindex(imputed_df, index_backup, dataset_name):
     Parameters
     ----------
     imputed_df : pd.DataFrame
-        The imputed dataset where the MultiIndex needs to be restored.
+        The imputed dataset.
     index_backup : pd.DataFrame
-        Backup of the original MultiIndex (must contain 'cpd_id', 'Library', 'cpd_type').
+        Original index as a DataFrame.
     dataset_name : str
-        Name of the dataset for logging (e.g., "experiment", "stb").
+        Name for logging.
 
     Returns
     -------
     pd.DataFrame
-        The dataset with the MultiIndex properly restored.
+        Dataset with MultiIndex restored.
     """
-    if index_backup is not None and imputed_df is not None:
-        # Ensure index_backup is a DataFrame with the necessary columns
-        if isinstance(index_backup, pd.MultiIndex):
-            index_backup = index_backup.to_frame(index=False)
-
-        # Ensure the backup contains the required columns
-        required_cols = {"cpd_id", "Library", "cpd_type"}
-        missing_cols = required_cols - set(index_backup.columns)
-        if missing_cols:
-            logger.error(f"Missing columns in index_backup for {dataset_name}: {missing_cols}")
-            return imputed_df  # Return unchanged if we can't restore properly
-
-        # Ensure alignment: Trim to the number of available rows
-        common_rows = min(len(imputed_df), len(index_backup))
-        if common_rows == 0:
-            logger.warning(f"⚠️ No overlapping rows found between imputation and original index for {dataset_name}_data_imputed!")
-        else:
-            # Trim both DataFrames to ensure correct row count
-            index_backup = index_backup.iloc[:common_rows].reset_index(drop=True)
-            imputed_df = imputed_df.reset_index(drop=True)
-
-            # Join safely, ensuring all three index columns are restored
-            imputed_df = index_backup.join(imputed_df)
-            imputed_df = imputed_df.set_index(["cpd_id", "Library", "cpd_type"])
-
-            logger.info(f"Successfully restored MultiIndex for {dataset_name}_data_imputed. Final shape: {imputed_df.shape}")
-
+    if imputed_df is None or index_backup is None:
+        logger.error(f"[{dataset_name}] Cannot restore MultiIndex: input is None.")
         return imputed_df
-    else:
-        logger.error(f"Failed to restore MultiIndex for {dataset_name}_data_imputed! Check backup index.")
-        return imputed_df  # Return unchanged if restoration fails
 
+    if isinstance(index_backup, pd.MultiIndex):
+        index_backup = index_backup.to_frame(index=False)
+
+    # Ensure row alignment
+    if len(imputed_df) != len(index_backup):
+        logger.warning(f"[{dataset_name}] Row mismatch during index restore: {len(imputed_df)} vs {len(index_backup)}. Will align to min length.")
+        min_len = min(len(imputed_df), len(index_backup))
+        imputed_df = imputed_df.iloc[:min_len].reset_index(drop=True)
+        index_backup = index_backup.iloc[:min_len].reset_index(drop=True)
+
+    imputed_df = pd.concat([index_backup, imputed_df.reset_index(drop=True)], axis=1)
+    imputed_df.set_index(["cpd_id", "Library", "cpd_type"], inplace=True)
+
+    logger.info(f"Successfully restored MultiIndex for {dataset_name}. Shape: {imputed_df.shape}")
+    return imputed_df

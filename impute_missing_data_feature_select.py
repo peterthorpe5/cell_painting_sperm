@@ -176,7 +176,10 @@ if __name__ == "__main__":
     df = standardise_metadata_columns(df)
     df = ensure_multiindex(df, logger=logger, dataset_name=args.experiment)
 
-
+    if df.index.isnull().any():
+        logger.warning(f" MultiIndex contains nulls after restore: {df.index[df.index.isnull().any(axis=1)]}")
+        df = df[~df.index.to_frame(index=False).isnull().any(axis=1)]
+        
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
@@ -189,8 +192,10 @@ if __name__ == "__main__":
     # Backup index if it exists
     index_backup = df.index.to_frame(index=False) if isinstance(df.index, pd.MultiIndex) else None
 
-    # Reset index temporarily
-    df = df.reset_index(drop=True)
+
+    # Reset index without dropping, so we preserve cpd_id etc. as columns
+    df = df.reset_index(drop=False)
+
 
     # Extract numeric part
     numeric_df = df[numeric_cols].copy()
@@ -232,11 +237,11 @@ if __name__ == "__main__":
             df = df.reset_index()
         
         if df["cpd_id"].isnull().any() or (df["cpd_id"] == "").any():
-            logger.warning("⚠️ After reset_index: Some cpd_id values are blank or null — check for index misalignment or data loss.")
+            logger.warning(" After reset_index: Some cpd_id values are blank or null — check for index misalignment or data loss.")
 
         blank_rows = df["cpd_id"].isnull() | (df["cpd_id"] == "")
         if blank_rows.any():
-            logger.warning(f"⚠️ After reset_index: {blank_rows.sum()} rows have blank or null cpd_id values — check for index misalignment or trimming.")
+            logger.warning(f" After reset_index: {blank_rows.sum()} rows have blank or null cpd_id values — check for index misalignment or trimming.")
 
 
 
