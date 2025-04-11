@@ -228,11 +228,17 @@ if __name__ == "__main__":
     # === Save ungrouped version after correlation + variance filter, keeping metadata ===
     logger.info("Creating a version of the data with correlation and variance filtering before grouping.")
     try:
-        # Restore MultiIndex as columns
         if isinstance(df.index, pd.MultiIndex):
-            index_df = df.index.to_frame(index=False)
-            df = df.reset_index(drop=True)
-            df = pd.concat([index_df, df], axis=1)
+            df = df.reset_index()
+        
+        if df["cpd_id"].isnull().any() or (df["cpd_id"] == "").any():
+            logger.warning("⚠️ After reset_index: Some cpd_id values are blank or null — check for index misalignment or data loss.")
+
+        blank_rows = df["cpd_id"].isnull() | (df["cpd_id"] == "")
+        if blank_rows.any():
+            logger.warning(f"⚠️ After reset_index: {blank_rows.sum()} rows have blank or null cpd_id values — check for index misalignment or trimming.")
+
+
 
         # Explicitly preserve metadata columns
         metadata_cols_to_preserve = [
@@ -269,7 +275,6 @@ if __name__ == "__main__":
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
     try:
-        from cell_painting.process_data import group_and_filter_data
 
         required_cols = ["cpd_id", "Library", "cpd_type"]
         if not isinstance(df.index, pd.MultiIndex):
