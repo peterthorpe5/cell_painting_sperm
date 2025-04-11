@@ -95,7 +95,9 @@ def merge_annotation_by_plate_and_well_and_cpd(
 
         # Rename columns to standard names
         # Flexible renaming for Plate and Well
+        logger.debug(f"Annotation file columns: {annotation_df.columns.tolist()}")
         plate_cols = [col for col in annotation_df.columns if col.strip().lower() == "plate"]
+
         well_cols = [col for col in annotation_df.columns if col.strip().lower() == "well"]
 
         if plate_cols:
@@ -293,8 +295,17 @@ if __name__ == "__main__":
     logger.info("Creating a version of the data with correlation and variance filtering before grouping.")
     try:
         # Identify metadata columns (non-numeric)
-        metadata_df = df.select_dtypes(exclude=[np.number]).copy()
-        feature_df = df.select_dtypes(include=[np.number]).copy()
+        # Explicitly preserve metadata columns to avoid accidental drops
+        metadata_cols_to_preserve = [
+            "cpd_id", "cpd_type", "Library",
+            "Plate_Metadata", "Well_Metadata"
+        ]
+        metadata_cols = [col for col in metadata_cols_to_preserve if col in df.columns]
+        metadata_df = df[metadata_cols].copy()
+        feature_df = df.drop(columns=metadata_cols, errors="ignore").select_dtypes(include=[np.number]).copy()
+        logger.debug(f"Preserved metadata columns: {metadata_df.columns.tolist()}")
+        logger.debug(f"Feature columns after filtering: {filtered_features.columns.tolist()}")
+
 
         # Apply correlation and variance filters
         filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
@@ -322,6 +333,9 @@ if __name__ == "__main__":
             if missing:
                 raise ValueError(f"Missing required columns for grouping: {missing}")
             df.set_index(required_cols, inplace=True)
+
+        if "cpd_id" not in df.columns:
+            logger.warning("cpd_id missing before grouping — will cause failure!")
 
         grouped_filtered_df = group_and_filter_data(df)
         grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
