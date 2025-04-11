@@ -266,7 +266,10 @@ if __name__ == "__main__":
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
-    df.dropna(axis=1, how='all', inplace=True)
+    # Only drop numeric columns that are all NaN, to preserve metadata like cpd_id
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    df.dropna(axis=1, how='all', subset=numeric_cols, inplace=True)
 
     # === Imputation ===
     imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
@@ -314,6 +317,7 @@ if __name__ == "__main__":
 
         required_cols = ["cpd_id", "Library", "cpd_type"]
         if not isinstance(df.index, pd.MultiIndex):
+            logger.debug(f"Columns available before grouping: {df.columns.tolist()}")
             missing = [col for col in required_cols if col not in df.columns]
             if missing:
                 raise ValueError(f"Missing required columns for grouping: {missing}")
@@ -328,9 +332,17 @@ if __name__ == "__main__":
         logger.error(f"Error during grouping and filtering: {e}")
         grouped_filtered_df = df.copy()
 
-    # === Feature Selection ===
-    df_selected = correlation_filter(grouped_filtered_df, threshold=args.correlation_threshold)
+    # === Feature Selection ==
+    # need to remove the non numeric cols for this
+    numeric_df = grouped_filtered_df.select_dtypes(include=[np.number])
+    df_selected = correlation_filter(numeric_df, threshold=args.correlation_threshold)
     df_selected = variance_threshold_selector(df_selected)
+
+    # Optional: reattach Plate_Metadata and Well_Metadata (and other metadata) if needed
+    for col in ["Plate_Metadata", "Well_Metadata"]:
+        if col in grouped_filtered_df.columns:
+            df_selected[col] = grouped_filtered_df[col]
+
     logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
 
     # === Save Final Cleaned Output ===
