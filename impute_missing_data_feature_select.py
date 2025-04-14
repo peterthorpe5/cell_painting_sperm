@@ -343,17 +343,16 @@ if __name__ == "__main__":
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
 
-
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
     try:
-
         required_cols = ["cpd_id", "Library", "cpd_type"]
         if not isinstance(df.index, pd.MultiIndex):
             missing = [col for col in required_cols if col not in df.columns]
             if missing:
                 raise ValueError(f"Missing required columns for grouping: {missing}")
-            df.set_index(required_cols, inplace=True)
+            df.set_index(required_cols, inplace=True, drop=False)
+
 
         grouped_filtered_df = group_and_filter_data(df)
         grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
@@ -365,11 +364,30 @@ if __name__ == "__main__":
         grouped_filtered_df = df.copy()
 
     # === Feature Selection ===
-    df_selected = correlation_filter(grouped_filtered_df, threshold=args.correlation_threshold)
-    df_selected = variance_threshold_selector(df_selected)
-    logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
+    logger.info("Starting feature selection from grouped and filtered data.")
+    try:
+        # Explicitly define metadata columns
+        metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+        metadata_df = grouped_filtered_df[metadata_cols].copy()
+
+        # Select only numeric feature columns
+        feature_df = grouped_filtered_df.drop(columns=metadata_cols, errors='ignore')
+        feature_df = feature_df.select_dtypes(include=[np.number])
+
+        # Apply filters
+        filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
+        filtered_features = variance_threshold_selector(filtered_features)
+
+        # Re-join metadata
+        df_selected = pd.concat([metadata_df, filtered_features], axis=1)
+        logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
+    except Exception as e:
+        logger.error(f"Feature selection failed: {e}")
+        df_selected = grouped_filtered_df.copy()
 
     # === Save Final Cleaned Output ===
     output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.csv"
-    df_selected.to_csv(output_path)
+    df_selected.to_csv(output_path, index=False)
     logger.info(f"Final cleaned data saved to {output_path}")
+
+ 
