@@ -345,41 +345,40 @@ if __name__ == "__main__":
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
 
+
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
-        missing = [col for col in required_cols if col not in df.columns]
+        missing = [col for col in required_cols if col not in df.columns and col not in df.index.names]
         if missing:
             raise ValueError(f"Missing required columns for grouping: {missing}")
 
-        # Remove 'cpd_type' from index if it's already part of it and we want to reset
+        # Reset index only if needed (avoid duplicate index levels)
         if isinstance(df.index, pd.MultiIndex):
-            if set(required_cols).issubset(df.index.names):
-                logger.debug("Resetting MultiIndex before re-setting index for grouping.")
+            if all(name in df.index.names for name in required_cols):
+                logger.debug("Resetting MultiIndex to avoid duplication.")
                 df = df.reset_index()
 
-        # Avoid duplicate index insertions
-        df = df.drop(columns=[col for col in required_cols if col in df.columns and col in df.index.names], errors="ignore")
-        # Only reset index if not already MultiIndex with exact levels
-        if not isinstance(df.index, pd.MultiIndex) or list(df.index.names) != required_cols:
-            df.set_index(required_cols, inplace=True, drop=False)
+        # Drop from columns if already in index to prevent duplication
+        for col in required_cols:
+            if col in df.columns and col in df.index.names:
+                df.drop(columns=col, inplace=True)
 
+        # Now set index
+        df.set_index(required_cols, inplace=True, drop=False)
 
         grouped_filtered_df = group_and_filter_data(df)
         grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
         grouped_filtered_df.to_csv(grouped_filtered_file)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
-    
+
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
         grouped_filtered_df = df.copy()
-
         grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
         grouped_filtered_df.to_csv(grouped_filtered_file, index=False)
         logger.warning(f"Saved fallback grouped data to {grouped_filtered_file} despite grouping error.")
-
-
 
 
     # === Feature Selection ===
