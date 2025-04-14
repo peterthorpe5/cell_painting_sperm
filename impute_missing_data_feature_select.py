@@ -361,43 +361,40 @@ if __name__ == "__main__":
 
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
-
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
+        missing = [col for col in required_cols if col not in df.columns and col not in df.index.names]
+        if missing:
+            raise ValueError(f"Missing required columns for grouping: {missing}")
 
-        # Ensure required columns exist before attempting to set index
-        for col in required_cols:
-            if col not in df.columns:
-                raise ValueError(f"Missing required column '{col}' before grouping.")
-
-        # Reset index to remove any lingering index levels
+        # Reset index if MultiIndex contains the grouping columns
         if isinstance(df.index, pd.MultiIndex):
-            logger.debug("Resetting MultiIndex before grouping.")
-            df = df.reset_index()
+            if all(name in df.index.names for name in required_cols):
+                logger.debug("Resetting MultiIndex to avoid duplication.")
+                df = df.reset_index()
 
-        # Drop duplicate columns that are also going to be in the new index
-        duplicate_cols = [col for col in required_cols if col in df.columns and col in df.index.names]
-        if duplicate_cols:
-            logger.debug(f"Dropping duplicate columns already in index: {duplicate_cols}")
-            df.drop(columns=duplicate_cols, inplace=True)
+        #  Insert this block right here:
+        for col in required_cols:
+            if col in df.columns and col in df.index.names:
+                df.drop(columns=col, inplace=True)
 
-        # Finally set the new MultiIndex
+        # Set MultiIndex for grouping
         df.set_index(required_cols, inplace=True, drop=False)
 
-        # Group and filter
         grouped_filtered_df = group_and_filter_data(df)
 
-        logger.info(f"Grouping complete. Final grouped shape: {grouped_filtered_df.shape}")
+        if grouped_filtered_df.shape[0] >= df.shape[0]:
+            logger.warning(f"Grouped dataframe has {grouped_filtered_df.shape[0]} rows — possibly fallback data, not grouped.")
+
+        grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
+        grouped_filtered_df.to_csv(grouped_filtered_file, sep="\t", index=False)
+        logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
-        grouped_filtered_df = df.copy()
-        logger.warning("Using ungrouped dataframe as fallback.")
+        logger.warning("Using ungrouped filtered data as fallback for grouped output.")
+        logger.warning(f"Saved fallback grouped data to {grouped_filtered_file} despite grouping error.")
 
-    # Always save grouped_filtered_df regardless of errors
-    grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
-    grouped_filtered_df.to_csv(grouped_filtered_file, index=False, sep='\t')
-    logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
 
     # === Feature Selection ===
