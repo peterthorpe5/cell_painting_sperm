@@ -18,3 +18,4 @@ community
 pyvis
 python-louvain
 optuna
+torch
