@@ -246,10 +246,14 @@ if __name__ == "__main__":
 
     # === Imputation ===
     logger.info("preparing data for imputation")
+    # logger.debug(f"Columns after reset_index: {df.columns.tolist()}")
+
 
     # Backup MultiIndex if present
     index_backup = df.index.to_frame(index=False) if isinstance(df.index, pd.MultiIndex) else None
     df = df.reset_index(drop=False)
+    logger.debug(f"Columns after reset_index: {df.columns.tolist()}")
+
 
     # Define metadata columns that must always be excluded from imputation
     metadata_cols = [
@@ -317,6 +321,8 @@ if __name__ == "__main__":
     try:
         if isinstance(df.index, pd.MultiIndex):
             df = df.reset_index()
+            logger.debug(f"Columns after reset_index: {df.columns.tolist()}")
+
         
         if df["cpd_id"].isnull().any() or (df["cpd_id"] == "").any():
             logger.warning(" After reset_index: Some cpd_id values are blank or null — check for index misalignment or data loss.")
@@ -360,42 +366,40 @@ if __name__ == "__main__":
 
 
     # === Grouping and Filtering ===
-    logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
-    grouped_filtered_df = None
-    grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
+logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
+grouped_filtered_df = None
+grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
 
-    try:
-        required_cols = ["cpd_id", "Library", "cpd_type"]
+try:
+    df = df.reset_index(drop=False)
+    logger.debug(f"Columns after reset_index: {df.columns.tolist()}")
+    
+    required_cols = ["cpd_id", "Library", "cpd_type"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"After reset, these required columns are missing: {missing_cols}")
 
-        # Always reset index fully to clean slate
-        df = df.reset_index(drop=True)
+    # Drop duplicates in column names if necessary
+    if df.columns.duplicated().any():
+        logger.warning("Duplicate columns found. Removing duplicates.")
+        df = df.loc[:, ~df.columns.duplicated()]
 
-        # Ensure no duplicated columns
-        if df.columns.duplicated().any():
-            duplicated = df.columns[df.columns.duplicated()].tolist()
-            logger.warning(f"Duplicated columns found and will be removed: {duplicated}")
-            df = df.loc[:, ~df.columns.duplicated()]
+    # Drop index names from columns to avoid insertion conflicts
+    for col in required_cols:
+        if col in df.columns and col in df.index.names:
+            df.drop(columns=col, inplace=True)
 
-        # Drop any conflicting columns that are also in required index
-        for col in required_cols:
-            if col in df.columns:
-                logger.debug(f"Retaining column '{col}' for index.")
-            else:
-                raise ValueError(f"Missing required column '{col}' after reset.")
+    df.set_index(required_cols, inplace=True, drop=False)
+    logger.debug(f"Index set for grouping: {df.index.names}")
+    logger.debug(f"Data shape before grouping: {df.shape}")
 
-        # Now set MultiIndex safely
-        df.set_index(required_cols, inplace=True)
+    grouped_filtered_df = group_and_filter_data(df)
+    grouped_filtered_df.to_csv(grouped_filtered_file, sep="\t", index=False)
+    logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
-        logger.debug(f"Index set to: {df.index.names}")
-        logger.debug(f"DataFrame shape before grouping: {df.shape}")
-
-        grouped_filtered_df = group_and_filter_data(df)
-        grouped_filtered_df.to_csv(grouped_filtered_file, sep="\t", index=False)
-        logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
-
-    except Exception as e:
-        logger.error(f"Error during grouping and filtering: {e}")
-        logger.warning("Grouped output will not be saved due to above error.")
+except Exception as e:
+    logger.error(f"Error during grouping and filtering: {e}")
+    logger.warning("Grouped output will not be saved due to above error.")
 
 
 

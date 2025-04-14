@@ -289,7 +289,7 @@ def standardise_metadata_columns(df, logger=None, dataset_name=None):
 def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Groups data by cpd_id and Library, averages numeric features,
-    and preserves metadata columns such as cpd_type, Plate_Metadata, Well_Metadata.
+    and preserves a representative cpd_type, Plate_Metadata, and Well_Metadata.
 
     Parameters
     ----------
@@ -300,7 +300,7 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        The grouped and cleaned DataFrame.
+        The grouped and cleaned DataFrame with representative metadata.
     """
     if df is None or df.empty:
         return df
@@ -317,27 +317,30 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     filter_cols = df.columns[df.columns.str.contains(noisy_metadata_pattern, case=False, regex=True)]
     df = df.drop(columns=filter_cols, errors="ignore")
 
-    # Extract metadata if available
-    meta_cols = ["cpd_id", "Library", "cpd_type", "Plate_Metadata", "Well_Metadata"]
-    present_meta_cols = [col for col in meta_cols if col in df.columns]
-
-    meta_df = df.reset_index()[present_meta_cols].drop_duplicates()
-    meta_df = meta_df.groupby(["cpd_id", "Library"], as_index=False).first()
-    meta_df.set_index(["cpd_id", "Library"], inplace=True)
-
-    # Group numeric features
+    # Extract numeric features
     numeric_cols = df.select_dtypes(include=[np.number]).columns
-    df_numeric = df[numeric_cols]
-    grouped = df_numeric.groupby(["cpd_id", "Library"], as_index=True).mean()
+    df_numeric = df[numeric_cols].copy()
 
-    # Join back metadata
-    grouped = grouped.join(meta_df, how="left")
+    # Group by cpd_id and Library and average features
+    grouped_numeric = df_numeric.groupby(["cpd_id", "Library"]).mean().reset_index()
 
-    # Optional: Reorder columns to put metadata first
-    reordered_cols = [col for col in meta_cols if col in grouped.columns] + \
-                     [col for col in grouped.columns if col not in meta_cols]
-    grouped = grouped[reordered_cols]
-    return grouped
+    # Collect representative metadata (first entry per group)
+    meta_cols = ["cpd_id", "Library", "cpd_type", "Plate_Metadata", "Well_Metadata"]
+    available_meta = [col for col in meta_cols if col in df.columns]
+    metadata = df.reset_index()[available_meta].drop_duplicates()
+    metadata = metadata.groupby(["cpd_id", "Library"], as_index=False).first()
+
+    # Merge numeric + metadata on cpd_id and Library
+    merged = pd.merge(grouped_numeric, metadata, on=["cpd_id", "Library"], how="left")
+
+    # Reorder columns so metadata is at the front
+    front_cols = ["cpd_id", "Library", "cpd_type", "Plate_Metadata", "Well_Metadata"]
+    front_cols = [col for col in front_cols if col in merged.columns]
+    other_cols = [col for col in merged.columns if col not in front_cols]
+    merged = merged[front_cols + other_cols]
+
+    return merged
+
 
 
 
