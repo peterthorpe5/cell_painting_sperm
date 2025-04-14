@@ -344,12 +344,19 @@ if __name__ == "__main__":
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
-        if not isinstance(df.index, pd.MultiIndex):
-            missing = [col for col in required_cols if col not in df.columns]
-            if missing:
-                raise ValueError(f"Missing required columns for grouping: {missing}")
-            df.set_index(required_cols, inplace=True, drop=False)
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing required columns for grouping: {missing}")
 
+        # Remove 'cpd_type' from index if it's already part of it and we want to reset
+        if isinstance(df.index, pd.MultiIndex):
+            if set(required_cols).issubset(df.index.names):
+                logger.debug("Resetting MultiIndex before re-setting index for grouping.")
+                df = df.reset_index()
+
+        # Avoid duplicate index insertions
+        df = df.drop(columns=[col for col in required_cols if col in df.columns and col in df.index.names], errors="ignore")
+        df.set_index(required_cols, inplace=True, drop=False)
 
         grouped_filtered_df = group_and_filter_data(df)
         grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
@@ -359,6 +366,8 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
         grouped_filtered_df = df.copy()
+
+
 
     # === Feature Selection ===
     logger.info("Starting feature selection from grouped and filtered data.")
