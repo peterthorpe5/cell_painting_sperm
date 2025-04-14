@@ -361,16 +361,24 @@ if __name__ == "__main__":
 
         # Avoid duplicate index insertions
         df = df.drop(columns=[col for col in required_cols if col in df.columns and col in df.index.names], errors="ignore")
-        df.set_index(required_cols, inplace=True, drop=False)
+        # Only reset index if not already MultiIndex with exact levels
+        if not isinstance(df.index, pd.MultiIndex) or list(df.index.names) != required_cols:
+            df.set_index(required_cols, inplace=True, drop=False)
+
 
         grouped_filtered_df = group_and_filter_data(df)
         grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
         grouped_filtered_df.to_csv(grouped_filtered_file)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
-
+    
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
         grouped_filtered_df = df.copy()
+
+        grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
+        grouped_filtered_df.to_csv(grouped_filtered_file, index=False)
+        logger.warning(f"Saved fallback grouped data to {grouped_filtered_file} despite grouping error.")
+
 
 
 
