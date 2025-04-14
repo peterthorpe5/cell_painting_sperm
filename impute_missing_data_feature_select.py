@@ -435,9 +435,9 @@ if __name__ == "__main__":
         filtered_features = variance_threshold_selector(filtered_features)
 
         # Log number of features before and after feature selection
-        n_features_before = df_filtered.shape[1] - len(metadata_columns)
-        df_filtered = run_feature_selection(df_filtered, experiment=experiment_name)
-        n_features_after = df_filtered.shape[1] - len(metadata_columns)
+        n_features_before = filtered_features.shape[1]
+        filtered_features = run_feature_selection(filtered_features, experiment=experiment_name)
+        n_features_after = filtered_features.shape[1]
 
         logger.info(
             "%s: Feature selection reduced dimensionality from %d to %d features",
