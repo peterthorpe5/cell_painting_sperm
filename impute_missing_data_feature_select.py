@@ -367,42 +367,47 @@ if __name__ == "__main__":
 
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
-    df_selected = None
+    grouped_filtered_df = None
+    grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
 
     try:
+        required_cols = ["cpd_id", "Library", "cpd_type"]
+
+        if isinstance(df.index, pd.MultiIndex):
+            logger.debug("Resetting MultiIndex before grouping.")
+            df = df.reset_index()
+
+        logger.debug(f"Columns before grouping: {df.columns.tolist()}")
+        logger.debug(f"Index before grouping: {df.index.names}")
+
+        # Remove duplicated or conflicting columns
+        for col in required_cols:
+            if col in df.columns and col in df.index.names:
+                logger.debug(f"Dropping column '{col}' to avoid index conflict.")
+                df.drop(columns=col, inplace=True)
+
+        # Ensure all required grouping columns exist
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column for grouping: {col}")
+
+        # Set index for grouping
+        df.set_index(required_cols, inplace=True, drop=False)
+        logger.debug(f"Index set to: {df.index.names}")
+
+        # Perform grouping
+        grouped_filtered_df = group_and_filter_data(df)
+
         if grouped_filtered_df is None or grouped_filtered_df.empty:
-            raise ValueError("No valid grouped data available for feature selection.")
+            raise ValueError("Grouped dataframe is empty after filtering.")
 
-        logger.debug(f"Grouped DataFrame shape: {grouped_filtered_df.shape}")
-        logger.debug(f"Grouped DataFrame columns: {grouped_filtered_df.columns.tolist()}")
-
-        metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-        for col in metadata_cols:
-            if col not in grouped_filtered_df.columns:
-                logger.warning(f"Expected metadata column '{col}' not found in grouped data.")
-
-        # Only keep metadata that exists
-        available_metadata = [col for col in metadata_cols if col in grouped_filtered_df.columns]
-        metadata_df = grouped_filtered_df[available_metadata].copy()
-
-        feature_df = grouped_filtered_df.drop(columns=available_metadata, errors='ignore')
-        feature_df = feature_df.select_dtypes(include=[np.number])
-
-        if feature_df.empty:
-            raise ValueError("No numeric features found after dropping metadata.")
-
-        logger.debug(f"Selected {feature_df.shape[1]} numeric features for filtering.")
-
-        filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
-        filtered_features = variance_threshold_selector(filtered_features)
-
-        logger.debug(f"Filtered down to {filtered_features.shape[1]} features after correlation/variance.")
-
-        df_selected = pd.concat([metadata_df, filtered_features], axis=1)
-        logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
+        grouped_filtered_df.to_csv(grouped_filtered_file, sep='\t', index=False)
+        logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
     except Exception as e:
-        logger.error(f"Feature selection skipped due to error: {e}")
+        logger.error(f"Error during grouping and filtering: {e}")
+        grouped_filtered_df = None
+
 
         # === Save Final Cleaned Output ===
     if df_selected is not None:
