@@ -233,7 +233,8 @@ if __name__ == "__main__":
         index_df = df.index.to_frame(index=False)
         if index_df.isnull().any(axis=1).any():
             logger.warning(f"{args.experiment}: MultiIndex contains null values — these rows will be removed.")
-            df = df[~index_df.isnull().any(axis=1)]
+            mask = index_df.isnull().any(axis=1)
+            df = df.loc[~mask.values]
 
 
 
