@@ -225,9 +225,8 @@ if __name__ == "__main__":
 
 
     logger.info(f"Initial data shape: {df.shape}")
-
-    df = standardise_metadata_columns(df)
-    df = ensure_multiindex(df, logger=logger, dataset_name=args.experiment)
+    df = standardise_metadata_columns(df, logger=logger, dataset_name=args.experiment)
+    df = ensure_multiindex(df, required_levels=("cpd_id", "Library", "cpd_type", "Plate_Metadata", "Well_Metadata"), logger=logger, dataset_name=args.experiment)
 
 
     if isinstance(df.index, pd.MultiIndex):
@@ -237,33 +236,38 @@ if __name__ == "__main__":
             df = df[~index_df.isnull().any(axis=1)]
 
 
+
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
     df.dropna(axis=1, how='all', inplace=True)
 
+
     # === Imputation ===
-    logger.info("Starting imputation.")
-    for col in ["Plate_Metadata", "Well_Metadata"]:
-        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
-            logger.warning(f"{col} is numeric, which may be unintended. It will be excluded from imputation.")
-    non_feature_cols = ["Plate_Metadata", "Well_Metadata"] # Prevent Imputing Plate/Well Metadata
-    numeric_cols = [col for col in df.select_dtypes(include=[np.number]).columns if col not in non_feature_cols]
-
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-
-    # Backup index if it exists
+    logger.info("preparing data for imputation")
     index_backup = df.index.to_frame(index=False) if isinstance(df.index, pd.MultiIndex) else None
-
-
-    # Reset index without dropping, so we preserve cpd_id etc. as columns
     df = df.reset_index(drop=False)
 
-
-    # Extract numeric part
+    exclude_cols_from_imputation = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+    numeric_cols = [col for col in df.select_dtypes(include=[np.number]).columns if col not in exclude_cols_from_imputation]
     numeric_df = df[numeric_cols].copy()
+
+
     imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
     imputed_numeric_df = imputer.fit_transform(numeric_df)
+    numeric_df = pd.DataFrame(imputed_numeric_df, columns=numeric_cols)
+
+    non_numeric_df = df.drop(columns=numeric_cols)
+    df = pd.concat([non_numeric_df, numeric_df], axis=1)
+
+    if index_backup is not None:
+        df = restore_multiindex(df, index_backup=index_backup, dataset_name=args.experiment)
+
+    logger.info(f"Imputation ({args.impute}) completed. Final shape: {df.shape}")
+
+
+    logger.info("finished imputation.")
+
 
     # Convert back to DataFrame
     numeric_df = pd.DataFrame(imputed_numeric_df, columns=numeric_cols)
