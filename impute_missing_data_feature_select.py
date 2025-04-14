@@ -411,40 +411,43 @@ if __name__ == "__main__":
 
     # === Feature Selection ===
     logger.info("Starting feature selection from grouped and filtered data.")
+    df_selected = None  # Predefine so we can safely check later
+
     try:
         if grouped_filtered_df is None:
             raise ValueError("No valid grouped data available for feature selection.")
 
-        metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-        metadata_df = grouped_filtered_df[metadata_cols].copy()
+        # Identify metadata columns present in grouped data
+        possible_metadata = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+        available_metadata = [col for col in possible_metadata if col in grouped_filtered_df.columns]
 
-        feature_df = grouped_filtered_df.drop(columns=metadata_cols, errors='ignore')
+        if len(available_metadata) < 2:
+            raise ValueError(f"Not enough metadata columns available for feature selection: {available_metadata}")
+
+        metadata_df = grouped_filtered_df[available_metadata].copy()
+
+        # Drop metadata to isolate features
+        feature_df = grouped_filtered_df.drop(columns=available_metadata, errors='ignore')
         feature_df = feature_df.select_dtypes(include=[np.number])
 
+        # Apply filters
         filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
         filtered_features = variance_threshold_selector(filtered_features)
 
         df_selected = pd.concat([metadata_df, filtered_features], axis=1)
         logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
-
-        output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
-        df_selected.to_csv(output_path, index=False, sep='\t')
-        logger.info(f"Final cleaned data saved to {output_path}")
+        logger.debug(f"Metadata columns retained: {available_metadata}")
+        logger.debug(f"Number of features retained: {filtered_features.shape[1]}")
 
     except Exception as e:
         logger.error(f"Feature selection skipped due to error: {e}")
+        df_selected = None
 
 
-        # === Save Final Cleaned Output ===
+    # === Save Final Cleaned Output ===
     if df_selected is not None:
-        try:
-            output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
-            df_selected.to_csv(output_path, index=False, sep='\t')
-            logger.info(f"Final cleaned data saved to {output_path}")
-        except Exception as e:
-            logger.error(f"Failed to save final cleaned data: {e}")
+        output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
+        df_selected.to_csv(output_path, index=False, sep='\t')
+        logger.info(f"Final cleaned data saved to {output_path}")
     else:
         logger.warning("No feature-selected data to save.")
-
-
-    
