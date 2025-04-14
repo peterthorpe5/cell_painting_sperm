@@ -437,7 +437,7 @@ if __name__ == "__main__":
 
         logger.info(
             "%s: Feature selection reduced dimensionality from %d to %d features",
-            experiment_name,
+            args.experiment,
             n_features_before,
             n_features_after
         )
