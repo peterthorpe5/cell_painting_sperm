@@ -156,14 +156,16 @@ if __name__ == "__main__":
 
     # block of code to handle inconsistant naming of cols (name, Name or cpd_id?)
     # Handle flexible cpd_id assignment
-    # - Handle flexible 'cpd_id' assignment with fallback to 'name' or 'Name'
     cpd_col_candidates = ["cpd_id", "name", "Name"]
     cpd_id_col = None
 
     for col in cpd_col_candidates:
         if col in df.columns:
-            num_non_blank = df[col].astype(str).str.strip().replace("nan", np.nan).dropna().shape[0]
-            if num_non_blank > 0:
+            candidate_series = df[col].astype(str).str.strip()
+            candidate_series.replace("nan", np.nan, inplace=True)
+            num_valid = candidate_series.dropna().shape[0]
+
+            if num_valid > 0:
                 cpd_id_col = col
                 break
 
@@ -177,19 +179,16 @@ if __name__ == "__main__":
 
     # Fill missing or blank 'cpd_id' values with 'unknown'
 
-    missing_cpd_mask = (
-        df["cpd_id"]
-        .astype(str)
-        .str.strip()
-        .replace("nan", np.nan)
-        .isnull()
-    )
+    cpd_id_clean = df["cpd_id"].astype(str).str.strip()
+    cpd_id_clean.replace("nan", np.nan, inplace=True)
 
-    if missing_cpd_mask.values.any():
+    missing_mask = cpd_id_clean.isnull()
+
+    if missing_mask.any():
         logger.warning(
-            f"{args.experiment}: {missing_cpd_mask.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'."
+            f"{args.experiment}: {missing_mask.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'."
         )
-        df.loc[missing_cpd_mask, "cpd_id"] = "unknown"
+        df.loc[missing_mask, "cpd_id"] = "unknown"
 
 
     # Normalise/ consistant column naming
