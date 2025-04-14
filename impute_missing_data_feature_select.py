@@ -156,13 +156,14 @@ if __name__ == "__main__":
 
     # block of code to handle inconsistant naming of cols (name, Name or cpd_id?)
     # Handle flexible cpd_id assignment
+    # - Handle flexible 'cpd_id' assignment with fallback to 'name' or 'Name'
     cpd_col_candidates = ["cpd_id", "name", "Name"]
     cpd_id_col = None
 
     for col in cpd_col_candidates:
         if col in df.columns:
-            non_blank = df[col].replace("", np.nan).dropna().shape[0]
-            if non_blank > 0:
+            num_non_blank = df[col].astype(str).str.strip().replace("nan", np.nan).dropna().shape[0]
+            if num_non_blank > 0:
                 cpd_id_col = col
                 break
 
@@ -174,14 +175,24 @@ if __name__ == "__main__":
         df.rename(columns={cpd_id_col: "cpd_id"}, inplace=True)
         logger.info(f"Renamed column '{cpd_id_col}' to 'cpd_id'.")
 
-    # Fill missing or blank cpd_id values with 'unknown'
-    missing_cpd_ids = df["cpd_id"].isnull() | (df["cpd_id"] == "")
-    if missing_cpd_ids.any():
-        logger.warning(f"{args.experiment}: {missing_cpd_ids.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'.")
-        df.loc[missing_cpd_ids, "cpd_id"] = "unknown"
+    # Fill missing or blank 'cpd_id' values with 'unknown'
+
+    missing_cpd_mask = (
+        df["cpd_id"]
+        .astype(str)
+        .str.strip()
+        .replace("nan", np.nan)
+        .isnull()
+    )
+
+    if missing_cpd_mask.values.any():
+        logger.warning(
+            f"{args.experiment}: {missing_cpd_mask.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'."
+        )
+        df.loc[missing_cpd_mask, "cpd_id"] = "unknown"
 
 
-    # Normalise column naming
+    # Normalise/ consistant column naming
     if "library" in df.columns and "Library" not in df.columns:
         df.rename(columns={"library": "Library"}, inplace=True)
         logger.info("Renamed column 'library' to 'Library' for consistency.")
