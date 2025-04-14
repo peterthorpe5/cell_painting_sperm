@@ -286,12 +286,10 @@ def standardise_metadata_columns(df, logger=None, dataset_name=None):
 
     return df
 
-
 def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Groups data by cpd_id and Library, averages numeric features,
-    and preserves a representative Plate_Metadata and Well_Metadata
-    if available.
+    and preserves metadata columns such as cpd_type, Plate_Metadata, Well_Metadata.
 
     Parameters
     ----------
@@ -310,7 +308,7 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df.index, pd.MultiIndex):
         raise ValueError("Expected a MultiIndex DataFrame with ['cpd_id', 'Library', 'cpd_type'].")
 
-    # Drop noisy metadata columns, but retain important ones if present
+    # Drop noisy metadata columns
     noisy_metadata_pattern = (
         r"COMPOUND_NUMBER|Notes|Seahorse_alert|Treatment|Number|"
         r"Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate$|Well$|Field|Center_[XYZ]|"
@@ -319,26 +317,26 @@ def group_and_filter_data(df: pd.DataFrame) -> pd.DataFrame:
     filter_cols = df.columns[df.columns.str.contains(noisy_metadata_pattern, case=False, regex=True)]
     df = df.drop(columns=filter_cols, errors="ignore")
 
-    # Attempt to preserve Plate_Metadata and Well_Metadata if available
-    available_meta = [col for col in ["Plate_Metadata", "Well_Metadata"] if col in df.columns]
+    # Extract metadata if available
+    meta_cols = ["cpd_id", "Library", "cpd_type", "Plate_Metadata", "Well_Metadata"]
+    present_meta_cols = [col for col in meta_cols if col in df.columns]
 
-    if available_meta:
-        meta_cols = ["cpd_id", "Library"] + available_meta
-        meta_df = df.reset_index()[meta_cols].drop_duplicates()
-        meta_df = meta_df.groupby(["cpd_id", "Library"], as_index=False).first()
-        meta_df.set_index(["cpd_id", "Library"], inplace=True)
-    else:
-        meta_df = None
+    meta_df = df.reset_index()[present_meta_cols].drop_duplicates()
+    meta_df = meta_df.groupby(["cpd_id", "Library"], as_index=False).first()
+    meta_df.set_index(["cpd_id", "Library"], inplace=True)
 
-    # Group numeric features by compound
+    # Group numeric features
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df_numeric = df[numeric_cols]
     grouped = df_numeric.groupby(["cpd_id", "Library"], as_index=True).mean()
 
-    # Join metadata back, if available
-    if meta_df is not None:
-        grouped = grouped.join(meta_df, how="left")
+    # Join back metadata
+    grouped = grouped.join(meta_df, how="left")
 
+    # Optional: Reorder columns to put metadata first
+    reordered_cols = [col for col in meta_cols if col in grouped.columns] + \
+                     [col for col in grouped.columns if col not in meta_cols]
+    grouped = grouped[reordered_cols]
     return grouped
 
 

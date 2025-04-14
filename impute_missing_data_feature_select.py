@@ -406,7 +406,17 @@ if __name__ == "__main__":
             raise ValueError("No valid grouped data available for feature selection.")
 
         metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+        available_cols = grouped_filtered_df.columns
+        missing_metadata = [col for col in metadata_cols if col not in available_cols]
+
+        if missing_metadata:
+            logger.warning(f"Missing metadata columns after grouping: {missing_metadata}")
+            logger.warning("Filling missing metadata with 'unknown' for downstream steps.")
+            for col in missing_metadata:
+                grouped_filtered_df[col] = "unknown"
+
         metadata_df = grouped_filtered_df[metadata_cols].copy()
+
 
         feature_df = grouped_filtered_df.drop(columns=metadata_cols, errors='ignore')
         feature_df = feature_df.select_dtypes(include=[np.number])
