@@ -154,6 +154,34 @@ if __name__ == "__main__":
     dataframes = [pd.read_csv(f, index_col=0) for f in input_files]
     df = pd.concat(dataframes, axis=0)
 
+    # block of code to handle inconsistant naming of cols (name, Name or cpd_id?)
+    # Handle flexible cpd_id assignment
+    cpd_col_candidates = ["cpd_id", "name", "Name"]
+    cpd_id_col = None
+
+    for col in cpd_col_candidates:
+        if col in df.columns:
+            non_blank = df[col].replace("", np.nan).dropna().shape[0]
+            if non_blank > 0:
+                cpd_id_col = col
+                break
+
+    if cpd_id_col is None:
+        logger.error("No valid 'cpd_id', 'name', or 'Name' column found with usable values.")
+        sys.exit(1)
+
+    if cpd_id_col != "cpd_id":
+        df.rename(columns={cpd_id_col: "cpd_id"}, inplace=True)
+        logger.info(f"Renamed column '{cpd_id_col}' to 'cpd_id'.")
+
+    # Fill missing or blank cpd_id values with 'unknown'
+    missing_cpd_ids = df["cpd_id"].isnull().sum() + (df["cpd_id"] == "").sum()
+    if missing_cpd_ids > 0:
+        logger.warning(f"{missing_cpd_ids} 'cpd_id' values were missing or blank and have been set to 'unknown'.")
+    df["cpd_id"] = df["cpd_id"].fillna("unknown")
+    df.loc[df["cpd_id"] == "", "cpd_id"] = "unknown"
+
+
     # Normalise column naming
     if "library" in df.columns and "Library" not in df.columns:
         df.rename(columns={"library": "Library"}, inplace=True)
