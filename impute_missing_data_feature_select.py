@@ -157,7 +157,12 @@ if __name__ == "__main__":
     # block of code to handle inconsistant naming of cols (name, Name or cpd_id?)
     # Handle flexible cpd_id assignment
     cpd_id_series = df.get("cpd_id")
-    name_series = df.get("name") or df.get("Name")
+    name_series = None
+    if "name" in df.columns:
+        name_series = df["name"]
+    elif "Name" in df.columns:
+        name_series = df["Name"]
+
 
     # Standardise both if they exist
     if cpd_id_series is not None:
