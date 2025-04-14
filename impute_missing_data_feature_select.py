@@ -176,10 +176,14 @@ if __name__ == "__main__":
     df = standardise_metadata_columns(df)
     df = ensure_multiindex(df, logger=logger, dataset_name=args.experiment)
 
-    if df.index.isnull().any():
-        logger.warning(f" MultiIndex contains nulls after restore: {df.index[df.index.isnull().any(axis=1)]}")
-        df = df[~df.index.to_frame(index=False).isnull().any(axis=1)]
-        
+
+    if isinstance(df.index, pd.MultiIndex):
+        index_df = df.index.to_frame(index=False)
+        if index_df.isnull().any(axis=1).any():
+            logger.warning(f"{args.experiment}: MultiIndex contains null values — these rows will be removed.")
+            df = df[~index_df.isnull().any(axis=1)]
+
+
     # Replace infinities and drop NaN columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
