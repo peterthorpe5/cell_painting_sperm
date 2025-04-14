@@ -161,11 +161,13 @@ if __name__ == "__main__":
 
     for col in cpd_col_candidates:
         if col in df.columns:
+            # Handle deprecated downcasting warning explicitly
             candidate_series = df[col].astype(str).str.strip()
-            candidate_series.replace("nan", np.nan, inplace=True)
-            num_valid = candidate_series.dropna().shape[0]
+            candidate_series.replace("nan", np.nan, inplace=True)  # Handles literal "nan" strings
+            candidate_series = candidate_series.infer_objects(copy=False)
 
-            if num_valid > 0:
+            non_blank = candidate_series.dropna().shape[0]
+            if non_blank > 0:
                 cpd_id_col = col
                 break
 
@@ -173,22 +175,36 @@ if __name__ == "__main__":
         logger.error("No valid 'cpd_id', 'name', or 'Name' column found with usable values.")
         sys.exit(1)
 
+    # Drop any other cpd_id column if already present but is empty
+    if cpd_id_col != "cpd_id" and "cpd_id" in df.columns:
+        original_cpd = df["cpd_id"].astype(str).str.strip()
+        if original_cpd.replace("nan", np.nan).dropna().shape[0] == 0:
+            logger.info("Dropped existing empty 'cpd_id' column.")
+            df.drop(columns=["cpd_id"], inplace=True)
+
+    # Rename the selected column to 'cpd_id' if needed
     if cpd_id_col != "cpd_id":
         df.rename(columns={cpd_id_col: "cpd_id"}, inplace=True)
         logger.info(f"Renamed column '{cpd_id_col}' to 'cpd_id'.")
 
-    # Fill missing or blank 'cpd_id' values with 'unknown'
+    # --- Clean 'cpd_id' and fill missing values with 'unknown' ---
+    cpd_id_series = df["cpd_id"]
+    if isinstance(cpd_id_series, pd.DataFrame):
+        logger.warning("Multiple 'cpd_id' columns found; using the first non-empty column.")
+        cpd_id_series = cpd_id_series.iloc[:, 0]
 
-    cpd_id_clean = df["cpd_id"].astype(str).str.strip()
+    cpd_id_clean = cpd_id_series.astype(str).str.strip()
     cpd_id_clean.replace("nan", np.nan, inplace=True)
+    cpd_id_clean = cpd_id_clean.infer_objects(copy=False)
 
+    # Mark missing or empty values
     missing_mask = cpd_id_clean.isnull()
-
     if missing_mask.any():
-        logger.warning(
-            f"{args.experiment}: {missing_mask.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'."
-        )
+        logger.warning(f"{args.experiment}: {missing_mask.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'.")
         df.loc[missing_mask, "cpd_id"] = "unknown"
+    else:
+        df["cpd_id"] = cpd_id_clean
+
 
 
     # Normalise/ consistant column naming
