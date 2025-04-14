@@ -219,6 +219,12 @@ if __name__ == "__main__":
 
 
     logger.info(f"Initial data shape: {df.shape}")
+    required_metadata = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+    for col in required_metadata:
+        if col not in df.columns:
+            logger.warning(f"Column '{col}' is missing. Injecting placeholder value.")
+            df[col] = "unknown"
+
     df = standardise_metadata_columns(df, logger=logger, dataset_name=args.experiment)
     df = ensure_multiindex(df, required_levels=("cpd_id", "Library", "cpd_type", "Plate_Metadata", "Well_Metadata"), logger=logger, dataset_name=args.experiment)
 
@@ -272,6 +278,12 @@ if __name__ == "__main__":
     df = pd.concat([non_numeric_df, numeric_df], axis=1)
 
     logger.debug(f"Columns after imputation: {df.columns.tolist()}")
+    # Double-check metadata not dropped during reset/impute
+    for col in ["Plate_Metadata", "Well_Metadata"]:
+        if col not in df.columns:
+            logger.warning(f"Metadata column '{col}' is missing post-imputation — adding as 'unknown'.")
+            df[col] = "unknown"
+
 
     # Attempt to restore MultiIndex
     if index_backup is not None:
@@ -348,37 +360,43 @@ if __name__ == "__main__":
 
     # === Grouping and Filtering ===
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
+
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
-        missing = [col for col in required_cols if col not in df.columns and col not in df.index.names]
-        if missing:
-            raise ValueError(f"Missing required columns for grouping: {missing}")
 
-        # Reset index only if needed (avoid duplicate index levels)
-        if isinstance(df.index, pd.MultiIndex):
-            if all(name in df.index.names for name in required_cols):
-                logger.debug("Resetting MultiIndex to avoid duplication.")
-                df = df.reset_index()
-
-        # Drop from columns if already in index to prevent duplication
+        # Ensure required columns exist before attempting to set index
         for col in required_cols:
-            if col in df.columns and col in df.index.names:
-                df.drop(columns=col, inplace=True)
+            if col not in df.columns:
+                raise ValueError(f"Missing required column '{col}' before grouping.")
 
-        # Now set index
+        # Reset index to remove any lingering index levels
+        if isinstance(df.index, pd.MultiIndex):
+            logger.debug("Resetting MultiIndex before grouping.")
+            df = df.reset_index()
+
+        # Drop duplicate columns that are also going to be in the new index
+        duplicate_cols = [col for col in required_cols if col in df.columns and col in df.index.names]
+        if duplicate_cols:
+            logger.debug(f"Dropping duplicate columns already in index: {duplicate_cols}")
+            df.drop(columns=duplicate_cols, inplace=True)
+
+        # Finally set the new MultiIndex
         df.set_index(required_cols, inplace=True, drop=False)
 
+        # Group and filter
         grouped_filtered_df = group_and_filter_data(df)
-        grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
-        grouped_filtered_df.to_csv(grouped_filtered_file)
-        logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
+
+        logger.info(f"Grouping complete. Final grouped shape: {grouped_filtered_df.shape}")
 
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
         grouped_filtered_df = df.copy()
-        grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
-        grouped_filtered_df.to_csv(grouped_filtered_file, index=False)
-        logger.warning(f"Saved fallback grouped data to {grouped_filtered_file} despite grouping error.")
+        logger.warning("Using ungrouped dataframe as fallback.")
+
+    # Always save grouped_filtered_df regardless of errors
+    grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
+    grouped_filtered_df.to_csv(grouped_filtered_file, index=False)
+    logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
 
     # === Feature Selection ===
