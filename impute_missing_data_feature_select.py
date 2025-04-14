@@ -360,31 +360,45 @@ if __name__ == "__main__":
 
 
     # === Grouping and Filtering ===
-
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
     grouped_filtered_df = None
     grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
 
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
-        missing = [col for col in required_cols if col not in df.columns and col not in df.index.names]
-        if missing:
-            raise ValueError(f"Missing required columns for grouping: {missing}")
 
-        # Reset index if it's a MultiIndex and overlaps with required_cols
-        if isinstance(df.index, pd.MultiIndex):
-            if all(name in df.index.names for name in required_cols):
-                logger.debug("Resetting MultiIndex to avoid duplication.")
-                df = df.reset_index()
+        # Log index status before reset
+        logger.debug(f"Original index type: {type(df.index)}")
+        logger.debug(f"Original index names: {df.index.names}")
+        logger.debug(f"Column list before reset: {df.columns.tolist()}")
 
-        # Drop columns that would clash with new index
+        # Always reset index to avoid collisions or hidden index columns
+        df = df.reset_index(drop=False)
+
+        # Re-check and report columns after reset
+        logger.debug(f"Index reset complete. Columns now: {df.columns.tolist()}")
+        logger.debug(f"Any duplicate column names: {df.columns.duplicated().any()}")
+
+        # Drop any existing columns that would conflict with setting index
         for col in required_cols:
-            if col in df.columns and col in df.index.names:
-                logger.debug(f"Dropping column '{col}' to avoid index insertion error.")
+            if col in df.columns:
+                logger.debug(f"Dropping column '{col}' to prepare for index setting.")
                 df.drop(columns=col, inplace=True)
 
+        # Check that required columns still exist
+        missing_after_reset = [col for col in required_cols if col not in df.columns]
+        if missing_after_reset:
+            raise ValueError(f"After reset, missing required columns for grouping: {missing_after_reset}")
+
+        # Set new index
+        logger.debug(f"Setting index to {required_cols}")
         df.set_index(required_cols, inplace=True, drop=False)
 
+        # Confirm cpd_type integrity
+        if "cpd_type" in df.columns:
+            logger.debug(f"cpd_type dtype: {df['cpd_type'].dtype}")
+
+        # Group and filter
         grouped_filtered_df = group_and_filter_data(df)
         grouped_filtered_df.to_csv(grouped_filtered_file, sep="\t", index=False)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
@@ -392,7 +406,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
         logger.warning("Grouped output will not be saved due to above error.")
-
 
 
     # === Feature Selection ===
