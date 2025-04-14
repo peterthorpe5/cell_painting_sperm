@@ -367,30 +367,26 @@ if __name__ == "__main__":
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
 
-        if isinstance(df.index, pd.MultiIndex):
-            logger.debug("Resetting MultiIndex before grouping.")
-            df = df.reset_index()
+        # Always reset index fully to clean slate
+        df = df.reset_index(drop=True)
 
-        logger.debug(f"Columns before cleanup: {df.columns.tolist()}")
-        logger.debug(f"Index before cleanup: {df.index.names}")
+        # Ensure no duplicated columns
+        if df.columns.duplicated().any():
+            duplicated = df.columns[df.columns.duplicated()].tolist()
+            logger.warning(f"Duplicated columns found and will be removed: {duplicated}")
+            df = df.loc[:, ~df.columns.duplicated()]
 
-        # Drop duplicates of required_cols already in index
+        # Drop any conflicting columns that are also in required index
         for col in required_cols:
-            if col in df.columns and df.columns.duplicated().any():
-                logger.debug(f"Dropping duplicated column '{col}'")
-                df = df.loc[:, ~df.columns.duplicated()]
-
-        # Remove potential conflicting copies of required index columns
-        df = df.drop(columns=[col for col in required_cols if col in df.columns and col in df.index.names], errors="ignore")
-
-        # Ensure required columns are in df
-        for col in required_cols:
-            if col not in df.columns:
+            if col in df.columns:
+                logger.debug(f"Retaining column '{col}' for index.")
+            else:
                 raise ValueError(f"Missing required column '{col}' after reset.")
 
-        df.set_index(required_cols, inplace=True, drop=False)
+        # Now set MultiIndex safely
+        df.set_index(required_cols, inplace=True)
 
-        logger.debug(f"Index successfully set to: {df.index.names}")
+        logger.debug(f"Index set to: {df.index.names}")
         logger.debug(f"DataFrame shape before grouping: {df.shape}")
 
         grouped_filtered_df = group_and_filter_data(df)
@@ -400,6 +396,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
         logger.warning("Grouped output will not be saved due to above error.")
+
 
 
     # === Feature Selection ===
