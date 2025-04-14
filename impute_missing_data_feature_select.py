@@ -156,55 +156,44 @@ if __name__ == "__main__":
 
     # block of code to handle inconsistant naming of cols (name, Name or cpd_id?)
     # Handle flexible cpd_id assignment
-    cpd_col_candidates = ["cpd_id", "name", "Name"]
-    cpd_id_col = None
+    cpd_id_series = df.get("cpd_id")
+    name_series = df.get("name") or df.get("Name")
 
-    for col in cpd_col_candidates:
-        if col in df.columns:
-            # Handle deprecated downcasting warning explicitly
-            candidate_series = df[col].astype(str).str.strip()
-            candidate_series.replace("nan", np.nan, inplace=True)  # Handles literal "nan" strings
-            candidate_series = candidate_series.infer_objects(copy=False)
+    # Standardise both if they exist
+    if cpd_id_series is not None:
+        cpd_id_series = cpd_id_series.astype(str).str.strip().replace("nan", np.nan)
+    if name_series is not None:
+        name_series = name_series.astype(str).str.strip().replace("nan", np.nan)
 
-            non_blank = candidate_series.dropna().shape[0]
-            if non_blank > 0:
-                cpd_id_col = col
-                break
-
-    if cpd_id_col is None:
-        logger.error("No valid 'cpd_id', 'name', or 'Name' column found with usable values.")
-        sys.exit(1)
-
-    # Drop any other cpd_id column if already present but is empty
-    if cpd_id_col != "cpd_id" and "cpd_id" in df.columns:
-        original_cpd = df["cpd_id"].astype(str).str.strip()
-        if original_cpd.replace("nan", np.nan).dropna().shape[0] == 0:
-            logger.info("Dropped existing empty 'cpd_id' column.")
-            df.drop(columns=["cpd_id"], inplace=True)
-
-    # Rename the selected column to 'cpd_id' if needed
-    if cpd_id_col != "cpd_id":
-        df.rename(columns={cpd_id_col: "cpd_id"}, inplace=True)
-        logger.info(f"Renamed column '{cpd_id_col}' to 'cpd_id'.")
-
-    # --- Clean 'cpd_id' and fill missing values with 'unknown' ---
-    cpd_id_series = df["cpd_id"]
-    if isinstance(cpd_id_series, pd.DataFrame):
-        logger.warning("Multiple 'cpd_id' columns found; using the first non-empty column.")
-        cpd_id_series = cpd_id_series.iloc[:, 0]
-
-    cpd_id_clean = cpd_id_series.astype(str).str.strip()
-    cpd_id_clean.replace("nan", np.nan, inplace=True)
-    cpd_id_clean = cpd_id_clean.infer_objects(copy=False)
-
-    # Mark missing or empty values
-    missing_mask = cpd_id_clean.isnull()
-    if missing_mask.any():
-        logger.warning(f"{args.experiment}: {missing_mask.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'.")
-        df.loc[missing_mask, "cpd_id"] = "unknown"
+    # Case 1: cpd_id column missing or completely blank — fall back to name
+    if cpd_id_series is None or cpd_id_series.isnull().all():
+        if name_series is not None and name_series.notnull().any():
+            df["cpd_id"] = name_series
+            logger.info("Using 'name' column as fallback for missing 'cpd_id'.")
+        else:
+            df["cpd_id"] = "unknown"
+            logger.warning("Both 'cpd_id' and 'name' are missing or empty. All cpd_id values set to 'unknown'.")
     else:
-        df["cpd_id"] = cpd_id_clean
+        df["cpd_id"] = cpd_id_series.copy()
 
+        # Fill in blank cpd_id values with name if possible
+        missing_mask = df["cpd_id"].isnull() | (df["cpd_id"] == "")
+        if name_series is not None:
+            fallback_mask = missing_mask & name_series.notnull()
+            df.loc[fallback_mask, "cpd_id"] = name_series[fallback_mask]
+            missing_mask = df["cpd_id"].isnull() | (df["cpd_id"] == "")
+
+        # Final fill of any blanks
+        if missing_mask.any():
+            logger.warning(f"{args.experiment}: {missing_mask.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'.")
+            df.loc[missing_mask, "cpd_id"] = "unknown"
+
+    # Final clean
+    df["cpd_id"] = df["cpd_id"].astype(str).str.strip().replace("nan", "unknown")
+
+    # logging
+    unique_cpd_count = df["cpd_id"].nunique(dropna=True)
+    logger.info(f"{args.experiment}: Assigned 'cpd_id' to {unique_cpd_count} unique compounds.")
 
 
     # Normalise/ consistant column naming
@@ -245,40 +234,48 @@ if __name__ == "__main__":
 
     # === Imputation ===
     logger.info("preparing data for imputation")
+
+    # Backup MultiIndex if present
     index_backup = df.index.to_frame(index=False) if isinstance(df.index, pd.MultiIndex) else None
     df = df.reset_index(drop=False)
 
-    exclude_cols_from_imputation = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-    numeric_cols = [col for col in df.select_dtypes(include=[np.number]).columns if col not in exclude_cols_from_imputation]
-    numeric_df = df[numeric_cols].copy()
+    # Define metadata columns that must always be excluded from imputation
+    metadata_cols = [
+        "cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"
+    ]
 
+    # Log and validate presence
+    for col in metadata_cols:
+        if col not in df.columns:
+            logger.warning(f"Metadata column '{col}' is missing before imputation.")
 
+    # Select numeric feature columns *only*, excluding metadata
+    numeric_cols = [
+        col for col in df.columns
+        if col not in metadata_cols and pd.api.types.is_numeric_dtype(df[col])
+    ]
+
+    logger.debug(f"Columns selected for imputation: {numeric_cols}")
+
+    # Imputation
     imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
-    imputed_numeric_df = imputer.fit_transform(numeric_df)
+    imputed_numeric_df = imputer.fit_transform(df[numeric_cols])
     numeric_df = pd.DataFrame(imputed_numeric_df, columns=numeric_cols)
 
+    # Merge imputed features with preserved non-numeric data
     non_numeric_df = df.drop(columns=numeric_cols)
     df = pd.concat([non_numeric_df, numeric_df], axis=1)
 
+    logger.debug(f"Columns after imputation: {df.columns.tolist()}")
+
+    # Attempt to restore MultiIndex
     if index_backup is not None:
-        df = restore_multiindex(df, index_backup=index_backup, dataset_name=args.experiment)
+        logger.debug(f"Index backup columns before restore: {index_backup.columns.tolist()}")
+        try:
+            df = restore_multiindex(df, index_backup=index_backup, dataset_name=args.experiment)
+        except Exception as e:
+            logger.error(f"{args.experiment}: Cannot restore MultiIndex, likely due to missing metadata columns. {e}")
 
-    logger.info(f"Imputation ({args.impute}) completed. Final shape: {df.shape}")
-
-
-    logger.info("finished imputation.")
-
-
-    # Convert back to DataFrame
-    numeric_df = pd.DataFrame(imputed_numeric_df, columns=numeric_cols)
-
-    # Merge numeric and non-numeric
-    non_numeric_df = df.drop(columns=numeric_cols)
-    df = pd.concat([non_numeric_df, numeric_df], axis=1)
-
-    # Restore MultiIndex
-    if index_backup is not None:
-        df = restore_multiindex(df, index_backup=index_backup, dataset_name=args.experiment)
 
     logger.info(f"Imputation ({args.impute}) completed. Final shape: {df.shape}")
 
