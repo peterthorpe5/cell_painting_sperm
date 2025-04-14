@@ -191,6 +191,12 @@ if __name__ == "__main__":
 
     # === Imputation ===
     logger.info("Starting imputation.")
+    for col in ["Plate_Metadata", "Well_Metadata"]:
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+            logger.warning(f"{col} is numeric, which may be unintended. It will be excluded from imputation.")
+    non_feature_cols = ["Plate_Metadata", "Well_Metadata"] # Prevent Imputing Plate/Well Metadata
+    numeric_cols = [col for col in df.select_dtypes(include=[np.number]).columns if col not in non_feature_cols]
+
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
     # Backup index if it exists
