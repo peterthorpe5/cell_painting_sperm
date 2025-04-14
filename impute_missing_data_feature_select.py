@@ -352,8 +352,8 @@ if __name__ == "__main__":
         # Join metadata and features
         df_ungrouped_filtered = pd.concat([metadata_df, filtered_features], axis=1)
 
-        ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.csv"
-        df_ungrouped_filtered.to_csv(ungrouped_filtered_path, index=False)
+        ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.tsv"
+        df_ungrouped_filtered.to_csv(ungrouped_filtered_path, index=False, sep='\t')
         logger.info(f"Ungrouped, correlation- and variance-filtered data (with metadata) saved to {ungrouped_filtered_path}")
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
@@ -395,8 +395,8 @@ if __name__ == "__main__":
         logger.warning("Using ungrouped dataframe as fallback.")
 
     # Always save grouped_filtered_df regardless of errors
-    grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.csv"
-    grouped_filtered_df.to_csv(grouped_filtered_file, index=False)
+    grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
+    grouped_filtered_df.to_csv(grouped_filtered_file, index=False, sep='\t')
     logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
 
@@ -423,8 +423,8 @@ if __name__ == "__main__":
         df_selected = grouped_filtered_df.copy()
 
     # === Save Final Cleaned Output ===
-    output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.csv"
-    df_selected.to_csv(output_path, index=False)
+    output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
+    df_selected.to_csv(output_path, index=False, sep='\t')
     logger.info(f"Final cleaned data saved to {output_path}")
 
  
