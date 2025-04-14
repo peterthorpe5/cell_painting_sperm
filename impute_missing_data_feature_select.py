@@ -409,6 +409,32 @@ if __name__ == "__main__":
         grouped_filtered_df = None
 
 
+    # === Feature Selection ===
+    logger.info("Starting feature selection from grouped and filtered data.")
+    try:
+        if grouped_filtered_df is None:
+            raise ValueError("No valid grouped data available for feature selection.")
+
+        metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+        metadata_df = grouped_filtered_df[metadata_cols].copy()
+
+        feature_df = grouped_filtered_df.drop(columns=metadata_cols, errors='ignore')
+        feature_df = feature_df.select_dtypes(include=[np.number])
+
+        filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
+        filtered_features = variance_threshold_selector(filtered_features)
+
+        df_selected = pd.concat([metadata_df, filtered_features], axis=1)
+        logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
+
+        output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
+        df_selected.to_csv(output_path, index=False, sep='\t')
+        logger.info(f"Final cleaned data saved to {output_path}")
+
+    except Exception as e:
+        logger.error(f"Feature selection skipped due to error: {e}")
+
+
         # === Save Final Cleaned Output ===
     if df_selected is not None:
         try:
