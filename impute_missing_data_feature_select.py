@@ -367,30 +367,31 @@ if __name__ == "__main__":
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
 
-        # Reset MultiIndex if present
         if isinstance(df.index, pd.MultiIndex):
             logger.debug("Resetting MultiIndex before grouping.")
             df = df.reset_index()
 
-        # Check if required columns exist after reset
-        missing_after_reset = [col for col in required_cols if col not in df.columns]
-        if missing_after_reset:
-            raise ValueError(f"After reset, missing required columns for grouping: {missing_after_reset}")
+        logger.debug(f"Columns before cleanup: {df.columns.tolist()}")
+        logger.debug(f"Index before cleanup: {df.index.names}")
 
-        # Drop columns that would clash with setting index
+        # Drop duplicates of required_cols already in index
         for col in required_cols:
-            if col in df.columns and col in df.index.names:
-                logger.debug(f"Dropping column '{col}' to avoid index conflict.")
-                df.drop(columns=col, inplace=True)
+            if col in df.columns and df.columns.duplicated().any():
+                logger.debug(f"Dropping duplicated column '{col}'")
+                df = df.loc[:, ~df.columns.duplicated()]
 
-        # Set MultiIndex for grouping
+        # Remove potential conflicting copies of required index columns
+        df = df.drop(columns=[col for col in required_cols if col in df.columns and col in df.index.names], errors="ignore")
+
+        # Ensure required columns are in df
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column '{col}' after reset.")
+
         df.set_index(required_cols, inplace=True, drop=False)
 
-        # Final debug check
-        logger.debug(f"Index set to: {df.index.names}")
-        logger.debug(f"Grouping by: {required_cols}")
-        logger.debug(f"df shape before grouping: {df.shape}")
-        logger.debug(f"Head of df:\n{df.head()}")
+        logger.debug(f"Index successfully set to: {df.index.names}")
+        logger.debug(f"DataFrame shape before grouping: {df.shape}")
 
         grouped_filtered_df = group_and_filter_data(df)
         grouped_filtered_df.to_csv(grouped_filtered_file, sep="\t", index=False)
@@ -399,7 +400,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
         logger.warning("Grouped output will not be saved due to above error.")
-        grouped_filtered_df = None  # signal to skip downstream steps
 
 
     # === Feature Selection ===
