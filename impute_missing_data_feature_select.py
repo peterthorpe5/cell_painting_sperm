@@ -408,7 +408,6 @@ if __name__ == "__main__":
         logger.error(f"Error during grouping and filtering: {e}")
         grouped_filtered_df = None
 
-
     # === Feature Selection ===
     logger.info("Starting feature selection from grouped and filtered data.")
     df_selected = None  # Predefine so we can safely check later
@@ -431,12 +430,9 @@ if __name__ == "__main__":
         feature_df = feature_df.select_dtypes(include=[np.number])
 
         # Apply filters
+        n_features_before = feature_df.shape[1]
         filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
         filtered_features = variance_threshold_selector(filtered_features)
-
-        # Log number of features before and after feature selection
-        n_features_before = filtered_features.shape[1]
-        filtered_features = run_feature_selection(filtered_features, experiment=experiment_name)
         n_features_after = filtered_features.shape[1]
 
         logger.info(
@@ -444,7 +440,7 @@ if __name__ == "__main__":
             experiment_name,
             n_features_before,
             n_features_after
-)
+        )
 
         df_selected = pd.concat([metadata_df, filtered_features], axis=1)
         logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
