@@ -175,11 +175,10 @@ if __name__ == "__main__":
         logger.info(f"Renamed column '{cpd_id_col}' to 'cpd_id'.")
 
     # Fill missing or blank cpd_id values with 'unknown'
-    missing_cpd_ids = df["cpd_id"].isnull().sum() + (df["cpd_id"] == "").sum()
-    if missing_cpd_ids > 0:
-        logger.warning(f"{missing_cpd_ids} 'cpd_id' values were missing or blank and have been set to 'unknown'.")
-    df["cpd_id"] = df["cpd_id"].fillna("unknown")
-    df.loc[df["cpd_id"] == "", "cpd_id"] = "unknown"
+    missing_cpd_ids = df["cpd_id"].isnull() | (df["cpd_id"] == "")
+    if missing_cpd_ids.any():
+        logger.warning(f"{args.experiment}: {missing_cpd_ids.sum()} rows have missing or blank 'cpd_id' — filling with 'unknown'.")
+        df.loc[missing_cpd_ids, "cpd_id"] = "unknown"
 
 
     # Normalise column naming
