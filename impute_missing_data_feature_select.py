@@ -360,64 +360,66 @@ if __name__ == "__main__":
 
 
     # === Grouping and Filtering ===
+
     logger.info("Grouping and filtering data by 'cpd_id' and 'Library'.")
+    grouped_filtered_df = None
+    grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
+
     try:
         required_cols = ["cpd_id", "Library", "cpd_type"]
         missing = [col for col in required_cols if col not in df.columns and col not in df.index.names]
         if missing:
             raise ValueError(f"Missing required columns for grouping: {missing}")
 
-        # Reset index if MultiIndex contains the grouping columns
+        # Reset index if it's a MultiIndex and overlaps with required_cols
         if isinstance(df.index, pd.MultiIndex):
             if all(name in df.index.names for name in required_cols):
                 logger.debug("Resetting MultiIndex to avoid duplication.")
                 df = df.reset_index()
 
-        #  Insert this block right here:
+        # Drop columns that would clash with new index
         for col in required_cols:
             if col in df.columns and col in df.index.names:
+                logger.debug(f"Dropping column '{col}' to avoid index insertion error.")
                 df.drop(columns=col, inplace=True)
 
-        # Set MultiIndex for grouping
         df.set_index(required_cols, inplace=True, drop=False)
 
         grouped_filtered_df = group_and_filter_data(df)
-
-        if grouped_filtered_df.shape[0] >= df.shape[0]:
-            logger.warning(f"Grouped dataframe has {grouped_filtered_df.shape[0]} rows — possibly fallback data, not grouped.")
-
-        grouped_filtered_file = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered.tsv"
         grouped_filtered_df.to_csv(grouped_filtered_file, sep="\t", index=False)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
 
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
-        logger.warning("Using ungrouped filtered data as fallback for grouped output.")
-        logger.warning(f"Saved fallback grouped data to {grouped_filtered_file} despite grouping error.")
+        logger.warning("Grouped output will not be saved due to above error.")
 
 
 
     # === Feature Selection ===
     logger.info("Starting feature selection from grouped and filtered data.")
     try:
-        # Explicitly define metadata columns
+        if grouped_filtered_df is None:
+            raise ValueError("No valid grouped data available for feature selection.")
+
         metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
         metadata_df = grouped_filtered_df[metadata_cols].copy()
 
-        # Select only numeric feature columns
         feature_df = grouped_filtered_df.drop(columns=metadata_cols, errors='ignore')
         feature_df = feature_df.select_dtypes(include=[np.number])
 
-        # Apply filters
         filtered_features = correlation_filter(feature_df, threshold=args.correlation_threshold)
         filtered_features = variance_threshold_selector(filtered_features)
 
-        # Re-join metadata
         df_selected = pd.concat([metadata_df, filtered_features], axis=1)
         logger.info(f"Feature selection complete. Final shape: {df_selected.shape}")
+
+        output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
+        df_selected.to_csv(output_path, index=False, sep='\t')
+        logger.info(f"Final cleaned data saved to {output_path}")
+
     except Exception as e:
-        logger.error(f"Feature selection failed: {e}")
-        df_selected = grouped_filtered_df.copy()
+        logger.error(f"Feature selection skipped: {e}")
+
 
     # === Save Final Cleaned Output ===
     output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
