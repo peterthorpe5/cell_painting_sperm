@@ -459,3 +459,35 @@ if __name__ == "__main__":
         logger.info(f"Final cleaned data saved to {output_path}")
     else:
         logger.warning("No feature-selected data to save.")
+
+
+    
+        # === Save Final Ungrouped Data Using Grouped Feature Selection Columns ===
+    try:
+        if df_selected is not None:
+            logger.info("Preparing ungrouped data with the same columns as the feature-selected grouped data.")
+
+            # Determine final columns (features only) that made it through
+            selected_feature_columns = [col for col in df_selected.columns if col not in metadata_cols_to_preserve]
+
+            # Reconstruct ungrouped version using these selected features
+            ungrouped_metadata_df = df[metadata_cols].copy()
+
+            # Sanity check: make sure all selected features are in the ungrouped data
+            missing_features = [col for col in selected_feature_columns if col not in df.columns]
+            if missing_features:
+                raise ValueError(f"The following selected features are missing from the ungrouped data: {missing_features}")
+
+            ungrouped_features_df = df[selected_feature_columns].copy()
+
+            df_ungrouped_selected = pd.concat([ungrouped_metadata_df, ungrouped_features_df], axis=1)
+
+            ungrouped_selected_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_feature_selected.tsv"
+            df_ungrouped_selected.to_csv(ungrouped_selected_path, index=False, sep='\t')
+            logger.info(f"Final ungrouped, feature-aligned data saved to {ungrouped_selected_path}")
+
+        else:
+            logger.warning("Skipping ungrouped feature-selected output because df_selected is None.")
+    except Exception as e:
+        logger.error(f"Could not save ungrouped feature-selected output: {e}")
+
