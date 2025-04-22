@@ -361,6 +361,9 @@ if __name__ == "__main__":
         ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.tsv"
         df_ungrouped_filtered.to_csv(ungrouped_filtered_path, index=False, sep='\t')
         logger.info(f"Ungrouped, correlation- and variance-filtered data (with metadata) saved to {ungrouped_filtered_path}")
+        # Save clean ungrouped version right after imputation
+        df_ungrouped_imputed = df.copy()
+
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
 
@@ -462,32 +465,28 @@ if __name__ == "__main__":
 
 
     
-        # === Save Final Ungrouped Data Using Grouped Feature Selection Columns ===
+    # === Save Final Ungrouped Data Using Grouped Feature Selection Columns ===
     try:
         if df_selected is not None:
             logger.info("Preparing ungrouped data with the same columns as the feature-selected grouped data.")
 
-            # Determine final columns (features only) that made it through
+            # Determine final feature columns that passed selection
             selected_feature_columns = [col for col in df_selected.columns if col not in metadata_cols_to_preserve]
 
-            # Reconstruct ungrouped version using these selected features
-            ungrouped_metadata_df = df[metadata_cols].copy()
+            # Ensure metadata present in ungrouped version
+            ungrouped_metadata_df = df_ungrouped_imputed[metadata_cols].copy()
 
-            # Sanity check: make sure all selected features are in the ungrouped data
-            missing_features = [col for col in selected_feature_columns if col not in df.columns]
-            if missing_features:
-                raise ValueError(f"The following selected features are missing from the ungrouped data: {missing_features}")
+            # Select the same features from ungrouped data
+            ungrouped_features_df = df_ungrouped_imputed[selected_feature_columns].copy()
 
-            ungrouped_features_df = df[selected_feature_columns].copy()
-
+            # Combine
             df_ungrouped_selected = pd.concat([ungrouped_metadata_df, ungrouped_features_df], axis=1)
 
             ungrouped_selected_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_feature_selected.tsv"
             df_ungrouped_selected.to_csv(ungrouped_selected_path, index=False, sep='\t')
-            logger.info(f"Final ungrouped, feature-aligned data saved to {ungrouped_selected_path}")
 
+            logger.info(f"Final ungrouped, feature-aligned data saved to {ungrouped_selected_path}")
         else:
             logger.warning("Skipping ungrouped feature-selected output because df_selected is None.")
     except Exception as e:
         logger.error(f"Could not save ungrouped feature-selected output: {e}")
-
