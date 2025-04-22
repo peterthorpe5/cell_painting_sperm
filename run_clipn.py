@@ -109,7 +109,7 @@ def load_single_dataset(name, path, logger, metadata_cols):
     name : str
         Dataset name used to label the MultiIndex.
     path : str
-        Path to the input CSV file.
+        Path to the input CSV/TSV file.
     logger : logging.Logger
         Logger instance for status and error reporting.
     metadata_cols : list of str
@@ -125,29 +125,34 @@ def load_single_dataset(name, path, logger, metadata_cols):
     ValueError
         If any mandatory metadata column is missing after standardisation.
     """
-    df = pd.read_csv(path, index_col=0)
+    delimiter = detect_csv_delimiter(path)
+
+    # Load with NO index, avoid dropping metadata
+    df = pd.read_csv(path, delimiter=delimiter, index_col=None)
 
     if logger:
         logger.debug(f"[{name}] Columns after initial load: {df.columns.tolist()}")
-        logger.debug(f"[{name}] Index name after initial load: {df.index.name}")
 
-    # Promote index to column if it's one of the metadata cols
     if df.index.name in metadata_cols:
-        df[df.index.name] = df.index
+        promoted_col = df.index.name
+        df[promoted_col] = df.index
         df.index.name = None
-        logger.warning(f"[{name}] Promoted index '{df.columns[-1]}' to column to preserve metadata.")
+        logger.warning(f"[{name}] Promoted index '{promoted_col}' to column to preserve metadata.")
 
+    # Standardise column names (e.g., trimming whitespace)
     df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
 
-    # Check for all required metadata columns
+    # Check required metadata columns
     missing_cols = [col for col in metadata_cols if col not in df.columns]
     if missing_cols:
         for col in missing_cols:
             logger.error(f"[{name}] Mandatory column '{col}' missing after standardisation.")
         raise ValueError(f"[{name}] Mandatory column(s) {missing_cols} missing after standardisation.")
 
-    # Reset index before setting MultiIndex to avoid mismatches
+    # Reset index to ensure clean MultiIndex
     df = df.reset_index(drop=True)
+
+    # Wrap with MultiIndex
     df.index = pd.MultiIndex.from_frame(
         pd.DataFrame({"Dataset": name, "Sample": range(len(df))})
     )
