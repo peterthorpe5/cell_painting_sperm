@@ -472,8 +472,15 @@ if __name__ == "__main__":
             # Determine final feature columns that passed selection
             selected_feature_columns = [col for col in df_selected.columns if col not in metadata_cols_to_preserve]
 
-            # Ensure metadata present in ungrouped version
+
+            # Ensure index is flat so metadata columns are accessible
+            if isinstance(df_ungrouped_imputed.index, pd.MultiIndex):
+                df_ungrouped_imputed = df_ungrouped_imputed.reset_index()
+
             ungrouped_metadata_df = df_ungrouped_imputed[metadata_cols].copy()
+            logger.debug(f"Final ungrouped metadata columns: {ungrouped_metadata_df.columns.tolist()}")
+
+
 
             # Select the same features from ungrouped data
             ungrouped_features_df = df_ungrouped_imputed[selected_feature_columns].copy()
