@@ -98,6 +98,51 @@ def detect_csv_delimiter(csv_path):
             # default to comma if both are found or none
             return ','
 
+
+def merge_annotations(latent_file: str, annotation_file: str, output_prefix: str, logger: logging.Logger) -> None:
+    """
+    Merge compound annotations into the CLIPn latent output.
+
+    Parameters
+    ----------
+    latent_file : str
+        Path to CLIPn latent space output (TSV).
+    annotation_file : str
+        Path to annotation file with compound information (TSV).
+    output_prefix : str
+        Base path prefix for output files (no extension).
+    logger : logging.Logger
+        Logger instance.
+    """
+    try:
+        latent_df = pd.read_csv(latent_file, sep='\t')
+        annot_df = pd.read_csv(annotation_file, sep='\t')
+
+        annot_df = annot_df.rename(columns={
+            "Plate": "Plate_Metadata",
+            "Well": "Well_Metadata"
+        })
+
+        merged = pd.merge(
+            latent_df,
+            annot_df,
+            on=["Plate_Metadata", "Well_Metadata"],
+            how="left",
+            validate="many_to_one"
+        )
+
+        merged_tsv = f"{output_prefix}_latent_with_annotations.tsv"
+        merged_csv = f"{output_prefix}_latent_with_annotations.csv"
+
+        merged.to_csv(merged_tsv, sep='\t', index=False)
+        merged.to_csv(merged_csv, index=False)
+
+        logger.info(f"Merged annotation saved to:\n- {merged_tsv}\n- {merged_csv}")
+
+    except Exception as e:
+        logger.warning(f"Annotation merging failed: {e}")
+
+
 # this is the problem function when we loose cpd_id
 # I hate this function. 
 def load_single_dataset(name, path, logger, metadata_cols):
@@ -712,6 +757,14 @@ def main(args):
 
         cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.tsv"
         decoded_with_index.to_csv(cpd_csv_file, sep="\t", index=False)
+        if args.annotations:
+            logger.info(f"Merging annotations from: {args.annotations}")
+            merge_annotations(
+                latent_file=str(cpd_csv_file),
+                annotation_file=args.annotations,
+                output_prefix=str(cpd_csv_file).replace(".tsv", ""),
+                logger=logger)
+
         # Generate combined label mapping from decoded data
         try:
             label_mapping_combined = decoded_with_index.copy()
@@ -777,6 +830,11 @@ if __name__ == "__main__":
    
     parser.add_argument("--reference_names", nargs='+', default=["reference1", "reference2"],
                     help="List of dataset names to use for training the CLIPn model.")
+    parser.add_argument("--annotations",
+                        type=str,
+                        default=None,
+                        help="Optional annotation file (TSV) to merge using Plate_Metadata and Well_Metadata.")
+
 
     args = parser.parse_args()
     main(args)
