@@ -300,6 +300,8 @@ if __name__ == "__main__":
 
 
     logger.info(f"Imputation ({args.impute}) completed. Final shape: {df.shape}")
+    # Save clean ungrouped version right after imputation
+    df_ungrouped_imputed = df.copy()
 
     # === Optional Annotation Merge ===
     if args.annotation_file:
@@ -361,9 +363,6 @@ if __name__ == "__main__":
         ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.tsv"
         df_ungrouped_filtered.to_csv(ungrouped_filtered_path, index=False, sep='\t')
         logger.info(f"Ungrouped, correlation- and variance-filtered data (with metadata) saved to {ungrouped_filtered_path}")
-        # Save clean ungrouped version right after imputation
-        df_ungrouped_imputed = df.copy()
-
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
 
