@@ -123,6 +123,11 @@ def merge_annotations(latent_file: str, annotation_file: str, output_prefix: str
             "Well": "Well_Metadata"
         })
 
+        logger.info(f"Merging annotations on keys: Plate_Metadata, Well_Metadata")
+        logger.info(f"Latent columns: {latent_df.columns.tolist()}")
+        logger.info(f"Annotation columns: {annot_df.columns.tolist()}")
+        logger.info(f"Latent shape: {latent_df.shape}, Annotation shape: {annot_df.shape}")
+
         merged = pd.merge(
             latent_df,
             annot_df,
@@ -130,6 +135,10 @@ def merge_annotations(latent_file: str, annotation_file: str, output_prefix: str
             how="left",
             validate="many_to_one"
         )
+
+        logger.info(f"Merged shape: {merged.shape}")
+        n_merged = merged["cpd_id"].notna().sum()
+        logger.info(f"Successfully merged rows with non-null cpd_id: {n_merged}")
 
         merged_tsv = f"{output_prefix}_latent_with_annotations.tsv"
         merged_csv = f"{output_prefix}_latent_with_annotations.csv"
@@ -757,13 +766,35 @@ def main(args):
 
         cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.tsv"
         decoded_with_index.to_csv(cpd_csv_file, sep="\t", index=False)
+
+        # here we add annotation data. Note the excel file is messy
+        # Create a copy of decoded data to safely add annotation join fields
+        annot_merge_df = decoded_with_index.copy()
+
+        # Load datasets again to extract Plate_Metadata and Well_Metadata
+        metadata_cols_extended = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+
+        # Build a lookup table for Plate_Metadata and Well_Metadata
+        plate_well_lookup = combined_df[metadata_cols_extended].reset_index()
+
+        # Merge in Plate_Metadata and Well_Metadata
+        annot_merge_df = pd.merge(
+            annot_merge_df,
+            plate_well_lookup[["Dataset", "Sample", "Plate_Metadata", "Well_Metadata"]],
+            on=["Dataset", "Sample"],
+            how="left"
+        )
         if args.annotations:
             logger.info(f"Merging annotations from: {args.annotations}")
             merge_annotations(
-                latent_file=str(cpd_csv_file),
+                latent_file=annot_merge_df,
                 annotation_file=args.annotations,
                 output_prefix=str(cpd_csv_file).replace(".tsv", ""),
-                logger=logger)
+                logger=logger
+            )
+
+
+
 
         # Generate combined label mapping from decoded data
         try:
