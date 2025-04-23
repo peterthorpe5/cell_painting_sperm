@@ -1,4 +1,9 @@
 #!/bin/bash
+#SBATCH -J clipn   #jobname
+#SBATCH --partition=gpu
+#SBATCH --mem=24GB
+
+
 cd $HOME/scratch/2025_STB/2025_cell_painting_sperm
 
 conda activate clipn
@@ -35,28 +40,23 @@ for MODE in "${MODES[@]}"; do
         --experiment "$EXP_NAME" \
         --mode "$MODE" \
         --epoch "$EPOCH" \
-        --latent_dim "$LATENT_DIM"
+        --latent_dim "$LATENT_DIM" \
+        --annotations STBV1_and_2_10uM_10032024.csv
 
       echo "--- Running UMAP output ---"
-      python "$UMAP_SCRIPT" \
-        --input "${POST_DIR}/${LATENT_FILE}" \
-        --add_labels \
-        --output_dir "${POST_DIR}/UMAP" \
-        --colour_by Library
+      MIN_DISTS=(0.1 0.2 0.3 0.4)
+      COLOUR_BY=("Library" "Dataset" "cpd_type")
 
-      python "$UMAP_SCRIPT" \
-        --input "${POST_DIR}/${LATENT_FILE}" \
-        --add_labels \
-        --output_dir "${POST_DIR}/UMAP" \
-        --colour_by Dataset
-
-      python "$UMAP_SCRIPT" \
-        --input "${POST_DIR}/${LATENT_FILE}" \
-        --add_labels \
-        --output_dir "${POST_DIR}/UMAP" \
-        --colour_by cpd_type
-
-
+      for DIST in "${MIN_DISTS[@]}"; do
+        for COLOUR in "${COLOUR_BY[@]}"; do
+          python "$UMAP_SCRIPT" \
+            --input "${POST_DIR}/${LATENT_FILE}" \
+            --add_labels \
+            --output_dir "${POST_DIR}/UMAP" \
+            --umap_min_dist "$DIST" \
+            --colour_by "$COLOUR"
+        done
+      done
 
 
       echo "--- Running CLIPn post analysis ---"

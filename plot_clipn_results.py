@@ -89,9 +89,23 @@ def main(args):
     df = pd.read_csv(args.latent_csv, sep="\t")
     df = clean_and_reorder_latent_df(df)
 
-    if "Cluster" not in df.columns:
-        logger.warning("No 'Cluster' column found. Running KMeans and HDBSCAN.")
+    
+
+    # Assign clusters if none exist
+    if not any(col for col in df.columns if col.startswith("Cluster_")):
+        logger.info("No cluster assignments found. Running KMeans and HDBSCAN...")
         df = assign_clusters(df, logger=logger)
+
+    for cluster_col in ["Cluster_KMeans", "Cluster_HDBSCAN"]:
+        if cluster_col in df.columns:
+            logger.info(f"Generating UMAP for {cluster_col}")
+            output_file = os.path.join(args.plots, f"clipn_UMAP_{cluster_col}.pdf")
+            try:
+                generate_umap(df.copy(), args.plots, output_file, args=args, add_labels=True, colour_by=cluster_col)
+            except Exception as e:
+                logger.warning(f"UMAP failed for {cluster_col}: {e}")
+
+
 
     for cluster_col in ["Cluster_KMeans", "Cluster_HDBSCAN"]:
         if cluster_col in df.columns:
