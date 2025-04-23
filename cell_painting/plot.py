@@ -20,7 +20,7 @@ set_config(transform_output="pandas")
 from scipy.spatial.distance import cdist
 import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
-from scipy.spatial.distance import squareform
+from scipy.spatial.distance import pdist, squareform
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +38,60 @@ def plot_dendrogram(dist_df, output_file, method="ward", figsize=(14, 10), label
     method : str, optional
         Linkage method to use for clustering. Default is 'ward'.
     figsize : tuple, optional
-        Size of the figure. Default is (12, 8).
+        Size of the figure. Default is (14, 10).
     label_fontsize : int, optional
-        Font size for axis tick labels. Default is 4.
+        Font size for axis tick labels. Default is 2.
     """
-    # Compute linkage
-    linkage_matrix = linkage(dist_df, method=method)
+    from scipy.spatial.distance import squareform
+    from scipy.cluster.hierarchy import linkage, dendrogram
+    import matplotlib.pyplot as plt
 
-    # Plot
+    condensed_dist = squareform(dist_df.values)
+    linkage_matrix = linkage(condensed_dist, method=method)
+
     fig, ax = plt.subplots(figsize=figsize)
-    dendrogram(linkage_matrix, labels=dist_df.index.tolist(), leaf_rotation=90, leaf_font_size=label_fontsize)
+    dendrogram(
+        linkage_matrix,
+        labels=dist_df.index.tolist(),
+        leaf_rotation=90,
+        leaf_font_size=label_fontsize
+    )
     ax.tick_params(axis="x", labelsize=label_fontsize)
     ax.tick_params(axis="y", labelsize=label_fontsize)
 
     plt.tight_layout()
-    plt.savefig(output_file, dpi=1200)
+    plt.savefig(output_file, dpi=300)
+    plt.close()
+
+def plot_distance_heatmap(dist_df, output_path):
+    """
+    Generate and save a heatmap of pairwise compound distances with clustering.
+
+    Parameters
+    ----------
+    dist_df : pd.DataFrame
+        Pairwise distance matrix.
+    output_path : str
+        Path to save the heatmap PDF file.
+    """
+    from scipy.spatial.distance import squareform
+    from scipy.cluster.hierarchy import linkage
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    linkage_matrix = linkage(squareform(dist_df.values), method="ward")
+
+    cg = sns.clustermap(
+        dist_df,
+        row_linkage=linkage_matrix,
+        col_linkage=linkage_matrix,
+        cmap="viridis",
+        figsize=(10, 10),
+        xticklabels=False,
+        yticklabels=False
+    )
+    cg.fig.suptitle("Pairwise Compound Distance Heatmap", y=1.02)
+    cg.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
@@ -129,30 +168,6 @@ def load_latent_data(latent_csv_path):
     return pd.read_csv(latent_csv_path, index_col=[0, 1, 2])
 
 
-def plot_distance_heatmap(dist_df, output_path):
-    """
-    Generate and save a heatmap of pairwise compound distances.
-
-    Parameters:
-    -----------
-    dist_df : pd.DataFrame
-        Pairwise distance matrix with `cpd_id` as row and column labels.
-    output_path : str
-        Path to save the heatmap PDF file.
-    """
-    plt.figure(figsize=(14, 12))
-    htmap = sns.clustermap(dist_df, cmap="viridis", method="ward",
-                           figsize=(12, 10),
-                           xticklabels=True,
-                           yticklabels=True)
-
-    # Rotate labels for better readability
-    plt.setp(htmap.ax_heatmap.get_xticklabels(), rotation=90, fontsize=2)
-    plt.setp(htmap.ax_heatmap.get_yticklabels(), rotation=0, fontsize=2)
-
-    plt.title("Pairwise Distance Heatmap of Compounds")
-    plt.savefig(output_path, dpi=1200, bbox_inches="tight")
-    plt.close()
 
 
 def generate_umap(combined_latent_df, output_folder,

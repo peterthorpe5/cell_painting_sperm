@@ -30,6 +30,8 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import pdist, squareform
+from scipy.cluster.hierarchy import linkage, dendrogram
 from sklearn import set_config
 set_config(transform_output="pandas")
 from cell_painting.plot import (
@@ -153,6 +155,9 @@ if __name__ == "__main__":
                         type=int, 
                         default=15,
                         help="Number of clusters for KMeans (default: 15).")
+    parser.add_argument("--include_heatmap", action="store_true",
+                        help="Include heatmap and dendrogram plots (slow).")
+
 
     args = parser.parse_args()
     main(args)
