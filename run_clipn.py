@@ -99,6 +99,43 @@ def detect_csv_delimiter(csv_path):
             return ','
 
 
+def ensure_plate_well_metadata(decoded_df: pd.DataFrame, metadata_source: pd.DataFrame, logger) -> pd.DataFrame:
+    """
+    Ensure Plate_Metadata and Well_Metadata are attached to the decoded DataFrame.
+
+    Parameters
+    ----------
+    decoded_df : pd.DataFrame
+        DataFrame from the decoded latent space.
+    metadata_source : pd.DataFrame
+        Original combined metadata including Plate_Metadata and Well_Metadata.
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    pd.DataFrame
+        Updated DataFrame with Plate_Metadata and Well_Metadata columns.
+    """
+    required_cols = ["Plate_Metadata", "Well_Metadata"]
+    if all(col in decoded_df.columns for col in required_cols):
+        logger.debug("Plate_Metadata and Well_Metadata already present in decoded_df.")
+        return decoded_df
+
+    logger.debug("Re-attaching Plate_Metadata and Well_Metadata to decoded_df.")
+    meta_cols_extended = ["Dataset", "Sample"] + required_cols
+    lookup_df = metadata_source[meta_cols_extended].drop_duplicates()
+
+    merged_df = pd.merge(
+        decoded_df,
+        lookup_df,
+        on=["Dataset", "Sample"],
+        how="left",
+        validate="many_to_one"
+    )
+
+    return merged_df
+
 def merge_annotations(latent_df_or_path, annotation_file: str, output_prefix: str, logger: logging.Logger) -> None:
     """
     Merge compound annotations into the CLIPn latent output.
@@ -127,12 +164,11 @@ def merge_annotations(latent_df_or_path, annotation_file: str, output_prefix: st
         if "Well_Metadata" not in annot_df.columns and "Well" in annot_df.columns:
             annot_df["Well_Metadata"] = annot_df["Well"]
 
-        logger.info(f"Merging annotations on keys: Plate_Metadata, Well_Metadata")
+        logger.info("Merging annotations on keys: Plate_Metadata, Well_Metadata")
         logger.info(f"Latent columns: {latent_df.columns.tolist()}")
         logger.info(f"Annotation columns: {annot_df.columns.tolist()}")
         logger.info(f"Latent shape: {latent_df.shape}, Annotation shape: {annot_df.shape}")
 
-        # Check that Plate_Metadata and Well_Metadata exist in latent_df before merge
         if "Plate_Metadata" not in latent_df.columns or "Well_Metadata" not in latent_df.columns:
             logger.warning("Plate_Metadata or Well_Metadata missing in latent data — merge skipped.")
             return
