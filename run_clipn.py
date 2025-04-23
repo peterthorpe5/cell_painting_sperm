@@ -739,9 +739,6 @@ def main(args):
                 logger.info(f"Trained CLIPn model saved to: {model_path}")
 
     
-
-        
-
     latent_df = latent_df.reset_index()
     latent_df = pd.merge(latent_df, metadata_df, on=["Dataset", "Sample"], how="left")
 
@@ -828,7 +825,7 @@ def main(args):
             })
             mapping_df.to_csv(mapping_path, index=False)
             logger.info(f"Saved label mapping for {column} to {mapping_path}")
-            logger.info(f"clipn intergration completed. If this ran .. there is a god")
+        logger.info(f"clipn intergration completed. If this ran .. there is a god")
     except Exception as e:
         logger.warning(f"Failed to save label encoder mappings: {e}")
 
