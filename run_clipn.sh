@@ -44,17 +44,35 @@ for MODE in "${MODES[@]}"; do
         --annotations STBV1_and_2_10uM_10032024.csv
 
       echo "--- Running UMAP output ---"
-      MIN_DISTS=(0.1 0.2 0.3 0.4)
+      MIN_DISTS=(0.1 0.2 0.3 0.4 0.5 0.6)
       COLOUR_BY=("Library" "Dataset" "cpd_type")
+      CLUSTERS=("None" 15 20 25 30)
 
       for DIST in "${MIN_DISTS[@]}"; do
-        for COLOUR in "${COLOUR_BY[@]}"; do
-          python "$UMAP_SCRIPT" \
-            --input "${POST_DIR}/${LATENT_FILE}" \
-            --add_labels \
-            --output_dir "${POST_DIR}/UMAP" \
-            --umap_min_dist "$DIST" \
-            --colour_by "$COLOUR"
+        for CLUSTER_COUNT in "${CLUSTERS[@]}"; do
+          for COLOUR in "${COLOUR_BY[@]}"; do
+
+            # Label to tag output files/folders
+            if [[ "$CLUSTER_COUNT" == "None" ]]; then
+              CLUSTER_LABEL="kNone"
+              CLUSTER_ARGS=()
+            else
+              CLUSTER_LABEL="k${CLUSTER_COUNT}"
+              CLUSTER_ARGS=(--num_clusters "$CLUSTER_COUNT")
+            fi
+
+            # Custom output directory that includes cluster setting
+            OUTDIR="${POST_DIR}/UMAP_${CLUSTER_LABEL}"
+
+            python "$UMAP_SCRIPT" \
+              --input "${POST_DIR}/${LATENT_FILE}" \
+              --add_labels \
+              --output_dir "$OUTDIR" \
+              --umap_min_dist "$DIST" \
+              --colour_by "$COLOUR" \
+              "${CLUSTER_ARGS[@]}"
+
+          done
         done
       done
 

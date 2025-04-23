@@ -109,12 +109,18 @@ def main(args):
 
     for cluster_col in ["Cluster_KMeans", "Cluster_HDBSCAN"]:
         if cluster_col in df.columns:
-            summary_path = os.path.join(args.plots, f"umap_summary_{cluster_col}.tsv")
-            df.reset_index().groupby(cluster_col).agg({
-                "cpd_type": lambda x: sorted(set(x)),
-                "cpd_id": lambda x: sorted(set(x))
-            }).to_csv(summary_path, sep="\t")
-            logger.info(f"Saved UMAP cluster summary to: {summary_path}")
+            logger.info(f"Generating UMAP for {cluster_col}")
+            output_file = os.path.join(args.plots, f"clipn_UMAP_{cluster_col}.pdf")
+            try:
+                generate_umap(
+                    df.copy(), args.plots, output_file,
+                    args=args,
+                    add_labels=True,
+                    colour_by=cluster_col  # <-- this part is critical
+                )
+            except Exception as e:
+                logger.warning(f"UMAP failed for {cluster_col}: {e}")
+
 
     # Generate UMAP without labels
     logger.info("Generating UMAP visualisation")
