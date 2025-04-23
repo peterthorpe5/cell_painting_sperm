@@ -37,12 +37,19 @@ set_config(transform_output="pandas")
 from cell_painting.plot import (
     plot_distance_heatmap,
     plot_dendrogram,
-    generate_umap
+    generate_umap,
+    assign_clusters
 )
 from cell_painting.process_data import (
     generate_similarity_summary,
     compute_pairwise_distances
 )
+
+try:
+    from hdbscan import HDBSCAN
+except ImportError:
+    HDBSCAN = None
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -82,6 +89,19 @@ def main(args):
     df = pd.read_csv(args.latent_csv, sep="\t")
     df = clean_and_reorder_latent_df(df)
 
+    if "Cluster" not in df.columns:
+        logger.warning("No 'Cluster' column found. Running KMeans and HDBSCAN.")
+        df = assign_clusters(df, logger=logger)
+
+    for cluster_col in ["Cluster_KMeans", "Cluster_HDBSCAN"]:
+        if cluster_col in df.columns:
+            summary_path = os.path.join(args.plots, f"umap_summary_{cluster_col}.tsv")
+            df.reset_index().groupby(cluster_col).agg({
+                "cpd_type": lambda x: sorted(set(x)),
+                "cpd_id": lambda x: sorted(set(x))
+            }).to_csv(summary_path, sep="\t")
+            logger.info(f"Saved UMAP cluster summary to: {summary_path}")
+
     # Generate UMAP without labels
     logger.info("Generating UMAP visualisation")
     umap_file = os.path.join(args.plots, "clipn_UMAP.pdf")
@@ -110,9 +130,13 @@ def main(args):
     # Heatmap and dendrogram
     logger.info("Generating heatmap and dendrogram")
     logger.info("this takes a long time ...")
-    plot_dendrogram(dist_df, os.path.join(args.plots, "compound_clustering_dendrogram.pdf"))
-    plot_distance_heatmap(dist_df, os.path.join(args.plots, "compound_distance_heatmap.pdf"))
 
+    if args.include_heatmap:
+        logger.info("Generating heatmap and dendrogram (may be slow)...")
+        plot_dendrogram(dist_df, os.path.join(args.plots, "compound_clustering_dendrogram.pdf"))
+        plot_distance_heatmap(dist_df, os.path.join(args.plots, "compound_distance_heatmap.pdf"))
+    else:
+        logger.info("Skipping heatmap and dendrogram (set --include_heatmap to enable)")
 
     # Similarity summary
     logger.info("Generating similarity summary")

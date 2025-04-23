@@ -13,6 +13,8 @@ import logging
 import matplotlib.pyplot as plt
 import umap.umap_ as umap
 from pathlib import Path
+import numpy as np
+import hdbscan
 from sklearn.cluster import KMeans
 from sklearn import set_config
 set_config(transform_output="pandas")
@@ -24,75 +26,6 @@ from scipy.spatial.distance import pdist, squareform
 
 logger = logging.getLogger(__name__)
 
-
-def plot_dendrogram(dist_df, output_file, method="ward", figsize=(14, 10), label_fontsize=2):
-    """
-    Plots and saves a hierarchical clustering dendrogram.
-
-    Parameters
-    ----------
-    dist_df : pd.DataFrame
-        Pairwise distance matrix.
-    output_file : str
-        Path to save the dendrogram plot.
-    method : str, optional
-        Linkage method to use for clustering. Default is 'ward'.
-    figsize : tuple, optional
-        Size of the figure. Default is (14, 10).
-    label_fontsize : int, optional
-        Font size for axis tick labels. Default is 2.
-    """
-    from scipy.spatial.distance import squareform
-    from scipy.cluster.hierarchy import linkage, dendrogram
-    import matplotlib.pyplot as plt
-
-    condensed_dist = squareform(dist_df.values)
-    linkage_matrix = linkage(condensed_dist, method=method)
-
-    fig, ax = plt.subplots(figsize=figsize)
-    dendrogram(
-        linkage_matrix,
-        labels=dist_df.index.tolist(),
-        leaf_rotation=90,
-        leaf_font_size=label_fontsize
-    )
-    ax.tick_params(axis="x", labelsize=label_fontsize)
-    ax.tick_params(axis="y", labelsize=label_fontsize)
-
-    plt.tight_layout()
-    plt.savefig(output_file, dpi=300)
-    plt.close()
-
-def plot_distance_heatmap(dist_df, output_path):
-    """
-    Generate and save a heatmap of pairwise compound distances with clustering.
-
-    Parameters
-    ----------
-    dist_df : pd.DataFrame
-        Pairwise distance matrix.
-    output_path : str
-        Path to save the heatmap PDF file.
-    """
-    from scipy.spatial.distance import squareform
-    from scipy.cluster.hierarchy import linkage
-    import seaborn as sns
-    import matplotlib.pyplot as plt
-
-    linkage_matrix = linkage(squareform(dist_df.values), method="ward")
-
-    cg = sns.clustermap(
-        dist_df,
-        row_linkage=linkage_matrix,
-        col_linkage=linkage_matrix,
-        cmap="viridis",
-        figsize=(10, 10),
-        xticklabels=False,
-        yticklabels=False
-    )
-    cg.fig.suptitle("Pairwise Compound Distance Heatmap", y=1.02)
-    cg.savefig(output_path, dpi=300, bbox_inches="tight")
-    plt.close()
 
 
 
@@ -167,6 +100,121 @@ def load_latent_data(latent_csv_path):
     """
     return pd.read_csv(latent_csv_path, index_col=[0, 1, 2])
 
+
+def plot_dendrogram(dist_df, output_file, method="ward", figsize=(14, 10), label_fontsize=2):
+    """
+    Plots and saves a hierarchical clustering dendrogram.
+
+    Parameters
+    ----------
+    dist_df : pd.DataFrame
+        Pairwise distance matrix.
+    output_file : str
+        Path to save the dendrogram plot.
+    method : str, optional
+        Linkage method to use for clustering. Default is 'ward'.
+    figsize : tuple, optional
+        Size of the figure. Default is (14, 10).
+    label_fontsize : int, optional
+        Font size for axis tick labels. Default is 2.
+    """
+
+    condensed_dist = squareform(dist_df.values)
+    linkage_matrix = linkage(condensed_dist, method=method)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    dendrogram(
+        linkage_matrix,
+        labels=dist_df.index.tolist(),
+        leaf_rotation=90,
+        leaf_font_size=label_fontsize
+    )
+    ax.tick_params(axis="x", labelsize=label_fontsize)
+    ax.tick_params(axis="y", labelsize=label_fontsize)
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=1200)
+    plt.close()
+
+
+def plot_distance_heatmap(dist_df, output_path):
+    """
+    Generate and save a heatmap of pairwise compound distances with clustering.
+
+    Parameters
+    ----------
+    dist_df : pd.DataFrame
+        Pairwise distance matrix.
+    output_path : str
+        Path to save the heatmap PDF file.
+    """
+
+    linkage_matrix = linkage(squareform(dist_df.values), method="ward")
+
+    cg = sns.clustermap(
+        dist_df,
+        row_linkage=linkage_matrix,
+        col_linkage=linkage_matrix,
+        cmap="viridis",
+        figsize=(10, 10),
+        xticklabels=False,
+        yticklabels=False
+    )
+
+    if hasattr(cg, "fig") and hasattr(cg.fig, "suptitle"):
+        cg.fig.suptitle("Pairwise Compound Distance Heatmap", y=1.02)
+
+    cg.savefig(output_path, dpi=1200, bbox_inches="tight")
+    plt.close()
+
+
+from sklearn.cluster import KMeans
+from hdbscan import HDBSCAN
+
+def assign_clusters(df, logger=None, n_clusters=15):
+    """
+    Assigns clusters to the latent space using both KMeans and HDBSCAN.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Latent space DataFrame (includes metadata + latent features).
+    logger : logging.Logger, optional
+        Logger for logging.
+    n_clusters : int
+        Number of clusters for KMeans.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with new columns: Cluster_KMeans and Cluster_HDBSCAN.
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    feature_cols = df.select_dtypes(include=["float", "int"]).columns.tolist()
+    latent = df[feature_cols].copy()
+
+    # Scale before clustering
+    scaled = StandardScaler().fit_transform(latent)
+
+    # KMeans
+    kmeans = KMeans(n_clusters=n_clusters, n_init="auto", random_state=42)
+    df["Cluster_KMeans"] = kmeans.fit_predict(scaled)
+    if logger:
+        logger.info("Assigned clusters using KMeans")
+
+    # HDBSCAN
+    try:
+        hdb = HDBSCAN(min_cluster_size=10)
+        df["Cluster_HDBSCAN"] = hdb.fit_predict(scaled)
+        if logger:
+            logger.info("Assigned clusters using HDBSCAN")
+    except Exception as e:
+        df["Cluster_HDBSCAN"] = -1
+        if logger:
+            logger.warning(f"HDBSCAN clustering failed: {e}")
+
+    return df
 
 
 
