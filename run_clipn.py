@@ -157,7 +157,7 @@ def merge_annotations(latent_df_or_path, annotation_file: str, output_prefix: st
         else:
             latent_df = latent_df_or_path.copy()
 
-        annot_df = pd.read_csv(annotation_file, sep='\t')
+        annot_df = pd.read_csv(annotation_file, sep=',')
 
         if "Plate_Metadata" not in annot_df.columns and "Plate" in annot_df.columns:
             annot_df["Plate_Metadata"] = annot_df["Plate"]
