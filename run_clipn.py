@@ -99,14 +99,14 @@ def detect_csv_delimiter(csv_path):
             return ','
 
 
-def merge_annotations(latent_file: str, annotation_file: str, output_prefix: str, logger: logging.Logger) -> None:
+def merge_annotations(latent_df_or_path, annotation_file: str, output_prefix: str, logger: logging.Logger) -> None:
     """
     Merge compound annotations into the CLIPn latent output.
 
     Parameters
     ----------
-    latent_file : str
-        Path to CLIPn latent space output (TSV).
+    latent_df_or_path : str or pd.DataFrame
+        Path to CLIPn latent space output (TSV) or a DataFrame.
     annotation_file : str
         Path to annotation file with compound information (TSV).
     output_prefix : str
@@ -115,18 +115,27 @@ def merge_annotations(latent_file: str, annotation_file: str, output_prefix: str
         Logger instance.
     """
     try:
-        latent_df = pd.read_csv(latent_file, sep='\t')
+        if isinstance(latent_df_or_path, str):
+            latent_df = pd.read_csv(latent_df_or_path, sep='\t')
+        else:
+            latent_df = latent_df_or_path.copy()
+
         annot_df = pd.read_csv(annotation_file, sep='\t')
 
-        annot_df = annot_df.rename(columns={
-            "Plate": "Plate_Metadata",
-            "Well": "Well_Metadata"
-        })
+        if "Plate_Metadata" not in annot_df.columns and "Plate" in annot_df.columns:
+            annot_df["Plate_Metadata"] = annot_df["Plate"]
+        if "Well_Metadata" not in annot_df.columns and "Well" in annot_df.columns:
+            annot_df["Well_Metadata"] = annot_df["Well"]
 
         logger.info(f"Merging annotations on keys: Plate_Metadata, Well_Metadata")
         logger.info(f"Latent columns: {latent_df.columns.tolist()}")
         logger.info(f"Annotation columns: {annot_df.columns.tolist()}")
         logger.info(f"Latent shape: {latent_df.shape}, Annotation shape: {annot_df.shape}")
+
+        # Check that Plate_Metadata and Well_Metadata exist in latent_df before merge
+        if "Plate_Metadata" not in latent_df.columns or "Well_Metadata" not in latent_df.columns:
+            logger.warning("Plate_Metadata or Well_Metadata missing in latent data — merge skipped.")
+            return
 
         merged = pd.merge(
             latent_df,
@@ -150,6 +159,7 @@ def merge_annotations(latent_file: str, annotation_file: str, output_prefix: str
 
     except Exception as e:
         logger.warning(f"Annotation merging failed: {e}")
+
 
 
 # this is the problem function when we loose cpd_id
@@ -766,21 +776,21 @@ def main(args):
 
         # here we add annotation data. Note the excel file is messy
         # Create a copy of decoded data to safely add annotation join fields
+        # Create a copy of decoded data to safely add annotation join fields
         annot_merge_df = decoded_with_index.copy()
 
         # Load datasets again to extract Plate_Metadata and Well_Metadata
         metadata_cols_extended = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-
-        # Build a lookup table for Plate_Metadata and Well_Metadata
         plate_well_lookup = combined_df[metadata_cols_extended].reset_index()
 
-        # Merge in Plate_Metadata and Well_Metadata
+        # Merge Plate_Metadata and Well_Metadata back into the decoded DataFrame
         annot_merge_df = pd.merge(
             annot_merge_df,
             plate_well_lookup[["Dataset", "Sample", "Plate_Metadata", "Well_Metadata"]],
             on=["Dataset", "Sample"],
             how="left"
         )
+
         if args.annotations:
             logger.info(f"Merging annotations from: {args.annotations}")
             merge_annotations(
@@ -789,8 +799,6 @@ def main(args):
                 output_prefix=str(cpd_csv_file).replace(".tsv", ""),
                 logger=logger
             )
-
-
 
 
         # Generate combined label mapping from decoded data
