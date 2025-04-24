@@ -92,11 +92,12 @@ def merge_and_save_combined(ref1_df, ref2_df, annot_df, output_dir):
     logger.info(f"Combined reference data shape: {combined_df.shape}")
 
     desired_annot_cols = [
-        "annotation_cpd_id", "name", "published_phenotypes", "publish own other",
-        "published_target", "published_vivo vitro", "published_in_vivo model",
-        "published_in_vitro model", "published cell_model", "pubchem", "pubmed ids",
-        "DMSO solubility info", "info", "well_number_y", "library", "smiles",
-        "pubchem_cid", "cpd_information", "pubchem_url", "cpd_type"
+        "annotation_cpd_id", "cpd_id", "Library", "Plate", "Well", "name",
+        "published_phenotypes", "publish own other", "published_target",
+        "published_vivo vitro", "published_in_vivo model", "published_in_vitro model",
+        "published cell_model", "pubchem", "pubmed ids", "DMSO solubility info",
+        "info", "well_number_y", "library", "smiles", "pubchem_cid",
+        "cpd_information", "pubchem_url", "cpd_type"
     ]
     annot_df = annot_df[[col for col in desired_annot_cols if col in annot_df.columns] + ["Plate_Metadata", "Well_Metadata"]]
 
