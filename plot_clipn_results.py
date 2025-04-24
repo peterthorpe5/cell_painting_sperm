@@ -186,6 +186,10 @@ def main(args):
     if not args.interactive:
         logger.info("Interactive UMAPs were skipped (set --interactive to enable).")
 
+
+    if args.compound_metadata is None:
+        logger.info("No compound metadata file provided — skipping annotation merge.")
+
     logger.info("All plots and summaries generated successfully.")
 
 
@@ -219,6 +223,12 @@ if __name__ == "__main__":
     
     parser.add_argument("--interactive", action="store_true",
                         help="If set, generate interactive UMAP plots using Plotly.")
+    
+    parser.add_argument("--compound_metadata",
+                        type=str,
+                        default=None,
+                        help="Optional TSV file with compound annotations to merge by cpd_id")
+
 
 
 

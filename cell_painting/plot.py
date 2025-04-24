@@ -165,7 +165,7 @@ def plot_distance_heatmap(dist_df, output_path):
     if hasattr(cg, "fig") and hasattr(cg.fig, "suptitle"):
         cg.fig.suptitle("Pairwise Compound Distance Heatmap", y=1.02)
 
-    cg.savefig(output_path, dpi=1200, bbox_inches="tight")
+    cg.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
@@ -215,7 +215,7 @@ def assign_clusters(df, logger=None, num_clusters=15):
 
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colour_by="cpd_type"):
     """
-    Generate and save UMAP plots (static + optional interactive).
+    Generate and save UMAP plots (matplotlib and optional interactive Plotly).
 
     Parameters
     ----------
@@ -224,9 +224,9 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
     output_dir : str
         Directory to save the plot.
     output_file : str
-        Path to the output plot file (PDF).
+        Path to the output plot file.
     args : Namespace, optional
-        Parsed CLI arguments (for n_neighbors, min_dist, etc.).
+        Parsed CLI arguments (for UMAP and interactive settings).
     add_labels : bool, optional
         Whether to add compound labels to the plot.
     colour_by : str, optional
@@ -235,31 +235,40 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
     Returns
     -------
     pd.DataFrame
-        DataFrame with added UMAP1 and UMAP2 columns.
+        DataFrame with UMAP coordinates added.
     """
     if args is None:
         n_neighbors = 15
         min_dist = 0.25
         metric = "euclidean"
+        compound_file = None
     else:
         n_neighbors = args.umap_n_neighbors
         min_dist = args.umap_min_dist
         metric = args.umap_metric
+        compound_file = getattr(args, "compound_metadata", None)
 
+    # Add compound metadata if available
+    if compound_file and os.path.isfile(compound_file):
+        try:
+            meta_df = pd.read_csv(compound_file, sep="\t")
+            meta_dedup = meta_df.drop_duplicates(subset="cpd_id")
+            df = pd.merge(df, meta_dedup[["cpd_id", "published_phenotypes", "publish own other", "published_target"]],
+                          on="cpd_id", how="left")
+        except Exception as e:
+            logging.warning(f"Failed to merge compound metadata: {e}")
+
+    # UMAP projection
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
     embedding = reducer.fit_transform(df[numeric_cols])
-
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
-    # Static plot (matplotlib)
+    # Static plot
     fig, ax = plt.subplots(figsize=(8, 6))
     if colour_by in df.columns:
-        sns.scatterplot(
-            x="UMAP1", y="UMAP2", hue=colour_by, data=df,
-            ax=ax, s=10, linewidth=0, alpha=0.8
-        )
+        sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
         ax.legend(loc="best", fontsize="small", markerscale=1, frameon=False)
     else:
         sns.scatterplot(x="UMAP1", y="UMAP2", data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
@@ -273,9 +282,13 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
     plt.savefig(output_file, dpi=1200)
     plt.close()
 
-    # Optional interactive plot (Plotly)
+    # Optional interactive Plotly plot
     if args is not None and getattr(args, "interactive", False):
-        hover_cols = [col for col in ["cpd_id", "cpd_type", "Library", "Dataset", colour_by] if col in df.columns]
+        hover_cols = [col for col in [
+            "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
+            "published_phenotypes", "publish own other", "published_target"
+        ] if col in df.columns]
+
         fig = px.scatter(
             df,
             x="UMAP1",
@@ -285,14 +298,10 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
             title=f"CLIPn UMAP ({metric}, coloured by {colour_by})",
             template="plotly_white"
         )
-        if add_labels and "cpd_id" in df.columns:
-            fig.update_traces(text=df["cpd_id"], textposition="top center")
-
         html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
         html_path = os.path.join(output_dir, html_name)
         fig.write_html(html_path)
         logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
 
     return df
-
 
