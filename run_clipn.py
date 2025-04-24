@@ -810,6 +810,16 @@ def main(args):
         cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.tsv"
         decoded_with_index.to_csv(cpd_csv_file, sep="\t", index=False)
 
+
+        if "Plate_Metadata" in decoded_with_index.columns and "Well_Metadata" in decoded_with_index.columns:
+            plate_well_df = decoded_with_index[["Dataset", "Sample", "cpd_id", "Plate_Metadata", "Well_Metadata"]].copy()
+            plate_well_file = post_clipn_dir / f"{args.experiment}_latent_plate_well_lookup.tsv"
+            plate_well_df.to_csv(plate_well_file, sep="\t", index=False)
+            logger.info(f"Saved Plate/Well metadata to: {plate_well_file}")
+        else:
+            logger.warning("Plate_Metadata or Well_Metadata missing in decoded output — skipping plate/well export.")
+
+
         # here we add annotation data. Note the excel file is messy
         # Create a copy of decoded data to safely add annotation join fields
         # Create a copy of decoded data to safely add annotation join fields
