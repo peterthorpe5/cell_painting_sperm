@@ -251,7 +251,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
     # Add compound metadata if available
     if compound_file and os.path.isfile(compound_file):
         try:
-            meta_df = pd.read_csv(compound_file, sep="\t")
+            meta_df = pd.read_csv(compound_file)
             meta_dedup = meta_df.drop_duplicates(subset="cpd_id")
             df = pd.merge(df, meta_dedup[["cpd_id", "published_phenotypes", "publish own other", "published_target"]],
                           on="cpd_id", how="left")
