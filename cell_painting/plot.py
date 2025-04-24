@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import hdbscan
 from sklearn.cluster import KMeans
+import plotly.express as px
 from sklearn import set_config
 set_config(transform_output="pandas")
 
@@ -212,10 +213,9 @@ def assign_clusters(df, logger=None, num_clusters=15):
 
 
 
-
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colour_by="cpd_type"):
     """
-    Generate and save UMAP plots.
+    Generate and save UMAP plots (static + optional interactive).
 
     Parameters
     ----------
@@ -224,13 +224,18 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
     output_dir : str
         Directory to save the plot.
     output_file : str
-        Path to the output plot file.
+        Path to the output plot file (PDF).
     args : Namespace, optional
         Parsed CLI arguments (for n_neighbors, min_dist, etc.).
     add_labels : bool, optional
         Whether to add compound labels to the plot.
     colour_by : str, optional
         Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with added UMAP1 and UMAP2 columns.
     """
     if args is None:
         n_neighbors = 15
@@ -248,6 +253,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
+    # Static plot (matplotlib)
     fig, ax = plt.subplots(figsize=(8, 6))
     if colour_by in df.columns:
         sns.scatterplot(
@@ -264,4 +270,29 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
 
     ax.set_title(f"CLIPn UMAP ({metric})")
     plt.tight_layout()
-    plt.savefig
+    plt.savefig(output_file, dpi=1200)
+    plt.close()
+
+    # Optional interactive plot (Plotly)
+    if args is not None and getattr(args, "interactive", False):
+        hover_cols = [col for col in ["cpd_id", "cpd_type", "Library", "Dataset", colour_by] if col in df.columns]
+        fig = px.scatter(
+            df,
+            x="UMAP1",
+            y="UMAP2",
+            color=colour_by if colour_by in df.columns else None,
+            hover_data=hover_cols,
+            title=f"CLIPn UMAP ({metric}, coloured by {colour_by})",
+            template="plotly_white"
+        )
+        if add_labels and "cpd_id" in df.columns:
+            fig.update_traces(text=df["cpd_id"], textposition="top center")
+
+        html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
+        html_path = os.path.join(output_dir, html_name)
+        fig.write_html(html_path)
+        logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
+
+    return df
+
+

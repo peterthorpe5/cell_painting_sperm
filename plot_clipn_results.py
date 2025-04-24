@@ -30,6 +30,7 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import plotly.express as px
 from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram
 from sklearn import set_config
@@ -101,25 +102,18 @@ def main(args):
             logger.info(f"Generating UMAP for {cluster_col}")
             output_file = os.path.join(args.plots, f"clipn_UMAP_{cluster_col}.pdf")
             try:
-                generate_umap(df.copy(), args.plots, output_file, args=args, add_labels=True, colour_by=cluster_col)
-            except Exception as e:
-                logger.warning(f"UMAP failed for {cluster_col}: {e}")
-
-
-
-    for cluster_col in ["Cluster_KMeans", "Cluster_HDBSCAN"]:
-        if cluster_col in df.columns:
-            logger.info(f"Generating UMAP for {cluster_col}")
-            output_file = os.path.join(args.plots, f"clipn_UMAP_{cluster_col}.pdf")
-            try:
-                generate_umap(
-                    df.copy(), args.plots, output_file,
-                    args=args,
-                    add_labels=True,
-                    colour_by=cluster_col  # <-- this part is critical
+                umap_df = generate_umap(df.copy(), args.plots, output_file, args=args, add_labels=True, colour_by=cluster_col)
+                # Save UMAP coordinates for the current cluster_col
+                umap_coords_file = os.path.join(
+                    args.plots, f"umap_coordinates_{cluster_col}_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
                 )
+                umap_df[["cpd_id", "UMAP1", "UMAP2"]].to_csv(umap_coords_file, sep="\t", index=False)
+                logger.info(f"Saved UMAP coordinates for {cluster_col} to: {umap_coords_file}")
+
             except Exception as e:
                 logger.warning(f"UMAP failed for {cluster_col}: {e}")
+
+
 
 
     # Generate UMAP without labels
@@ -134,17 +128,19 @@ def main(args):
     # Generate UMAP with labels
     logger.info("Generating UMAP visualisation with labels")
     umap_file_labeled = os.path.join(args.plots, "clipn_UMAP_labeled.pdf")
-    try:
-        umap_df = generate_umap(df.copy(), args.plots, umap_file_labeled, args=args, add_labels=True)
-    except ValueError as e:
-        logger.error(f"Labeled UMAP failed: {e}")
-        return
+
+    umap_df = generate_umap(df.copy(), args.plots, umap_file_labeled, args=args, add_labels=True)
+    if umap_df is None:
+        logger.error("Labeled UMAP returned None — skipping UMAP cluster summary.")
+
+
 
     # Pairwise distances
     logger.info("Computing pairwise distances")
     numeric_df = df.select_dtypes(include=[np.number])
     dist_df = compute_pairwise_distances(numeric_df)
-    dist_csv = os.path.join(args.plots, "pairwise_compound_distances.tsv")
+    prefix = f"{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}"
+    dist_csv = os.path.join(args.plots, f"pairwise_compound_distances_{prefix}.tsv")
     dist_df.to_csv(dist_csv, sep="\t")
 
     # Heatmap and dendrogram
@@ -160,17 +156,35 @@ def main(args):
 
     # Similarity summary
     logger.info("Generating similarity summary")
-    summary_df = generate_similarity_summary(dist_df)
-    summary_df.to_csv(os.path.join(args.plots, "compound_similarity_summary.tsv"), sep="\t", index=False)
+
+    try:
+        summary_df = generate_similarity_summary(dist_df)
+        summary_file = os.path.join(
+            args.plots,
+            f"compound_similarity_summary_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
+        )
+        summary_df.to_csv(summary_file, sep="\t", index=False)
+        logger.info(f"Saved compound similarity summary to: {summary_file}")
+    except Exception as e:
+        logger.error(f"Failed to generate similarity summary: {e}")
 
     # UMAP cluster summary
-    if "Cluster" in umap_df.columns:
+    if umap_df is not None and "Cluster" in umap_df.columns:
+
         logger.info("Generating UMAP cluster summary")
-        umap_summary_csv = os.path.join(args.plots, "umap_cluster_summary.tsv")
+
+        umap_summary_csv = os.path.join(
+            args.plots,
+            f"umap_cluster_summary_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
+        )
+
         umap_df.reset_index().groupby("Cluster").agg({
             "cpd_type": lambda x: sorted(set(x)),
             "cpd_id": lambda x: sorted(set(x))
         }).to_csv(umap_summary_csv, sep="\t")
+
+    if not args.interactive:
+        logger.info("Interactive UMAPs were skipped (set --interactive to enable).")
 
     logger.info("All plots and summaries generated successfully.")
 
@@ -199,8 +213,13 @@ if __name__ == "__main__":
                         type=int, 
                         default=15,
                         help="Number of clusters for KMeans (default: 15).")
+    
     parser.add_argument("--include_heatmap", action="store_true",
                         help="Include heatmap and dendrogram plots (slow).")
+    
+    parser.add_argument("--interactive", action="store_true",
+                        help="If set, generate interactive UMAP plots using Plotly.")
+
 
 
     args = parser.parse_args()
