@@ -213,7 +213,6 @@ def assign_clusters(df, logger=None, num_clusters=15):
     return df
 
 
-
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False, 
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -233,12 +232,17 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         Whether to add compound labels to the plot.
     colour_by : str, optional
         Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
+    highlight_prefix : str, optional
+        Prefix to highlight compounds (default: "MCP").
+    highlight_list : list, optional
+        Specific list of compound IDs to highlight.
 
     Returns
     -------
     pd.DataFrame
         DataFrame with UMAP coordinates added.
     """
+
     if args is None:
         n_neighbors = 15
         min_dist = 0.25
@@ -250,7 +254,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         metric = args.umap_metric
         compound_file = getattr(args, "compound_metadata", None)
 
-    # Add compound metadata if available
     if compound_file and os.path.isfile(compound_file):
         try:
             meta_df = pd.read_csv(compound_file)
@@ -260,20 +263,17 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         except Exception as e:
             logging.warning(f"Failed to merge compound metadata: {e}")
 
-    # UMAP projection
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
     embedding = reducer.fit_transform(df[numeric_cols])
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
-    # Add highlight logic
     if highlight_list:
         df["highlight"] = df["cpd_id"].isin(highlight_list)
     else:
-        df["highlight"] = df["cpd_id"].str.startswith(highlight_prefix)
+        df["highlight"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
 
-    # Static plot
     fig, ax = plt.subplots(figsize=(8, 6))
     if colour_by in df.columns:
         sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
@@ -290,38 +290,17 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     plt.savefig(output_file, dpi=1200)
     plt.close()
 
-    # Optional interactive Plotly plot
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [col for col in [
             "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
             "published_phenotypes", "publish own other", "published_target"
         ] if col in df.columns]
 
-        # Automatically create 'highlight' column if not already present
-        highlight_patterns = getattr(args, "highlight_patterns", ["MCP"]) if args else ["MCP"]
-        df["highlight"] = df["cpd_id"].astype(str).apply(
-            lambda x: any(pattern in x for pattern in highlight_patterns)
-        )
-
-
-        fig = px.scatter(
-            df,
-            x="UMAP1",
-            y="UMAP2",
-            color=colour_by if colour_by in df.columns else None,
-            hover_data=hover_cols,
-            title=f"CLIPn UMAP ({metric}, coloured by {colour_by})",
-            template="plotly_white"
-        )
-
-
-        # Separate highlighted and normal compounds
-        highlight_df = df[df["highlight"] == "highlight"]
-        normal_df = df[df["highlight"] == "normal"]
+        highlight_df = df[df["highlight"] == True]
+        normal_df = df[df["highlight"] == False]
 
         fig = go.Figure()
 
-        # Plot normal compounds
         fig.add_trace(go.Scattergl(
             x=normal_df["UMAP1"],
             y=normal_df["UMAP2"],
@@ -329,7 +308,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             marker=dict(
                 size=5,
                 opacity=0.7,
-                color=normal_df[colour_by] if colour_by in normal_df.columns else "grey",
+                color="grey",
                 showscale=False
             ),
             text=normal_df["cpd_id"],
@@ -337,29 +316,28 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             name="Normal"
         ))
 
-        # Plot highlighted compounds
-        fig.add_trace(go.Scattergl(
-            x=highlight_df["UMAP1"],
-            y=highlight_df["UMAP2"],
-            mode="markers+text",
-            marker=dict(
-                size=14,
-                color="red",
-                symbol="star",
-                line=dict(width=2, color="black")
-            ),
-            text=highlight_df["cpd_id"],  # optional: remove if too messy
-            textposition="top center",
-            hovertext=highlight_df["cpd_id"],
-            name="Highlighted"
-        ))
+        if not highlight_df.empty:
+            fig.add_trace(go.Scattergl(
+                x=highlight_df["UMAP1"],
+                y=highlight_df["UMAP2"],
+                mode="markers+text",
+                marker=dict(
+                    size=14,
+                    color="red",
+                    symbol="star",
+                    line=dict(width=2, color="black")
+                ),
+                text=highlight_df["cpd_id"],
+                textposition="top center",
+                hovertext=highlight_df["cpd_id"],
+                name="Highlighted"
+            ))
 
         fig.update_layout(
-            title=f"CLIPn UMAP ({metric}, highlighted MCP compounds)",
+            title=f"CLIPn UMAP ({metric}) — Highlighting MCP compounds",
             template="plotly_white",
             showlegend=True
         )
-
 
         html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
         html_path = os.path.join(output_dir, html_name)
@@ -367,4 +345,3 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
 
     return df
-
