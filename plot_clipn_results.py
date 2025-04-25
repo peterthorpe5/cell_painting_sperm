@@ -102,7 +102,8 @@ def main(args):
             logger.info(f"Generating UMAP for {cluster_col}")
             output_file = os.path.join(args.plots, f"clipn_UMAP_{cluster_col}.pdf")
             try:
-                umap_df = generate_umap(df.copy(), args.plots, output_file, args=args, add_labels=True, colour_by=cluster_col)
+                umap_df = generate_umap(df.copy(), args.plots, output_file, args=args, add_labels=True, 
+                                        colour_by=cluster_col, highlight_prefix="MCP")
                 # Save UMAP coordinates for the current cluster_col
                 umap_coords_file = os.path.join(
                     args.plots, f"umap_coordinates_{cluster_col}_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
@@ -120,7 +121,7 @@ def main(args):
     logger.info("Generating UMAP visualisation")
     umap_file = os.path.join(args.plots, "clipn_UMAP.pdf")
     try:
-        _ = generate_umap(df.copy(), args.plots, umap_file, args=args, add_labels=False)
+        _ = generate_umap(df.copy(), args.plots, umap_file, args=args, add_labels=False, highlight_prefix="MCP")
     except ValueError as e:
         logger.error(f"UMAP failed: {e}")
         return
@@ -129,7 +130,7 @@ def main(args):
     logger.info("Generating UMAP visualisation with labels")
     umap_file_labeled = os.path.join(args.plots, "clipn_UMAP_labeled.pdf")
 
-    umap_df = generate_umap(df.copy(), args.plots, umap_file_labeled, args=args, add_labels=True)
+    umap_df = generate_umap(df.copy(), args.plots, umap_file_labeled, args=args, add_labels=True, highlight_prefix="MCP")
     if umap_df is None:
         logger.error("Labeled UMAP returned None — skipping UMAP cluster summary.")
 

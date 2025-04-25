@@ -213,7 +213,8 @@ def assign_clusters(df, logger=None, num_clusters=15):
 
 
 
-def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colour_by="cpd_type"):
+def generate_umap(df, output_dir, output_file, args=None, add_labels=False, 
+                  colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
     Generate and save UMAP plots (matplotlib and optional interactive Plotly).
 
@@ -264,6 +265,12 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False, colo
     embedding = reducer.fit_transform(df[numeric_cols])
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
+
+    # Add highlight logic
+    if highlight_list:
+        df["highlight"] = df["cpd_id"].isin(highlight_list)
+    else:
+        df["highlight"] = df["cpd_id"].str.startswith(highlight_prefix)
 
     # Static plot
     fig, ax = plt.subplots(figsize=(8, 6))
