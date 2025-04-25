@@ -24,6 +24,7 @@ from scipy.spatial.distance import cdist
 import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import pdist, squareform
+import plotly.graph_objects as go
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +297,13 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             "published_phenotypes", "publish own other", "published_target"
         ] if col in df.columns]
 
+        # Automatically create 'highlight' column if not already present
+        highlight_patterns = getattr(args, "highlight_patterns", ["MCP"]) if args else ["MCP"]
+        df["highlight"] = df["cpd_id"].astype(str).apply(
+            lambda x: any(pattern in x for pattern in highlight_patterns)
+        )
+
+
         fig = px.scatter(
             df,
             x="UMAP1",
@@ -305,6 +313,54 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             title=f"CLIPn UMAP ({metric}, coloured by {colour_by})",
             template="plotly_white"
         )
+
+
+        # Separate highlighted and normal compounds
+        highlight_df = df[df["highlight"] == "highlight"]
+        normal_df = df[df["highlight"] == "normal"]
+
+        fig = go.Figure()
+
+        # Plot normal compounds
+        fig.add_trace(go.Scattergl(
+            x=normal_df["UMAP1"],
+            y=normal_df["UMAP2"],
+            mode="markers",
+            marker=dict(
+                size=5,
+                opacity=0.7,
+                color=normal_df[colour_by] if colour_by in normal_df.columns else "grey",
+                showscale=False
+            ),
+            text=normal_df["cpd_id"],
+            hovertext=normal_df["cpd_id"],
+            name="Normal"
+        ))
+
+        # Plot highlighted compounds
+        fig.add_trace(go.Scattergl(
+            x=highlight_df["UMAP1"],
+            y=highlight_df["UMAP2"],
+            mode="markers+text",
+            marker=dict(
+                size=14,
+                color="red",
+                symbol="star",
+                line=dict(width=2, color="black")
+            ),
+            text=highlight_df["cpd_id"],  # optional: remove if too messy
+            textposition="top center",
+            hovertext=highlight_df["cpd_id"],
+            name="Highlighted"
+        ))
+
+        fig.update_layout(
+            title=f"CLIPn UMAP ({metric}, highlighted MCP compounds)",
+            template="plotly_white",
+            showlegend=True
+        )
+
+
         html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
         html_path = os.path.join(output_dir, html_name)
         fig.write_html(html_path)
