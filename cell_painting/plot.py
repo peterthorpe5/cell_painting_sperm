@@ -411,20 +411,17 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         try:
             meta_df = pd.read_csv(compound_file, sep="\t")
             safe_metadata_columns = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
-            available_cols = [col for col in safe_metadata_columns if col in meta_df.columns]
-            meta_df = meta_df[available_cols]
-            # Use the improved merging function with deeper debugging
-
-            df = merge_annotation_to_umap_by_plate_well(
-                                        umap_df=df,
-                                        annotation_df=meta_df,
-                                        merge_keys=["Plate_Metadata", "Well_Metadata"],
-                                        columns_to_add=safe_metadata_columns,
-                                        full_debug=True
-                                    )
+            df = merge_annotation_to_umap(
+                umap_df=df,
+                annotation_df=meta_df,
+                key_column="cpd_id",
+                columns_to_add=safe_metadata_columns,
+                full_debug=True
+            )
             logging.info("Safely merged metadata into dataframe with detailed debugging.")
         except Exception as e:
             logging.warning(f"Failed to safely merge metadata: {e}")
+
 
     # Drop problematic metadata columns
     for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
@@ -495,56 +492,58 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
 
     return df
 
-
-
-def merge_annotation_to_umap_by_plate_well(
+def merge_annotation_to_umap(
     umap_df: pd.DataFrame,
     annotation_df: pd.DataFrame,
-    merge_keys: list = None,
+    key_column: str = "cpd_id",
     columns_to_add: list = None,
     full_debug: bool = False,
 ) -> pd.DataFrame:
     """
-    Safely merge annotation metadata into UMAP output based on Plate and Well identifiers.
+    Safely merge selected annotation metadata into UMAP output based on a key column (default 'cpd_id').
 
     Parameters
     ----------
     umap_df : pd.DataFrame
-        DataFrame containing UMAP outputs, must include Plate_Metadata and Well_Metadata.
+        DataFrame containing UMAP outputs, must include the key column.
     annotation_df : pd.DataFrame
-        DataFrame containing compound annotation metadata, must include Plate_Metadata and Well_Metadata.
-    merge_keys : list, optional
-        List of columns to merge on (default: ["Plate_Metadata", "Well_Metadata"]).
+        DataFrame containing annotation metadata.
+    key_column : str, optional
+        Column to merge on (default is 'cpd_id').
     columns_to_add : list, optional
-        List of columns from annotation to add.
+        List of columns to add from the annotation dataframe.
     full_debug : bool, optional
-        If True, will print full debug information before and after merging (default is False).
+        If True, show detailed debug output (default False).
 
     Returns
     -------
     pd.DataFrame
-        UMAP DataFrame with selected metadata columns merged.
+        UMAP DataFrame with safely merged metadata.
     """
-    if merge_keys is None:
-        merge_keys = ["Plate_Metadata", "Well_Metadata"]
+    print(f"[DEBUG] Starting metadata merge with key column: {key_column}")
 
-    print(f"[DEBUG] Starting metadata merge with keys: {merge_keys}")
-    print(f"[DEBUG] UMAP DataFrame shape before merge: {umap_df.shape}")
-    print(f"[DEBUG] Annotation DataFrame shape before merge: {annotation_df.shape}")
+    if key_column not in umap_df.columns:
+        raise ValueError(f"Key column '{key_column}' not found in UMAP DataFrame.")
+    if key_column not in annotation_df.columns:
+        raise ValueError(f"Key column '{key_column}' not found in annotation DataFrame.")
 
-    # Confirm keys exist
-    for key in merge_keys:
-        if key not in umap_df.columns:
-            raise ValueError(f"Merge key '{key}' not found in UMAP DataFrame.")
-        if key not in annotation_df.columns:
-            raise ValueError(f"Merge key '{key}' not found in annotation DataFrame.")
+    if full_debug:
+        print(f"[DEBUG] UMAP DataFrame shape before merge: {umap_df.shape}")
+        print(f"[DEBUG] Annotation DataFrame shape before duplicate dropping: {annotation_df.shape}")
 
-    # Subset annotation columns
+    # Subset annotation columns if requested
     if columns_to_add is not None:
-        columns_to_keep = merge_keys + columns_to_add
+        columns_to_keep = [key_column] + columns_to_add
         available_cols = [col for col in columns_to_keep if col in annotation_df.columns]
         annotation_df = annotation_df[available_cols]
-        print(f"[DEBUG] Subsetting annotation_df to columns: {available_cols}")
+
+    # Drop duplicates, keep first occurrence
+    if annotation_df.duplicated(subset=[key_column]).any():
+        duplicated_keys = annotation_df.loc[annotation_df.duplicated(subset=[key_column]), key_column].unique()
+        print(f"[WARNING] Dropping duplicated keys: {duplicated_keys[:5]} (showing first 5)")
+        annotation_df = annotation_df.drop_duplicates(subset=[key_column], keep="first")
+        if full_debug:
+            print(f"[DEBUG] Annotation DataFrame shape after duplicate dropping: {annotation_df.shape}")
 
     if full_debug:
         print("\n[DEBUG] --- UMAP DataFrame head ---")
@@ -552,25 +551,19 @@ def merge_annotation_to_umap_by_plate_well(
         print("\n[DEBUG] --- Annotation DataFrame head ---")
         print(annotation_df.head())
 
-    # Real merge
+    # Merge
     merged_df = umap_df.merge(
         annotation_df,
         how="left",
-        on=merge_keys,
+        on=key_column,
         suffixes=('', '_annotation')
     )
 
-    print(f"[DEBUG] UMAP DataFrame shape after merge: {merged_df.shape}")
-    added_columns = [col for col in merged_df.columns if col not in umap_df.columns]
-    print(f"[DEBUG] Added columns from annotation: {added_columns}")
-
     if full_debug:
+        print(f"[DEBUG] Merged DataFrame shape: {merged_df.shape}")
+        added_columns = [col for col in merged_df.columns if col not in umap_df.columns]
+        print(f"[DEBUG] Added columns from annotation: {added_columns}")
         print("\n[DEBUG] --- Merged DataFrame head ---")
         print(merged_df.head())
-
-    # Check nulls after merge
-    if added_columns:
-        null_after_merge = merged_df[added_columns].isnull().sum()
-        print(f"[DEBUG] Nulls after merge per added column:\n{null_after_merge}")
 
     return merged_df
