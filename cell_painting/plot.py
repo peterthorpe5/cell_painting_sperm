@@ -463,7 +463,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     # Interactive plot (Plotly)
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [col for col in [
-            "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
+            "cpd_id", "cpd_type", "name", "Library", "Dataset", colour_by,
             "published_phenotypes", "publish own other", "published_target"
         ] if col in df.columns]
 
@@ -491,6 +491,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
 
     return df
+
 
 def merge_annotation_to_umap(
     umap_df: pd.DataFrame,
@@ -527,15 +528,18 @@ def merge_annotation_to_umap(
     if key_column not in annotation_df.columns:
         raise ValueError(f"Key column '{key_column}' not found in annotation DataFrame.")
 
+    if columns_to_add is not None:
+        if not isinstance(columns_to_add, list):
+            raise TypeError(f"columns_to_add must be a list of strings, not {type(columns_to_add)}")
+        columns_to_keep = [key_column] + columns_to_add
+        available_cols = [col for col in columns_to_keep if col in annotation_df.columns]
+        if full_debug:
+            print(f"[DEBUG] Available columns for merge: {available_cols}")
+        annotation_df = annotation_df[available_cols]
+
     if full_debug:
         print(f"[DEBUG] UMAP DataFrame shape before merge: {umap_df.shape}")
         print(f"[DEBUG] Annotation DataFrame shape before duplicate dropping: {annotation_df.shape}")
-
-    # Subset annotation columns if requested
-    if columns_to_add is not None:
-        columns_to_keep = [key_column] + columns_to_add
-        available_cols = [col for col in columns_to_keep if col in annotation_df.columns]
-        annotation_df = annotation_df[available_cols]
 
     # Drop duplicates, keep first occurrence
     if annotation_df.duplicated(subset=[key_column]).any():
@@ -558,8 +562,13 @@ def merge_annotation_to_umap(
         on=key_column,
         suffixes=('', '_annotation')
     )
-    n_matched = df["cpd_id"].notnull().sum()
-    print(f"[DEBUG] {n_matched}/{len(df)} compounds matched to metadata after merging.")
+
+    # Check how many were matched
+    if key_column in merged_df.columns:
+        n_matched = merged_df[key_column].notnull().sum()
+        print(f"[DEBUG] {n_matched}/{len(merged_df)} compounds matched to metadata after merging.")
+    else:
+        print(f"[WARNING] Key column '{key_column}' missing after merge. Possible error.")
 
     if full_debug:
         print(f"[DEBUG] Merged DataFrame shape: {merged_df.shape}")
