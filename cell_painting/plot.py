@@ -410,13 +410,20 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     if compound_file and os.path.isfile(compound_file):
         try:
             meta_df = pd.read_csv(compound_file, sep="\t")
+            # Rename cpd_id in annotation to protect UMAP data
+            if "cpd_id" in meta_df.columns:
+                meta_df = meta_df.rename(columns={"cpd_id": "annotation_cpd_id"})
+
             safe_metadata_columns = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
-            df = merge_annotation_to_umap(
+
+            # Build metadata lookup dictionary
+            metadata_lookup = meta_df.drop_duplicates(subset=["annotation_cpd_id"]).set_index("annotation_cpd_id").to_dict(orient="index")
+
+            # Enrich your UMAP dataframe
+            df = enrich_with_metadata(
                 umap_df=df,
-                annotation_df=meta_df,
-                key_column="cpd_id",
-                columns_to_add=safe_metadata_columns,
-                full_debug=True
+                metadata_lookup=metadata_lookup,
+                metadata_columns=safe_metadata_columns
             )
             logging.info("Safely merged metadata into dataframe with detailed debugging.")
         except Exception as e:
@@ -578,3 +585,30 @@ def merge_annotation_to_umap(
         print(merged_df.head())
 
     return merged_df
+
+
+def enrich_with_metadata(umap_df, metadata_lookup, metadata_columns):
+    """
+    Attach metadata columns to UMAP dataframe based on cpd_id lookup.
+
+    Parameters
+    ----------
+    umap_df : pd.DataFrame
+        The UMAP dataframe.
+    metadata_lookup : dict
+        Dictionary mapping annotation_cpd_id to metadata dictionary.
+    metadata_columns : list
+        List of metadata fields to attach.
+
+    Returns
+    -------
+    pd.DataFrame
+        UMAP dataframe with new metadata columns.
+    """
+    for col in metadata_columns:
+        umap_df[col] = umap_df["cpd_id"].map(lambda x: metadata_lookup.get(x, {}).get(col, None))
+    
+    n_matched = umap_df[metadata_columns[0]].notnull().sum()
+    print(f"[DEBUG] {n_matched}/{len(umap_df)} compounds enriched with metadata.")
+    
+    return umap_df
