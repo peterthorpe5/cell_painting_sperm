@@ -414,7 +414,14 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             available_cols = [col for col in safe_cols if col in meta_df.columns]
             meta_df = meta_df[available_cols]
             # Use the improved merging function with deeper debugging
-            df = merge_annotation_to_umap(umap_df=df, annotation_df=meta_df, key_column="cpd_id")
+
+            df = merge_annotation_to_umap_by_plate_well(
+                                        umap_df=df,
+                                        annotation_df=meta_df,
+                                        merge_keys=["Plate_Metadata", "Well_Metadata"],
+                                        columns_to_add=safe_metadata_columns,
+                                        full_debug=True
+                                    )
             logging.info("Safely merged metadata into dataframe with detailed debugging.")
         except Exception as e:
             logging.warning(f"Failed to safely merge metadata: {e}")
@@ -489,41 +496,55 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     return df
 
 
-import pandas as pd
 
-def merge_annotation_to_umap(
+def merge_annotation_to_umap_by_plate_well(
     umap_df: pd.DataFrame,
     annotation_df: pd.DataFrame,
-    key_column: str = "cpd_id",
+    merge_keys: list = None,
+    columns_to_add: list = None,
     full_debug: bool = False,
 ) -> pd.DataFrame:
     """
-    Merge annotation metadata into UMAP output based on a key column (default 'cpd_id').
+    Safely merge annotation metadata into UMAP output based on Plate and Well identifiers.
 
     Parameters
     ----------
     umap_df : pd.DataFrame
-        DataFrame containing UMAP outputs, must include a key column for merging.
+        DataFrame containing UMAP outputs, must include Plate_Metadata and Well_Metadata.
     annotation_df : pd.DataFrame
-        DataFrame containing compound annotation metadata, must include the same key column.
-    key_column : str, optional
-        Column name used for merging (default is 'cpd_id').
+        DataFrame containing compound annotation metadata, must include Plate_Metadata and Well_Metadata.
+    merge_keys : list, optional
+        List of columns to merge on (default: ["Plate_Metadata", "Well_Metadata"]).
+    columns_to_add : list, optional
+        List of columns from annotation to add.
     full_debug : bool, optional
         If True, will print full debug information before and after merging (default is False).
 
     Returns
     -------
     pd.DataFrame
-        UMAP DataFrame with merged annotation metadata added.
+        UMAP DataFrame with selected metadata columns merged.
     """
-    print(f"[DEBUG] Starting metadata merge with key column: {key_column}")
+    if merge_keys is None:
+        merge_keys = ["Plate_Metadata", "Well_Metadata"]
+
+    print(f"[DEBUG] Starting metadata merge with keys: {merge_keys}")
     print(f"[DEBUG] UMAP DataFrame shape before merge: {umap_df.shape}")
     print(f"[DEBUG] Annotation DataFrame shape before merge: {annotation_df.shape}")
 
-    if key_column not in umap_df.columns:
-        raise ValueError(f"Key column '{key_column}' not found in UMAP DataFrame columns.")
-    if key_column not in annotation_df.columns:
-        raise ValueError(f"Key column '{key_column}' not found in annotation DataFrame columns.")
+    # Confirm keys exist
+    for key in merge_keys:
+        if key not in umap_df.columns:
+            raise ValueError(f"Merge key '{key}' not found in UMAP DataFrame.")
+        if key not in annotation_df.columns:
+            raise ValueError(f"Merge key '{key}' not found in annotation DataFrame.")
+
+    # Subset annotation columns
+    if columns_to_add is not None:
+        columns_to_keep = merge_keys + columns_to_add
+        available_cols = [col for col in columns_to_keep if col in annotation_df.columns]
+        annotation_df = annotation_df[available_cols]
+        print(f"[DEBUG] Subsetting annotation_df to columns: {available_cols}")
 
     if full_debug:
         print("\n[DEBUG] --- UMAP DataFrame head ---")
@@ -531,36 +552,11 @@ def merge_annotation_to_umap(
         print("\n[DEBUG] --- Annotation DataFrame head ---")
         print(annotation_df.head())
 
-        print("\n[DEBUG] --- UMAP dtypes ---")
-        print(umap_df.dtypes)
-        print("\n[DEBUG] --- Annotation dtypes ---")
-        print(annotation_df.dtypes)
-
-    # Check for missing keys
-    missing_keys = set(umap_df[key_column]) - set(annotation_df[key_column])
-    if missing_keys:
-        print(f"[WARNING] {len(missing_keys)} keys in UMAP not found in annotation. Examples: {list(missing_keys)[:5]}")
-
-    # Check for duplicated keys
-    duplicated_keys = annotation_df[key_column][annotation_df[key_column].duplicated()].unique()
-    if len(duplicated_keys) > 0:
-        print(f"[WARNING] {len(duplicated_keys)} duplicated keys found in annotation. Examples: {duplicated_keys[:5]}")
-
-    # Mini manual preview merge
-    if full_debug:
-        preview_merge = umap_df[[key_column]].head().merge(
-            annotation_df[[key_column] + [col for col in annotation_df.columns if col != key_column]],
-            how="left",
-            on=key_column
-        )
-        print("\n[DEBUG] --- Manual preview merge (first 5 rows) ---")
-        print(preview_merge)
-
     # Real merge
     merged_df = umap_df.merge(
         annotation_df,
         how="left",
-        on=key_column,
+        on=merge_keys,
         suffixes=('', '_annotation')
     )
 
@@ -572,14 +568,9 @@ def merge_annotation_to_umap(
         print("\n[DEBUG] --- Merged DataFrame head ---")
         print(merged_df.head())
 
-    # Additional checks
-    null_after_merge = merged_df[added_columns].isnull().sum()
-    print(f"[DEBUG] Nulls after merge per added column:\n{null_after_merge}")
-
-    if full_debug:
-        cpd_id_nulls = merged_df[key_column].isnull().sum()
-        if cpd_id_nulls > 0:
-            print(f"[WARNING] {cpd_id_nulls} rows have missing '{key_column}' after merging!")
+    # Check nulls after merge
+    if added_columns:
+        null_after_merge = merged_df[added_columns].isnull().sum()
+        print(f"[DEBUG] Nulls after merge per added column:\n{null_after_merge}")
 
     return merged_df
-
