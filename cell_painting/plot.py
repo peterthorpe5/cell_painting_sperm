@@ -410,27 +410,28 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     if compound_file and os.path.isfile(compound_file):
         try:
             meta_df = pd.read_csv(compound_file, sep="\t")
-            # Rename cpd_id in annotation to protect UMAP data
+
+            # Rename annotation cpd_id to protect UMAP cpd_id
             if "cpd_id" in meta_df.columns:
                 meta_df = meta_df.rename(columns={"cpd_id": "annotation_cpd_id"})
 
-            safe_metadata_columns = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
-
-            # Build metadata lookup dictionary
+            # Build metadata lookup
             metadata_lookup = meta_df.drop_duplicates(subset=["annotation_cpd_id"]).set_index("annotation_cpd_id").to_dict(orient="index")
 
-            # Enrich your UMAP dataframe
-            df = enrich_with_metadata(
-                umap_df=df,
-                metadata_lookup=metadata_lookup,
-                metadata_columns=safe_metadata_columns
-            )
+            # Safely enrich UMAP dataframe without touching cpd_id
+            safe_metadata_columns = ["cpd_type", "name", "published_phenotypes", "published_target"]
+
+            for col in safe_metadata_columns:
+                df[col] = df["cpd_id"].map(lambda x: metadata_lookup.get(x, {}).get(col, None))
+
+            n_matched = df[safe_metadata_columns[0]].notnull().sum()
+            print(f"[DEBUG] {n_matched}/{len(df)} compounds enriched with metadata.")
+
             logging.info("Safely merged metadata into dataframe with detailed debugging.")
         except Exception as e:
-            logging.warning(f"Failed to safely merge metadata: {e}")
+            logging.warning(f"Failed to safely enrich metadata: {e}")
 
-
-    # Drop problematic metadata columns
+    # Drop problematic metadata columns if still present
     for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
         if col_to_drop in df.columns:
             df = df.drop(columns=[col_to_drop])
@@ -470,8 +471,8 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     # Interactive plot (Plotly)
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [col for col in [
-            "cpd_id", "cpd_type", "name", "Library", "Dataset", colour_by,
-            "published_phenotypes", "publish own other", "published_target"
+            "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
+            "published_phenotypes", "published_target"
         ] if col in df.columns]
 
         fig = px.scatter(
@@ -498,6 +499,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
 
     return df
+
 
 
 def merge_annotation_to_umap(
