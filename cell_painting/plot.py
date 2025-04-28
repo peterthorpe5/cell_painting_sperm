@@ -254,19 +254,22 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         metric = args.umap_metric
         compound_file = getattr(args, "compound_metadata", None)
 
+    # ====== SAFE METADATA ATTACHMENT ======
     if compound_file and os.path.isfile(compound_file):
         try:
-            if compound_file.endswith(".tsv"):
-                meta_df = pd.read_csv(compound_file, sep="\t")
-            else:
-                meta_df = pd.read_csv(compound_file)
-
-            meta_dedup = meta_df.drop_duplicates(subset="cpd_id")
-            df = pd.merge(df, meta_dedup[["cpd_id", "published_phenotypes", "publish own other", "published_target"]],
-                          on="cpd_id", how="left")
+            meta_df = pd.read_csv(compound_file)
+            # Only keep safe metadata columns
+            safe_cols = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
+            available_cols = [col for col in safe_cols if col in meta_df.columns]
+            meta_df = meta_df[available_cols]
+            # Merge safely
+            df = pd.merge(df, meta_df, on="cpd_id", how="left")
+            logging.info("Safely merged selected metadata columns into dataframe.")
         except Exception as e:
-            logging.warning(f"Failed to merge compound metadata: {e}")
-    
+            logging.warning(f"Failed to safely merge compound metadata: {e}")
+
+
+
     # Remove metadata columns if they exist
     for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
         if col_to_drop in df.columns:
