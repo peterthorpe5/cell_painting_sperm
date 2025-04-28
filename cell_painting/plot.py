@@ -262,6 +262,12 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                           on="cpd_id", how="left")
         except Exception as e:
             logging.warning(f"Failed to merge compound metadata: {e}")
+    
+    # Remove metadata columns if they exist
+    for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
+        if col_to_drop in df.columns:
+            logging.info(f"Dropping metadata column before UMAP: {col_to_drop}")
+            df = df.drop(columns=[col_to_drop])
 
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
