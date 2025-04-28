@@ -413,8 +413,9 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             safe_cols = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
             available_cols = [col for col in safe_cols if col in meta_df.columns]
             meta_df = meta_df[available_cols]
-            df = pd.merge(df, meta_df, on="cpd_id", how="left")
-            logging.info("Safely merged metadata into dataframe.")
+            # Use the improved merging function with deeper debugging
+            df = merge_annotation_to_umap(umap_df=df, annotation_df=meta_df, key_column="cpd_id")
+            logging.info("Safely merged metadata into dataframe with detailed debugging.")
         except Exception as e:
             logging.warning(f"Failed to safely merge metadata: {e}")
 
@@ -472,7 +473,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             title=f"CLIPn UMAP ({metric}) with Highlights"
         )
 
-        # Update marker styles based on highlight
         fig.update_traces(
             marker=dict(
                 size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
@@ -487,3 +487,75 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
 
     return df
+
+
+def merge_annotation_to_umap(
+    umap_df: pd.DataFrame,
+    annotation_df: pd.DataFrame,
+    key_column: str = "cpd_id",
+    full_debug: bool = False,
+) -> pd.DataFrame:
+    """
+    Merge annotation metadata into UMAP output based on a key column (default 'cpd_id').
+
+    Parameters
+    ----------
+    umap_df : pd.DataFrame
+        DataFrame containing UMAP outputs, must include a key column for merging.
+    annotation_df : pd.DataFrame
+        DataFrame containing compound annotation metadata, must include the same key column.
+    key_column : str, optional
+        Column name used for merging (default is 'cpd_id').
+    full_debug : bool, optional
+        If True, will print full debug information before and after merging (default is False).
+
+    Returns
+    -------
+    pd.DataFrame
+        UMAP DataFrame with merged annotation metadata added.
+    """
+    print(f"[DEBUG] Starting metadata merge with key column: {key_column}")
+    print(f"[DEBUG] UMAP DataFrame shape before merge: {umap_df.shape}")
+    print(f"[DEBUG] Annotation DataFrame shape before merge: {annotation_df.shape}")
+
+    if key_column not in umap_df.columns:
+        raise ValueError(f"Key column '{key_column}' not found in UMAP DataFrame columns.")
+    if key_column not in annotation_df.columns:
+        raise ValueError(f"Key column '{key_column}' not found in annotation DataFrame columns.")
+
+    if full_debug:
+        print("\n[DEBUG] --- UMAP DataFrame head ---")
+        print(umap_df.head())
+        print("\n[DEBUG] --- Annotation DataFrame head ---")
+        print(annotation_df.head())
+
+        print("\n[DEBUG] --- UMAP dtypes ---")
+        print(umap_df.dtypes)
+        print("\n[DEBUG] --- Annotation dtypes ---")
+        print(annotation_df.dtypes)
+
+    # Check for missing keys
+    missing_keys = set(umap_df[key_column]) - set(annotation_df[key_column])
+    if missing_keys:
+        print(f"[WARNING] {len(missing_keys)} keys in UMAP not found in annotation. Examples: {list(missing_keys)[:5]}")
+
+    # Check for duplicated keys
+    duplicated_keys = annotation_df[key_column][annotation_df[key_column].duplicated()].unique()
+    if len(duplicated_keys) > 0:
+        print(f"[WARNING] {len(duplicated_keys)} duplicated keys found in annotation. Examples: {duplicated_keys[:5]}")
+
+    # Mini manual preview merge
+    if full_debug:
+        preview_merge = umap_df[[key_column]].head().merge(
+            annotation_df[[key_column] + [col for col in annotation_df.columns if col != key_column]],
+            how="left",
+            on=key_column
+        )
+        print("\n[DEBUG] --- Manual preview merge (first 5 rows) ---")
+        print(preview_merge)
+
+    # Real merge
+    merged_df = umap_df.merge(
+        annotation_df,
+        how="left",
+        on=key_column_
