@@ -321,13 +321,15 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             marker=dict(
                 size=5,
                 opacity=0.7,
-                color="grey",
-                showscale=False
+                color=normal_df[colour_by] if colour_by in normal_df.columns else "grey",
+                showscale=True if colour_by in normal_df.columns else False,
+                coloraxis="coloraxis"  # important to link colours dynamically
             ),
             text=normal_df["cpd_id"],
             hovertext=normal_df["cpd_id"],
             name="Normal"
         ))
+
 
         if not highlight_df.empty:
             fig.add_trace(go.Scattergl(
