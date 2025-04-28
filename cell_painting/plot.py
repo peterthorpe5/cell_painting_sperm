@@ -257,7 +257,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     # ====== SAFE METADATA ATTACHMENT ======
     if compound_file and os.path.isfile(compound_file):
         try:
-            meta_df = pd.read_csv(compound_file)
+            meta_df = pd.read_csv(compound_file, sep="\t")
             # Only keep safe metadata columns
             safe_cols = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
             available_cols = [col for col in safe_cols if col in meta_df.columns]
