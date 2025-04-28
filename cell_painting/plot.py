@@ -348,11 +348,14 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                 name="Highlighted"
             ))
 
+
         fig.update_layout(
             title=f"CLIPn UMAP ({metric}) — Highlighting MCP compounds",
             template="plotly_white",
-            showlegend=True
+            showlegend=True,
+            coloraxis=dict(colorbar_title=colour_by if colour_by else "Colour")
         )
+
 
         html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
         html_path = os.path.join(output_dir, html_name)
