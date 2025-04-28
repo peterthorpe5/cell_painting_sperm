@@ -366,21 +366,10 @@ def generate_umap_OLD(df, output_dir, output_file, args=None, add_labels=False,
     return df
 
 
-
-import os
-import logging
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import umap
-import plotly.express as px
-import plotly.graph_objects as go
-import numpy as np
-
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
-    Generate and save UMAP plots (matplotlib static + optional interactive Plotly).
+    Generate and save UMAP plots (static matplotlib and interactive Plotly).
 
     Parameters
     ----------
@@ -389,11 +378,11 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     output_dir : str
         Directory to save the plot.
     output_file : str
-        Path to the output static plot file.
+        Path to the output plot file.
     args : Namespace, optional
-        Parsed CLI arguments (for UMAP settings, interactive mode, metadata).
+        Parsed CLI arguments (for UMAP and interactive settings).
     add_labels : bool, optional
-        Whether to add compound labels to the plot.
+        Whether to add compound labels to the static matplotlib plot.
     colour_by : str, optional
         Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
     highlight_prefix : str, optional
@@ -406,7 +395,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     pd.DataFrame
         DataFrame with UMAP coordinates added.
     """
-
     if args is None:
         n_neighbors = 15
         min_dist = 0.25
@@ -418,7 +406,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         metric = args.umap_metric
         compound_file = getattr(args, "compound_metadata", None)
 
-    # ====== SAFE METADATA ATTACHMENT ======
+    # Attach metadata carefully if provided
     if compound_file and os.path.isfile(compound_file):
         try:
             meta_df = pd.read_csv(compound_file, sep="\t")
@@ -426,30 +414,30 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             available_cols = [col for col in safe_cols if col in meta_df.columns]
             meta_df = meta_df[available_cols]
             df = pd.merge(df, meta_df, on="cpd_id", how="left")
-            logging.info("Safely merged selected metadata columns into dataframe.")
+            logging.info("Safely merged metadata into dataframe.")
         except Exception as e:
-            logging.warning(f"Failed to safely merge compound metadata: {e}")
+            logging.warning(f"Failed to safely merge metadata: {e}")
 
-    # Drop problematic metadata columns if they exist
+    # Drop problematic metadata columns
     for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
         if col_to_drop in df.columns:
-            logging.info(f"Dropping metadata column before UMAP: {col_to_drop}")
             df = df.drop(columns=[col_to_drop])
+            logging.info(f"Dropped metadata column: {col_to_drop}")
 
-    # UMAP Projection
+    # UMAP projection
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
     embedding = reducer.fit_transform(df[numeric_cols])
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
-    # Highlight logic
+    # Create highlighting column
     if highlight_list:
-        df["highlight"] = df["cpd_id"].isin(highlight_list)
+        df["is_highlighted"] = df["cpd_id"].isin(highlight_list)
     else:
-        df["highlight"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
+        df["is_highlighted"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
 
-    # Static Matplotlib plot
+    # Static plot (matplotlib)
     fig, ax = plt.subplots(figsize=(8, 6))
     if colour_by in df.columns:
         sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
@@ -465,8 +453,9 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     plt.tight_layout()
     plt.savefig(output_file, dpi=1200)
     plt.close()
+    logging.info(f"Saved static UMAP to: {output_file}")
 
-    # Optional Interactive Plotly Plot
+    # Interactive plot (Plotly)
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [col for col in [
             "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
@@ -479,27 +468,18 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             y="UMAP2",
             color=colour_by if colour_by in df.columns else None,
             hover_data=hover_cols,
-            title=f"CLIPn UMAP ({metric})",
             template="plotly_white",
-            opacity=0.8
+            title=f"CLIPn UMAP ({metric}) with Highlights"
         )
 
-        if not df[df["highlight"]].empty:
-            fig.add_trace(go.Scattergl(
-                x=df[df["highlight"]]["UMAP1"],
-                y=df[df["highlight"]]["UMAP2"],
-                mode="markers+text",
-                marker=dict(
-                    size=14,
-                    color="red",
-                    symbol="star",
-                    line=dict(width=2, color="black")
-                ),
-                text=df[df["highlight"]]["cpd_id"],
-                textposition="top center",
-                hovertext=df[df["highlight"]]["cpd_id"],
-                name="Highlighted"
-            ))
+        # Update marker styles based on highlight
+        fig.update_traces(
+            marker=dict(
+                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
+                symbol=df["is_highlighted"].apply(lambda x: "star" if x else "circle"),
+                line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
+            )
+        )
 
         html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
         html_path = os.path.join(output_dir, html_name)
