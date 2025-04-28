@@ -26,6 +26,7 @@ from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import pdist, squareform
 import plotly.graph_objects as go
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -213,7 +214,7 @@ def assign_clusters(df, logger=None, num_clusters=15):
     return df
 
 
-def generate_umap(df, output_dir, output_file, args=None, add_labels=False, 
+def generate_umap_OLD(df, output_dir, output_file, args=None, add_labels=False, 
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
     Generate and save UMAP plots (matplotlib and optional interactive Plotly).
@@ -305,7 +306,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
 
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [col for col in [
-            "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
+            "cpd_id", "cpd_type", "Library", "name", "Dataset", colour_by,
             "published_phenotypes", "publish own other", "published_target"
         ] if col in df.columns]
 
@@ -356,6 +357,149 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             coloraxis=dict(colorbar_title=colour_by if colour_by else "Colour")
         )
 
+
+        html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
+        html_path = os.path.join(output_dir, html_name)
+        fig.write_html(html_path)
+        logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
+
+    return df
+
+
+
+import os
+import logging
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import umap
+import plotly.express as px
+import plotly.graph_objects as go
+import numpy as np
+
+def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
+                  colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
+    """
+    Generate and save UMAP plots (matplotlib static + optional interactive Plotly).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with numeric features and metadata.
+    output_dir : str
+        Directory to save the plot.
+    output_file : str
+        Path to the output static plot file.
+    args : Namespace, optional
+        Parsed CLI arguments (for UMAP settings, interactive mode, metadata).
+    add_labels : bool, optional
+        Whether to add compound labels to the plot.
+    colour_by : str, optional
+        Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
+    highlight_prefix : str, optional
+        Prefix to highlight compounds (default: "MCP").
+    highlight_list : list, optional
+        Specific list of compound IDs to highlight.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with UMAP coordinates added.
+    """
+
+    if args is None:
+        n_neighbors = 15
+        min_dist = 0.25
+        metric = "euclidean"
+        compound_file = None
+    else:
+        n_neighbors = args.umap_n_neighbors
+        min_dist = args.umap_min_dist
+        metric = args.umap_metric
+        compound_file = getattr(args, "compound_metadata", None)
+
+    # ====== SAFE METADATA ATTACHMENT ======
+    if compound_file and os.path.isfile(compound_file):
+        try:
+            meta_df = pd.read_csv(compound_file, sep="\t")
+            safe_cols = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
+            available_cols = [col for col in safe_cols if col in meta_df.columns]
+            meta_df = meta_df[available_cols]
+            df = pd.merge(df, meta_df, on="cpd_id", how="left")
+            logging.info("Safely merged selected metadata columns into dataframe.")
+        except Exception as e:
+            logging.warning(f"Failed to safely merge compound metadata: {e}")
+
+    # Drop problematic metadata columns if they exist
+    for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
+        if col_to_drop in df.columns:
+            logging.info(f"Dropping metadata column before UMAP: {col_to_drop}")
+            df = df.drop(columns=[col_to_drop])
+
+    # UMAP Projection
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
+    embedding = reducer.fit_transform(df[numeric_cols])
+    df["UMAP1"] = embedding[:, 0]
+    df["UMAP2"] = embedding[:, 1]
+
+    # Highlight logic
+    if highlight_list:
+        df["highlight"] = df["cpd_id"].isin(highlight_list)
+    else:
+        df["highlight"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
+
+    # Static Matplotlib plot
+    fig, ax = plt.subplots(figsize=(8, 6))
+    if colour_by in df.columns:
+        sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
+        ax.legend(loc="best", fontsize="small", markerscale=1, frameon=False)
+    else:
+        sns.scatterplot(x="UMAP1", y="UMAP2", data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
+
+    if add_labels and "cpd_id" in df.columns:
+        for _, row in df.iterrows():
+            ax.text(row["UMAP1"], row["UMAP2"], str(row["cpd_id"]), fontsize=3, alpha=0.7)
+
+    ax.set_title(f"CLIPn UMAP ({metric})")
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=1200)
+    plt.close()
+
+    # Optional Interactive Plotly Plot
+    if args is not None and getattr(args, "interactive", False):
+        hover_cols = [col for col in [
+            "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
+            "published_phenotypes", "publish own other", "published_target"
+        ] if col in df.columns]
+
+        fig = px.scatter(
+            df,
+            x="UMAP1",
+            y="UMAP2",
+            color=colour_by if colour_by in df.columns else None,
+            hover_data=hover_cols,
+            title=f"CLIPn UMAP ({metric})",
+            template="plotly_white",
+            opacity=0.8
+        )
+
+        if not df[df["highlight"]].empty:
+            fig.add_trace(go.Scattergl(
+                x=df[df["highlight"]]["UMAP1"],
+                y=df[df["highlight"]]["UMAP2"],
+                mode="markers+text",
+                marker=dict(
+                    size=14,
+                    color="red",
+                    symbol="star",
+                    line=dict(width=2, color="black")
+                ),
+                text=df[df["highlight"]]["cpd_id"],
+                textposition="top center",
+                hovertext=df[df["highlight"]]["cpd_id"],
+                name="Highlighted"
+            ))
 
         html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
         html_path = os.path.join(output_dir, html_name)
