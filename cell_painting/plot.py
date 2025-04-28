@@ -558,6 +558,8 @@ def merge_annotation_to_umap(
         on=key_column,
         suffixes=('', '_annotation')
     )
+    n_matched = df["cpd_id"].notnull().sum()
+    print(f"[DEBUG] {n_matched}/{len(df)} compounds matched to metadata after merging.")
 
     if full_debug:
         print(f"[DEBUG] Merged DataFrame shape: {merged_df.shape}")
