@@ -489,6 +489,8 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     return df
 
 
+import pandas as pd
+
 def merge_annotation_to_umap(
     umap_df: pd.DataFrame,
     annotation_df: pd.DataFrame,
@@ -558,4 +560,26 @@ def merge_annotation_to_umap(
     merged_df = umap_df.merge(
         annotation_df,
         how="left",
-        on=key_column_
+        on=key_column,
+        suffixes=('', '_annotation')
+    )
+
+    print(f"[DEBUG] UMAP DataFrame shape after merge: {merged_df.shape}")
+    added_columns = [col for col in merged_df.columns if col not in umap_df.columns]
+    print(f"[DEBUG] Added columns from annotation: {added_columns}")
+
+    if full_debug:
+        print("\n[DEBUG] --- Merged DataFrame head ---")
+        print(merged_df.head())
+
+    # Additional checks
+    null_after_merge = merged_df[added_columns].isnull().sum()
+    print(f"[DEBUG] Nulls after merge per added column:\n{null_after_merge}")
+
+    if full_debug:
+        cpd_id_nulls = merged_df[key_column].isnull().sum()
+        if cpd_id_nulls > 0:
+            print(f"[WARNING] {cpd_id_nulls} rows have missing '{key_column}' after merging!")
+
+    return merged_df
+
