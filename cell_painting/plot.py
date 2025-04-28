@@ -410,8 +410,8 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     if compound_file and os.path.isfile(compound_file):
         try:
             meta_df = pd.read_csv(compound_file, sep="\t")
-            safe_cols = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
-            available_cols = [col for col in safe_cols if col in meta_df.columns]
+            safe_metadata_columns = ["cpd_id", "cpd_type", "name", "published_phenotypes", "published_target"]
+            available_cols = [col for col in safe_metadata_columns if col in meta_df.columns]
             meta_df = meta_df[available_cols]
             # Use the improved merging function with deeper debugging
 
