@@ -505,6 +505,7 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
     return df
 
 
+
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -550,24 +551,15 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         try:
             meta_df = pd.read_csv(compound_file, sep="\t")
 
-            # Rename and standardise annotation IDs
+            # Standardise cpd_id
             if "cpd_id" in meta_df.columns:
-                meta_df = meta_df.rename(columns={"cpd_id": "annotation_cpd_id"})
-            meta_df["annotation_cpd_id"] = meta_df["annotation_cpd_id"].astype(str).str.strip().str.upper()
-
-            # Standardise UMAP cpd_id properly
+                meta_df["cpd_id"] = meta_df["cpd_id"].astype(str).str.strip().str.upper()
             df = standardise_cpd_id_column(df, column="cpd_id")
 
-
-            # Standardise UMAP cpd_id
-            df = standardise_cpd_id_column(df, column="cpd_id")
-
-            # Metadata fields to attach
+            # Build annotation lookup dictionaries
             metadata_fields = ["cpd_type", "name", "published_phenotypes", "published_target"]
-
-            # Build one dictionary per field
             annotation_lookup = {
-                field: meta_df.set_index("annotation_cpd_id")[field].to_dict()
+                field: meta_df.set_index("cpd_id")[field].to_dict()
                 for field in metadata_fields
             }
 
@@ -622,7 +614,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
 
     # Interactive plot (Plotly)
     if args is not None and getattr(args, "interactive", False):
-        # Dynamically build hover columns only if they exist
         hover_cols = [
             col for col in [
                 "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
