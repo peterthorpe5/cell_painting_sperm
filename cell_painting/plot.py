@@ -277,9 +277,29 @@ def generate_umap_OLD(df, output_dir, output_file, args=None, add_labels=False,
             logging.info(f"Dropping metadata column before UMAP: {col_to_drop}")
             df = df.drop(columns=[col_to_drop])
 
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    # Define non-feature columns to exclude (metadata and UMAP outputs)
+    non_feature_cols = [
+        "cpd_id", "cpd_type", "name", "published_phenotypes", "published_target",
+        "Library", "Dataset", "Cluster_KMeans", "Cluster_HDBSCAN",
+        "UMAP1", "UMAP2", "is_highlighted"
+    ]
+
+    # UMAP input: strictly numeric, excluding metadata and UMAP-related columns
+    feature_cols = [col for col in df.columns
+                    if col not in non_feature_cols and pd.api.types.is_numeric_dtype(df[col])]
+
+    if not feature_cols:
+        raise ValueError("No numeric feature columns found for UMAP after excluding metadata.")
+
+
+    print(f"[DEBUG] UMAP running on {len(feature_cols)} features")
+
+    # Run UMAP
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
-    embedding = reducer.fit_transform(df[numeric_cols])
+    embedding = reducer.fit_transform(df[feature_cols])
+
+
+
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
