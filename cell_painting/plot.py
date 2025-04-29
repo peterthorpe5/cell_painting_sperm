@@ -566,14 +566,24 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         metric = args.umap_metric
         compound_file = getattr(args, "compound_metadata", None)
 
-    # ==== 1. Choose proper feature columns ====
+    #  Choose proper feature columns 
     protected_metadata_cols = [
-        "cpd_id", "cpd_type", "name", "published_phenotypes", "published_target",
-        "Library", "Dataset", "Cluster_KMeans", "Cluster_HDBSCAN",
+        "index", "Sample", "cpd_id", "cpd_type", "name", "published_phenotypes",
+        "published_target", "Library", "Dataset",
+        "Cluster_KMeans", "Cluster_HDBSCAN",
         "UMAP1", "UMAP2", "is_highlighted"
     ]
-    feature_cols = [col for col in df.columns if col not in protected_metadata_cols and pd.api.types.is_numeric_dtype(df[col])]
-    
+
+    feature_cols = [
+        col for col in df.columns
+        if col not in protected_metadata_cols and pd.api.types.is_numeric_dtype(df[col])
+    ]
+
+    if not feature_cols:
+        raise ValueError("No valid numeric feature columns found for UMAP after excluding metadata.")
+
+
+
     print("\n========== UMAP DEBUG ==========")
     print(f"[DEBUG] Selected {len(feature_cols)} feature columns for UMAP.")
     print(f"[DEBUG] Feature columns: {feature_cols}")
