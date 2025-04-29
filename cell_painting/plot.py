@@ -528,7 +528,7 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
-    Generate and save UMAP plots (static matplotlib and interactive Plotly).
+    Generate and save UMAP plots (static matplotlib and optional interactive Plotly).
 
     Parameters
     ----------
@@ -541,7 +541,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     args : Namespace, optional
         Parsed CLI arguments (for UMAP and interactive settings).
     add_labels : bool, optional
-        Whether to add compound labels to the static matplotlib plot.
+        Whether to add compound labels to the plot.
     colour_by : str, optional
         Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
     highlight_prefix : str, optional
@@ -554,6 +554,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     pd.DataFrame
         DataFrame with UMAP coordinates added.
     """
+
     if args is None:
         n_neighbors = 15
         min_dist = 0.25
@@ -565,62 +566,45 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         metric = args.umap_metric
         compound_file = getattr(args, "compound_metadata", None)
 
-    # Attach metadata carefully if provided
-    if compound_file and os.path.isfile(compound_file):
-        try:
-            meta_df = pd.read_csv(compound_file, sep="\t")
-
-            # Standardise cpd_id
-            if "cpd_id" in meta_df.columns:
-                meta_df["cpd_id"] = meta_df["cpd_id"].astype(str).str.strip().str.upper()
-            df = standardise_cpd_id_column(df, column="cpd_id")
-
-            # Metadata fields to enrich
-            metadata_fields = ["cpd_type", "name", "published_phenotypes", "published_target"]
-            annotation_lookup = {
-                field: meta_df.set_index("cpd_id")[field].to_dict()
-                for field in metadata_fields
-            }
-
-            for field in metadata_fields:
-                if field not in df.columns:
-                    df[field] = df["cpd_id"].map(annotation_lookup[field])
-
-            n_matched = df[metadata_fields[0]].notnull().sum()
-            print(f"[DEBUG] {n_matched}/{len(df)} compounds enriched with metadata based on '{metadata_fields[0]}'.")
-
-            logging.info("Safely merged metadata into dataframe with detailed debugging.")
-        except Exception as e:
-            logging.warning(f"Failed to safely enrich metadata: {e}")
-
-    # Drop problematic metadata columns if present
-    for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
-        if col_to_drop in df.columns:
-            df = df.drop(columns=[col_to_drop])
-            logging.info(f"Dropped metadata column: {col_to_drop}")
-
-    # IMPORTANT: Exclude non-numeric columns before UMAP
-    metadata_cols = [
+    # ==== 1. Choose proper feature columns ====
+    protected_metadata_cols = [
         "cpd_id", "cpd_type", "name", "published_phenotypes", "published_target",
-        "Library", "Dataset", "Cluster_KMeans", "Cluster_HDBSCAN"
+        "Library", "Dataset", "Cluster_KMeans", "Cluster_HDBSCAN",
+        "UMAP1", "UMAP2", "is_highlighted"
     ]
-    feature_cols = [col for col in df.columns if col not in metadata_cols and pd.api.types.is_numeric_dtype(df[col])]
+    feature_cols = [col for col in df.columns if col not in protected_metadata_cols and pd.api.types.is_numeric_dtype(df[col])]
     
-    if not feature_cols:
-        raise ValueError("No numeric feature columns found for UMAP after excluding metadata columns.")
+    print("\n========== UMAP DEBUG ==========")
+    print(f"[DEBUG] Selected {len(feature_cols)} feature columns for UMAP.")
+    print(f"[DEBUG] Feature columns: {feature_cols}")
+    print(f"[DEBUG] Feature matrix shape: {df[feature_cols].shape}")
+    print("[DEBUG] Variance across feature columns:")
+    print(df[feature_cols].var())
+    print("[DEBUG] Quick min/max check:")
+    print(df[feature_cols].agg(["min", "max"]))
+    print("=================================\n")
 
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
+    if df[feature_cols].isnull().any().any():
+        raise ValueError("UMAP input contains NaN values! Cannot run UMAP safely.")
+
+    # ==== 2. Run UMAP ====
+    reducer = umap.UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=42
+    )
     embedding = reducer.fit_transform(df[feature_cols])
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
-    # Create highlighting column
+    # ==== 3. Highlight compounds ====
     if highlight_list:
         df["is_highlighted"] = df["cpd_id"].isin(highlight_list)
     else:
         df["is_highlighted"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
 
-    # Static plot (matplotlib)
+    # ==== 4. Static Matplotlib plot ====
     fig, ax = plt.subplots(figsize=(8, 6))
     if colour_by in df.columns:
         sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
@@ -638,7 +622,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     plt.close()
     logging.info(f"Saved static UMAP to: {output_file}")
 
-    # Interactive plot (Plotly)
+    # ==== 5. Interactive Plotly plot ====
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [
             col for col in [
@@ -672,5 +656,3 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
 
     return df
-
-
