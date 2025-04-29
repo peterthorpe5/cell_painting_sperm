@@ -366,141 +366,6 @@ def generate_umap_OLD(df, output_dir, output_file, args=None, add_labels=False,
     return df
 
 
-def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
-                  colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
-    """
-    Generate and save UMAP plots (static matplotlib and interactive Plotly).
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with numeric features and metadata.
-    output_dir : str
-        Directory to save the plot.
-    output_file : str
-        Path to the output plot file.
-    args : Namespace, optional
-        Parsed CLI arguments (for UMAP and interactive settings).
-    add_labels : bool, optional
-        Whether to add compound labels to the static matplotlib plot.
-    colour_by : str, optional
-        Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
-    highlight_prefix : str, optional
-        Prefix to highlight compounds (default: "MCP").
-    highlight_list : list, optional
-        Specific list of compound IDs to highlight.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with UMAP coordinates added.
-    """
-    if args is None:
-        n_neighbors = 15
-        min_dist = 0.25
-        metric = "euclidean"
-        compound_file = None
-    else:
-        n_neighbors = args.umap_n_neighbors
-        min_dist = args.umap_min_dist
-        metric = args.umap_metric
-        compound_file = getattr(args, "compound_metadata", None)
-
-    # Attach metadata carefully if provided
-    if compound_file and os.path.isfile(compound_file):
-        try:
-            meta_df = pd.read_csv(compound_file, sep="\t")
-
-            # Rename annotation cpd_id to protect UMAP cpd_id
-            if "cpd_id" in meta_df.columns:
-                meta_df = meta_df.rename(columns={"cpd_id": "annotation_cpd_id"})
-
-            # Build metadata lookup
-            metadata_lookup = meta_df.drop_duplicates(subset=["annotation_cpd_id"]).set_index("annotation_cpd_id").to_dict(orient="index")
-
-            # Safely enrich UMAP dataframe without touching cpd_id
-            safe_metadata_columns = ["cpd_type", "name", "published_phenotypes", "published_target"]
-
-            for col in safe_metadata_columns:
-                df[col] = df["cpd_id"].map(lambda x: metadata_lookup.get(x, {}).get(col, None))
-
-            n_matched = df[safe_metadata_columns[0]].notnull().sum()
-            print(f"[DEBUG] {n_matched}/{len(df)} compounds enriched with metadata.")
-
-            logging.info("Safely merged metadata into dataframe with detailed debugging.")
-        except Exception as e:
-            logging.warning(f"Failed to safely enrich metadata: {e}")
-
-    # Drop problematic metadata columns if still present
-    for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
-        if col_to_drop in df.columns:
-            df = df.drop(columns=[col_to_drop])
-            logging.info(f"Dropped metadata column: {col_to_drop}")
-
-    # UMAP projection
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
-    embedding = reducer.fit_transform(df[numeric_cols])
-    df["UMAP1"] = embedding[:, 0]
-    df["UMAP2"] = embedding[:, 1]
-
-    # Create highlighting column
-    if highlight_list:
-        df["is_highlighted"] = df["cpd_id"].isin(highlight_list)
-    else:
-        df["is_highlighted"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
-
-    # Static plot (matplotlib)
-    fig, ax = plt.subplots(figsize=(8, 6))
-    if colour_by in df.columns:
-        sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
-        ax.legend(loc="best", fontsize="small", markerscale=1, frameon=False)
-    else:
-        sns.scatterplot(x="UMAP1", y="UMAP2", data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
-
-    if add_labels and "cpd_id" in df.columns:
-        for _, row in df.iterrows():
-            ax.text(row["UMAP1"], row["UMAP2"], str(row["cpd_id"]), fontsize=3, alpha=0.7)
-
-    ax.set_title(f"CLIPn UMAP ({metric})")
-    plt.tight_layout()
-    plt.savefig(output_file, dpi=1200)
-    plt.close()
-    logging.info(f"Saved static UMAP to: {output_file}")
-
-    # Interactive plot (Plotly)
-    if args is not None and getattr(args, "interactive", False):
-        hover_cols = [col for col in [
-            "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
-            "published_phenotypes", "published_target"
-        ] if col in df.columns]
-
-        fig = px.scatter(
-            df,
-            x="UMAP1",
-            y="UMAP2",
-            color=colour_by if colour_by in df.columns else None,
-            hover_data=hover_cols,
-            template="plotly_white",
-            title=f"CLIPn UMAP ({metric}) with Highlights"
-        )
-
-        fig.update_traces(
-            marker=dict(
-                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
-                symbol=df["is_highlighted"].apply(lambda x: "star" if x else "circle"),
-                line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
-            )
-        )
-
-        html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
-        html_path = os.path.join(output_dir, html_name)
-        fig.write_html(html_path)
-        logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
-
-    return df
-
-
 
 def merge_annotation_to_umap(
     umap_df: pd.DataFrame,
@@ -614,3 +479,175 @@ def enrich_with_metadata(umap_df, metadata_lookup, metadata_columns):
     print(f"[DEBUG] {n_matched}/{len(umap_df)} compounds enriched with metadata.")
     
     return umap_df
+
+
+def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.DataFrame:
+    """
+    Standardise a compound ID column by stripping spaces and converting to upper case.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing the column to standardise.
+    column : str, optional
+        Name of the column to standardise (default is 'cpd_id').
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with the specified column cleaned.
+    """
+    if column in df.columns:
+        df[column] = df[column].astype(str).str.strip().str.upper()
+    else:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+
+    return df
+
+
+def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
+                  colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
+    """
+    Generate and save UMAP plots (static matplotlib and interactive Plotly).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with numeric features and metadata.
+    output_dir : str
+        Directory to save the plot.
+    output_file : str
+        Path to the output plot file.
+    args : Namespace, optional
+        Parsed CLI arguments (for UMAP and interactive settings).
+    add_labels : bool, optional
+        Whether to add compound labels to the static matplotlib plot.
+    colour_by : str, optional
+        Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
+    highlight_prefix : str, optional
+        Prefix to highlight compounds (default: "MCP").
+    highlight_list : list, optional
+        Specific list of compound IDs to highlight.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with UMAP coordinates added.
+    """
+    if args is None:
+        n_neighbors = 15
+        min_dist = 0.25
+        metric = "euclidean"
+        compound_file = None
+    else:
+        n_neighbors = args.umap_n_neighbors
+        min_dist = args.umap_min_dist
+        metric = args.umap_metric
+        compound_file = getattr(args, "compound_metadata", None)
+
+    # Attach metadata carefully if provided
+    if compound_file and os.path.isfile(compound_file):
+        try:
+            meta_df = pd.read_csv(compound_file, sep="\t")
+
+            # Rename and standardise annotation IDs
+            if "cpd_id" in meta_df.columns:
+                meta_df = meta_df.rename(columns={"cpd_id": "annotation_cpd_id"})
+            meta_df = standardise_cpd_id_column(meta_df, column="annotation_cpd_id")
+
+            # Standardise UMAP cpd_id
+            df = standardise_cpd_id_column(df, column="cpd_id")
+
+            # Metadata fields to attach
+            metadata_fields = ["cpd_type", "name", "published_phenotypes", "published_target"]
+
+            # Build one dictionary per field
+            annotation_lookup = {
+                field: meta_df.set_index("annotation_cpd_id")[field].to_dict()
+                for field in metadata_fields
+            }
+
+            # Attach metadata safely
+            for field in metadata_fields:
+                if field not in df.columns:
+                    df[field] = df["cpd_id"].map(annotation_lookup[field])
+
+            n_matched = df[metadata_fields[0]].notnull().sum()
+            print(f"[DEBUG] {n_matched}/{len(df)} compounds enriched with metadata based on '{metadata_fields[0]}'.")
+
+            logging.info("Safely merged metadata into dataframe with detailed debugging.")
+        except Exception as e:
+            logging.warning(f"Failed to safely enrich metadata: {e}")
+
+    # Drop problematic metadata columns
+    for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
+        if col_to_drop in df.columns:
+            df = df.drop(columns=[col_to_drop])
+            logging.info(f"Dropped metadata column: {col_to_drop}")
+
+    # UMAP projection
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
+    embedding = reducer.fit_transform(df[numeric_cols])
+    df["UMAP1"] = embedding[:, 0]
+    df["UMAP2"] = embedding[:, 1]
+
+    # Create highlighting column
+    if highlight_list:
+        df["is_highlighted"] = df["cpd_id"].isin(highlight_list)
+    else:
+        df["is_highlighted"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
+
+    # Static plot (matplotlib)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    if colour_by in df.columns:
+        sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
+        ax.legend(loc="best", fontsize="small", markerscale=1, frameon=False)
+    else:
+        sns.scatterplot(x="UMAP1", y="UMAP2", data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
+
+    if add_labels and "cpd_id" in df.columns:
+        for _, row in df.iterrows():
+            ax.text(row["UMAP1"], row["UMAP2"], str(row["cpd_id"]), fontsize=3, alpha=0.7)
+
+    ax.set_title(f"CLIPn UMAP ({metric})")
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=1200)
+    plt.close()
+    logging.info(f"Saved static UMAP to: {output_file}")
+
+    # Interactive plot (Plotly)
+    if args is not None and getattr(args, "interactive", False):
+        # Dynamically build hover columns only if they exist
+        hover_cols = [
+            col for col in [
+                "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
+                "name", "published_phenotypes", "published_target"
+            ]
+            if col in df.columns
+        ]
+
+        fig = px.scatter(
+            df,
+            x="UMAP1",
+            y="UMAP2",
+            color=colour_by if colour_by in df.columns else None,
+            hover_data=hover_cols,
+            template="plotly_white",
+            title=f"CLIPn UMAP ({metric}) with Highlights"
+        )
+
+        fig.update_traces(
+            marker=dict(
+                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
+                symbol=df["is_highlighted"].apply(lambda x: "star" if x else "circle"),
+                line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
+            )
+        )
+
+        html_name = os.path.splitext(os.path.basename(output_file))[0] + ".html"
+        html_path = os.path.join(output_dir, html_name)
+        fig.write_html(html_path)
+        logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
+
+    return df
