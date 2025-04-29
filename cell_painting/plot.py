@@ -553,7 +553,11 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             # Rename and standardise annotation IDs
             if "cpd_id" in meta_df.columns:
                 meta_df = meta_df.rename(columns={"cpd_id": "annotation_cpd_id"})
-            meta_df = standardise_cpd_id_column(meta_df, column="annotation_cpd_id")
+            meta_df["annotation_cpd_id"] = meta_df["annotation_cpd_id"].astype(str).str.strip().str.upper()
+
+            # Standardise UMAP cpd_id properly
+            df = standardise_cpd_id_column(df, column="cpd_id")
+
 
             # Standardise UMAP cpd_id
             df = standardise_cpd_id_column(df, column="cpd_id")
