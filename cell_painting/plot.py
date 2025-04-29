@@ -505,7 +505,6 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
     return df
 
 
-
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -556,14 +555,13 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                 meta_df["cpd_id"] = meta_df["cpd_id"].astype(str).str.strip().str.upper()
             df = standardise_cpd_id_column(df, column="cpd_id")
 
-            # Build annotation lookup dictionaries
+            # Metadata fields to enrich
             metadata_fields = ["cpd_type", "name", "published_phenotypes", "published_target"]
             annotation_lookup = {
                 field: meta_df.set_index("cpd_id")[field].to_dict()
                 for field in metadata_fields
             }
 
-            # Attach metadata safely
             for field in metadata_fields:
                 if field not in df.columns:
                     df[field] = df["cpd_id"].map(annotation_lookup[field])
@@ -575,16 +573,24 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         except Exception as e:
             logging.warning(f"Failed to safely enrich metadata: {e}")
 
-    # Drop problematic metadata columns
+    # Drop problematic metadata columns if present
     for col_to_drop in ["Plate_Metadata", "Well_Metadata"]:
         if col_to_drop in df.columns:
             df = df.drop(columns=[col_to_drop])
             logging.info(f"Dropped metadata column: {col_to_drop}")
 
-    # UMAP projection
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    # IMPORTANT: Exclude non-numeric columns before UMAP
+    metadata_cols = [
+        "cpd_id", "cpd_type", "name", "published_phenotypes", "published_target",
+        "Library", "Dataset", "Cluster_KMeans", "Cluster_HDBSCAN"
+    ]
+    feature_cols = [col for col in df.columns if col not in metadata_cols and pd.api.types.is_numeric_dtype(df[col])]
+    
+    if not feature_cols:
+        raise ValueError("No numeric feature columns found for UMAP after excluding metadata columns.")
+
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
-    embedding = reducer.fit_transform(df[numeric_cols])
+    embedding = reducer.fit_transform(df[feature_cols])
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
@@ -646,3 +652,5 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         logging.info(f"Saved interactive Plotly UMAP to: {html_path}")
 
     return df
+
+
