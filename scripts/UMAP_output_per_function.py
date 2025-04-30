@@ -9,11 +9,11 @@ This script:
 - Projects data to 2D using UMAP with configurable parameters.
 - Optionally applies KMeans clustering (if requested).
 - Merges in additional metadata (e.g. compound functions) if provided.
-- Saves UMAP coordinates and both static and interactive plots.
 - Supports colouring by multiple metadata fields.
 - Adds all merged compound annotations to hover tooltips.
-- Saves a cluster summary table by cpd_type and compound annotations.
-- Saves plots to subfolders for each colouring.
+- Highlights compounds of interest using stars.
+- Saves a cluster summary table by `cpd_type` and compound annotations.
+- Saves coordinates, static and interactive UMAP plots.
 
 Usage:
 ------
@@ -24,6 +24,7 @@ Usage:
         --umap_min_dist 0.1 \
         --umap_metric euclidean \
         --colour_by Library cpd_type function \
+        --highlight_prefix MCP \
         --add_labels \
         --compound_metadata compound_function.tsv
 
@@ -34,7 +35,7 @@ Output:
         - clipn_umap_plot.pdf
         - clipn_umap_plot.html
         - cluster_summary_by_cpd_type.tsv (if clustered)
-        - cluster_summary_by_function.tsv (if compound metadata provided)
+        - cluster_summary_by_<column>.tsv (if compound metadata provided)
 
 """
 
@@ -49,7 +50,18 @@ from sklearn.cluster import KMeans
 import numpy as np
 
 def summarise_clusters(df, outdir, compound_columns):
-    """Summarise cluster composition by cpd_type and compound metadata columns."""
+    """
+    Summarise cluster composition by cpd_type and additional metadata fields.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing UMAP coordinates and cluster labels.
+    outdir : str
+        Directory to save cluster summary TSV files.
+    compound_columns : list
+        List of compound annotation columns to summarise per cluster.
+    """
     if "Cluster" not in df.columns or df["Cluster"].nunique() <= 1:
         return
 
@@ -62,9 +74,19 @@ def summarise_clusters(df, outdir, compound_columns):
         func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
 
 def run_umap_analysis(input_path, output_dir, args):
-    """Perform UMAP projection and optional clustering, saving outputs and plots."""
-    os.makedirs(output_dir, exist_ok=True)
+    """
+    Perform UMAP projection and optional clustering, save results and plots.
 
+    Parameters
+    ----------
+    input_path : str
+        Path to input latent space TSV file.
+    output_dir : str
+        Directory where results will be saved.
+    args : argparse.Namespace
+        Parsed command-line arguments.
+    """
+    os.makedirs(output_dir, exist_ok=True)
     df = pd.read_csv(input_path, sep='\t')
     compound_columns = []
 
@@ -85,7 +107,6 @@ def run_umap_analysis(input_path, output_dir, args):
         random_state=42
     )
     latent_umap = umap_model.fit_transform(latent_features)
-
     df["UMAP1"] = latent_umap[:, 0]
     df["UMAP2"] = latent_umap[:, 1]
 
@@ -94,6 +115,11 @@ def run_umap_analysis(input_path, output_dir, args):
         df["Cluster"] = kmeans.fit_predict(latent_umap)
     else:
         df["Cluster"] = "NA"
+
+    if args.highlight_prefix:
+        df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper())
+    else:
+        df["is_highlighted"] = False
 
     colour_fields = args.colour_by if args.colour_by else [None]
 
@@ -107,7 +133,6 @@ def run_umap_analysis(input_path, output_dir, args):
         df.to_csv(coords_file, sep='\t', index=False)
 
         plt.figure(figsize=(12, 8))
-
         if colour_col:
             unique_vals = df[colour_col].unique()
             colour_map = {val: idx for idx, val in enumerate(unique_vals)}
@@ -118,12 +143,7 @@ def run_umap_analysis(input_path, output_dir, args):
             cmap = None
 
         scatter = plt.scatter(
-            df["UMAP1"],
-            df["UMAP2"],
-            s=5,
-            alpha=0.6,
-            c=colours,
-            cmap=cmap
+            df["UMAP1"], df["UMAP2"], s=5, alpha=0.6, c=colours, cmap=cmap
         )
         plt.xlabel("UMAP 1")
         plt.ylabel("UMAP 2")
@@ -149,6 +169,15 @@ def run_umap_analysis(input_path, output_dir, args):
             title=f"CLIPn UMAP (Interactive, coloured by {label})",
             template="plotly_white"
         )
+
+        fig.update_traces(
+            marker=dict(
+                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
+                symbol=df["is_highlighted"].apply(lambda x: "star" if x else "circle"),
+                line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
+            )
+        )
+
         if args.add_labels:
             fig.update_traces(text=df["cpd_id"], textposition="top center")
 
@@ -162,7 +191,14 @@ def run_umap_analysis(input_path, output_dir, args):
         print(f"Saved coordinates: {coords_file}")
 
 def parse_args():
-    """Parse command-line arguments for UMAP plotting script."""
+    """
+    Parse command-line arguments for UMAP plotting script.
+
+    Returns
+    -------
+    argparse.Namespace
+        Parsed arguments object.
+    """
     parser = argparse.ArgumentParser(description="Flexible UMAP Projection for CLIPn Latent Data")
     parser.add_argument("--input", required=True, help="Path to input TSV with latent + metadata")
     parser.add_argument("--output_dir", required=True, help="Directory to save UMAP plot and coordinates")
@@ -172,6 +208,7 @@ def parse_args():
     parser.add_argument("--num_clusters", type=int, default=None, help="Optional: number of KMeans clusters")
     parser.add_argument("--colour_by", nargs="*", default=None, help="List of metadata columns to colour UMAP by")
     parser.add_argument("--add_labels", action="store_true", help="Add `cpd_id` text labels to interactive UMAP")
+    parser.add_argument("--highlight_prefix", type=str, default="MCP", help="Highlight compounds with this prefix")
     parser.add_argument("--compound_metadata", type=str, default=None, help="Optional file with compound annotations to merge on `cpd_id`")
     return parser.parse_args()
 
