@@ -138,7 +138,12 @@ def run_umap_analysis(input_path, output_dir, args):
     else:
         df["Cluster"] = "NA"
 
-    df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
+    if args.highlight_list:
+        highlight_set = set(c.upper() for c in args.highlight_list)
+        df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().isin(highlight_set)
+    else:
+        df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
+
     if "Library" not in df.columns and "library" in df.columns:
         df["Library"] = df["library"]
     df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
@@ -239,6 +244,18 @@ def parse_args():
     parser.add_argument("--colour_by", nargs="*", default=None, help="List of metadata columns to colour UMAP by")
     parser.add_argument("--add_labels", action="store_true", help="Add `cpd_id` text labels to interactive UMAP")
     parser.add_argument("--highlight_prefix", type=str, default="MCP", help="Highlight compounds with this prefix")
+    parser.add_argument("--highlight_list",
+                        nargs="+",
+                        default=["MCP09", "MCP05",
+                                                        'DDD02387619', 'DDD02443214', 'DDD02454019', 'DDD02454403', 
+                                                        'DDD02459457', 'DDD02487111', 'DDD02487311', 'DDD02589868', 
+                                                        'DDD02591200', 'DDD02591362', 'DDD02941115', 
+                                                        'DDD02941193', 'DDD02947912', 'DDD02947919', 'DDD02948915', 
+                                                        'DDD02948916', 'DDD02948926', 'DDD02952619', 'DDD02952620', 
+                                                        'DDD02955130', 'DDD02958365'],
+                        help="List of specific compound IDs to highlight regardless of prefix"
+                    )
+
     parser.add_argument("--compound_metadata", type=str, default=None, help="Optional file with compound annotations to merge on `cpd_id`")
     return parser.parse_args()
 
