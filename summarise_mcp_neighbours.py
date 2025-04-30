@@ -1,0 +1,118 @@
+import argparse
+import os
+import pandas as pd
+import numpy as np
+
+
+def load_metadata(metadata_path):
+    """
+    Load compound metadata from a specified file.
+
+    Parameters
+    ----------
+    metadata_path : str or None
+        Path to metadata file.
+
+    Returns
+    -------
+    pd.DataFrame or None
+        DataFrame with metadata or None if file not found or not provided.
+    """
+    if metadata_path and os.path.isfile(metadata_path):
+        print(f"[INFO] Found compound metadata file: {metadata_path}")
+        return pd.read_csv(metadata_path, sep="\t")
+    print("[WARNING] No compound metadata file provided or file not found.")
+    return None
+
+
+def find_nearest_umap(df, target_id, top_n):
+    """
+    Find top N closest compounds to target_id based on UMAP coordinates.
+    """
+    coords = df[["UMAP1", "UMAP2"]].values
+    target_row = df[df["cpd_id"].str.upper() == target_id.upper()]
+    if target_row.empty:
+        raise ValueError(f"Target compound '{target_id}' not found in UMAP coordinates")
+    target_vec = target_row[["UMAP1", "UMAP2"]].values[0]
+    dists = np.linalg.norm(coords - target_vec, axis=1)
+    df = df.copy()
+    df["UMAP_distance"] = dists
+    nearest = df.sort_values("UMAP_distance").iloc[1:top_n + 1]  # skip self
+    return nearest
+
+
+def find_nearest_pairwise(df, target_id, top_n):
+    """
+    Return top N most similar entries to target_id from pairwise data.
+    """
+    df = df.copy()
+    target_rows = df[df["cpd_id_A"].str.upper() == target_id.upper()]
+    if target_rows.empty:
+        raise ValueError(f"Target compound '{target_id}' not found in pairwise data")
+    top_hits = target_rows.sort_values("similarity", ascending=False).head(top_n)
+    return top_hits
+
+
+def summarise_neighbours(folder, target="MCP09", top_n=5, metadata_path=None):
+    """
+    Summarise nearest compounds to a given target based on pairwise and UMAP similarity.
+
+    Parameters
+    ----------
+    folder : str
+        Path to the CLIPn pipeline output root.
+    target : str
+        Target compound ID to find neighbours for.
+    top_n : int
+        Number of top neighbours to extract.
+    metadata_path : str or None
+        Path to metadata file to merge annotations.
+    """
+    pairwise_path = os.path.join(folder, "post_clipn", "post_analysis_script", "nearest_neighbours.tsv")
+    umap_path = os.path.join(folder, "post_clipn", "UMAP_kNone", "cpd_type", "clipn_umap_coordinates_euclidean_n15_d0.1.tsv")
+    meta = load_metadata(metadata_path)
+
+    pairwise = pd.read_csv(pairwise_path, sep="\t")
+    umap = pd.read_csv(umap_path, sep="\t")
+
+    # Normalise case
+    pairwise[["cpd_id_A", "cpd_id_B"]] = pairwise[["cpd_id_A", "cpd_id_B"]].apply(lambda x: x.str.upper())
+    umap["cpd_id"] = umap["cpd_id"].str.upper()
+    target = target.upper()
+
+    # Find neighbours
+    top_pairwise = find_nearest_pairwise(pairwise, target, top_n)
+    top_umap = find_nearest_umap(umap, target, top_n)
+
+    # Annotate with metadata if available
+    if meta is not None:
+        meta = meta.copy()
+        meta["cpd_id"] = meta["cpd_id"].str.upper()
+        top_pairwise = top_pairwise.merge(meta, left_on="cpd_id_B", right_on="cpd_id", how="left")
+        top_umap = top_umap.merge(meta, on="cpd_id", how="left")
+
+    print("\nTop Neighbours (Pairwise Similarity):")
+    print(top_pairwise[["cpd_id_B", "similarity"] + [col for col in meta.columns if col != "cpd_id"]] if meta is not None else top_pairwise)
+
+    print("\nTop Neighbours (UMAP Distance):")
+    print(top_umap[["cpd_id", "UMAP_distance"] + [col for col in meta.columns if col != "cpd_id"]] if meta is not None else top_umap)
+
+    out_path = os.path.join(folder, f"nearest_neighbour_summary_{target}.tsv")
+    with open(out_path, "w") as out:
+        out.write("# Top Neighbours (Pairwise Similarity)\n")
+        top_pairwise.to_csv(out, sep="\t", index=False)
+        out.write("\n# Top Neighbours (UMAP Distance)\n")
+        top_umap.to_csv(out, sep="\t", index=False)
+
+    print(f"\n[INFO] Summary written to: {out_path}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Summarise neighbours of a target compound from CLIPn outputs")
+    parser.add_argument("--folder", required=True, help="Path to pipeline output folder")
+    parser.add_argument("--target", default="MCP09", help="Target compound ID (default=MCP09)")
+    parser.add_argument("--top_n", type=int, default=5, help="Top N neighbours to extract")
+    parser.add_argument("--metadata", type=str, default=None, help="Path to compound metadata file")
+    args = parser.parse_args()
+
+    summarise_neighbours(args.folder, args.target, args.top_n, args.metadata)
