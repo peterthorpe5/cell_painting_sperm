@@ -12,6 +12,7 @@ This script:
 - Supports colouring by multiple metadata fields.
 - Adds all merged compound annotations to hover tooltips.
 - Highlights compounds of interest using stars.
+- Uses diamond markers for entries where 'Library' contains MCP.
 - Saves a cluster summary table by `cpd_type` and compound annotations.
 - Saves coordinates, static and interactive UMAP plots.
 
@@ -70,8 +71,10 @@ def summarise_clusters(df, outdir, compound_columns):
         cpd_summary.to_csv(os.path.join(outdir, "cluster_summary_by_cpd_type.tsv"), sep="\t")
 
     for col in compound_columns:
-        func_summary = df.groupby("Cluster")[col].value_counts().unstack(fill_value=0)
-        func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
+        if col in df.columns:
+            func_summary = df.groupby("Cluster")[col].value_counts().unstack(fill_value=0)
+            func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
+
 
 def run_umap_analysis(input_path, output_dir, args):
     """
@@ -88,12 +91,28 @@ def run_umap_analysis(input_path, output_dir, args):
     """
     os.makedirs(output_dir, exist_ok=True)
     df = pd.read_csv(input_path, sep='\t')
+
+    print(f"[DEBUG] Input data shape: {df.shape}")
+    print(f"[DEBUG] Input columns: {df.columns.tolist()}")
+
     compound_columns = []
 
     if args.compound_metadata:
         compound_meta = pd.read_csv(args.compound_metadata, sep='\t')
+        print(f"[DEBUG] Compound metadata columns before rename: {compound_meta.columns.tolist()}")
+
+        # Rename problematic columns
+        compound_meta = compound_meta.rename(columns={"publish own other": "published_other"})
+
+        # Standardise cpd_id for merge
+        compound_meta["cpd_id"] = compound_meta["cpd_id"].astype(str).str.strip().str.upper()
+        df["cpd_id"] = df["cpd_id"].astype(str).str.strip().str.upper()
+
         df = pd.merge(df, compound_meta, on="cpd_id", how="left")
-        compound_columns = [col for col in compound_meta.columns if col != "cpd_id"]
+        compound_columns = [col for col in compound_meta.columns if col != "cpd_id" and col in df.columns]
+
+        print(f"[DEBUG] Compound columns merged: {compound_columns}")
+        print(f"[DEBUG] Data shape after merge: {df.shape}")
 
     latent_features = df[[col for col in df.columns if col.isdigit()]].copy()
     print(f"[INFO] Using {latent_features.shape[1]} numeric columns for UMAP:")
@@ -116,10 +135,8 @@ def run_umap_analysis(input_path, output_dir, args):
     else:
         df["Cluster"] = "NA"
 
-    if args.highlight_prefix:
-        df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper())
-    else:
-        df["is_highlighted"] = False
+    df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
+    df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP") if "Library" in df.columns else False
 
     colour_fields = args.colour_by if args.colour_by else [None]
 
@@ -127,6 +144,10 @@ def run_umap_analysis(input_path, output_dir, args):
         label = colour_col if colour_col else "uncoloured"
         label_folder = os.path.join(output_dir, label)
         os.makedirs(label_folder, exist_ok=True)
+
+        if colour_col and colour_col not in df.columns:
+            print(f"[WARNING] Skipping plot for missing column: {colour_col}")
+            continue
 
         coord_filename = f"clipn_umap_coordinates_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
         coords_file = os.path.join(label_folder, coord_filename)
@@ -173,8 +194,14 @@ def run_umap_analysis(input_path, output_dir, args):
         fig.update_traces(
             marker=dict(
                 size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
-                symbol=df["is_highlighted"].apply(lambda x: "star" if x else "circle"),
-                line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
+                symbol=df.apply(
+                    lambda row: "star" if row["is_highlighted"] else ("diamond" if row["is_library_mcp"] else "circle"),
+                    axis=1
+                ),
+                line=dict(
+                    width=df["is_highlighted"].apply(lambda x: 2 if x else 0),
+                    color="black"
+                )
             )
         )
 

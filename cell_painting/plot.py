@@ -528,33 +528,32 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
-    Generate and save UMAP plots (static matplotlib and optional interactive Plotly).
+    Generate and save UMAP plots (static matplotlib and interactive Plotly).
 
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame with numeric features and metadata.
+        DataFrame with numeric latent features and optional metadata.
     output_dir : str
-        Directory to save the plot.
+        Directory where UMAP plots and coordinates will be saved.
     output_file : str
-        Path to the output plot file.
+        Path (prefix) for output plot files.
     args : Namespace, optional
-        Parsed CLI arguments (for UMAP and interactive settings).
+        Parsed CLI arguments; may contain UMAP and metadata options.
     add_labels : bool, optional
-        Whether to add compound labels to the plot.
+        If True, add compound ID text labels to matplotlib plot.
     colour_by : str, optional
-        Column to colour points by (e.g., 'cpd_type', 'Library', 'Cluster').
+        Column name to colour points by.
     highlight_prefix : str, optional
-        Prefix to highlight compounds (default: "MCP").
+        Compound ID prefix for highlighting (default is 'MCP').
     highlight_list : list, optional
-        Specific list of compound IDs to highlight.
+        Optional list of specific compound IDs to highlight.
 
     Returns
     -------
     pd.DataFrame
         DataFrame with UMAP coordinates added.
     """
-
     if args is None:
         n_neighbors = 15
         min_dist = 0.25
@@ -566,14 +565,19 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         metric = args.umap_metric
         compound_file = getattr(args, "compound_metadata", None)
 
-    #  Choose proper feature columns 
+    # ==== Metadata enrichment (if compound file exists) ====
+    if compound_file and os.path.isfile(compound_file):
+        meta_df = pd.read_csv(compound_file, sep="\t")
+        meta_df.columns = [c.replace("publish own other", "published_other") for c in meta_df.columns]
+        df = df.merge(meta_df, on="cpd_id", how="left")
+        print(f"[DEBUG] Compound metadata merged: {meta_df.shape[1]} columns")
+
+    # ==== Feature selection ====
     protected_metadata_cols = [
         "index", "Sample", "cpd_id", "cpd_type", "name", "published_phenotypes",
-        "published_target", "Library", "Dataset",
-        "Cluster_KMeans", "Cluster_HDBSCAN",
-        "UMAP1", "UMAP2", "is_highlighted"
+        "published_target", "published_other", "Library", "Dataset",
+        "Cluster_KMeans", "Cluster_HDBSCAN", "UMAP1", "UMAP2", "is_highlighted"
     ]
-
     feature_cols = [
         col for col in df.columns
         if col not in protected_metadata_cols and pd.api.types.is_numeric_dtype(df[col])
@@ -581,8 +585,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
 
     if not feature_cols:
         raise ValueError("No valid numeric feature columns found for UMAP after excluding metadata.")
-
-
 
     print("\n========== UMAP DEBUG ==========")
     print(f"[DEBUG] Selected {len(feature_cols)} feature columns for UMAP.")
@@ -597,7 +599,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     if df[feature_cols].isnull().any().any():
         raise ValueError("UMAP input contains NaN values! Cannot run UMAP safely.")
 
-    # ==== 2. Run UMAP ====
     reducer = umap.UMAP(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
@@ -608,18 +609,17 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
 
-    # ==== 3. Highlight compounds ====
-    if highlight_list:
-        df["is_highlighted"] = df["cpd_id"].isin(highlight_list)
-    else:
-        df["is_highlighted"] = df["cpd_id"].astype(str).str.startswith(highlight_prefix)
+    # ==== Highlighting ====
+    df["is_highlighted"] = df["cpd_id"].isin(highlight_list) if highlight_list else df["cpd_id"].str.upper().str.startswith(highlight_prefix.upper())
+    df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
 
-    # ==== 4. Static Matplotlib plot ====
+    # ==== Static plot ====
     fig, ax = plt.subplots(figsize=(8, 6))
     if colour_by in df.columns:
         sns.scatterplot(x="UMAP1", y="UMAP2", hue=colour_by, data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
         ax.legend(loc="best", fontsize="small", markerscale=1, frameon=False)
     else:
+        print(f"[WARNING] colour_by column '{colour_by}' not in DataFrame")
         sns.scatterplot(x="UMAP1", y="UMAP2", data=df, ax=ax, s=10, linewidth=0, alpha=0.8)
 
     if add_labels and "cpd_id" in df.columns:
@@ -632,12 +632,12 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     plt.close()
     logging.info(f"Saved static UMAP to: {output_file}")
 
-    # ==== 5. Interactive Plotly plot ====
+    # ==== Interactive plot ====
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [
             col for col in [
                 "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
-                "name", "published_phenotypes", "published_target"
+                "name", "published_phenotypes", "published_target", "published_other"
             ]
             if col in df.columns
         ]
@@ -655,7 +655,11 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         fig.update_traces(
             marker=dict(
                 size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
-                symbol=df["is_highlighted"].apply(lambda x: "star" if x else "circle"),
+                symbol=df.apply(
+                    lambda row: "star" if row["is_highlighted"]
+                    else ("diamond" if row["is_library_mcp"] else "circle"),
+                    axis=1
+                ),
                 line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
             )
         )

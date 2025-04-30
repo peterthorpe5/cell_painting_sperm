@@ -230,6 +230,10 @@ if __name__ == "__main__":
                         default=None,
                         help="Optional TSV file with compound annotations to merge by cpd_id")
 
+    parser.add_argument(
+        "--highlight_prefix", type=str, default="MCP",
+        help="Highlight compounds with this `cpd_id` prefix (default: MCP)."
+    )
 
 
 
