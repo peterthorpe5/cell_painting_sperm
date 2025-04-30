@@ -570,9 +570,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     if compound_file and os.path.isfile(compound_file):
         meta_df = pd.read_csv(compound_file, sep="\t")
         meta_df.columns = [c.replace("publish own other", "published_other") for c in meta_df.columns]
-        if "Library" in df.columns and "library" in meta_df.columns:
-            meta_df = meta_df.drop(columns=["library"])
-            print("[DEBUG] Dropped 'library' column from annotation to preserve latent 'Library'.")
         df = df.merge(meta_df, on="cpd_id", how="left")
         print(f"[DEBUG] Compound metadata merged: {meta_df.shape[1]} columns")
 
@@ -614,17 +611,8 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     df["UMAP2"] = embedding[:, 1]
 
     # ==== Highlighting ====
-    df["is_highlighted"] = df["cpd_id"].isin(highlight_list) if highlight_list else df["cpd_id"].str.upper().str.contains(highlight_prefix.upper())
+    df["is_highlighted"] = df["cpd_id"].isin(highlight_list) if highlight_list else df["cpd_id"].str.upper().str.startswith(highlight_prefix.upper())
     df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
-
-    # Composite marker symbol
-    df["marker_symbol"] = df.apply(
-        lambda row: "star" if row["is_highlighted"]
-        else ("diamond" if row["is_library_mcp"] else "circle"),
-        axis=1
-    )
-    print(f"[DEBUG] MCP in Library (diamond shape): {df['is_library_mcp'].sum()}/{len(df)} entries")
-    print(f"[DEBUG] Highlighted compounds (star or diamond): {((df['marker_symbol'] != 'circle')).sum()}/{len(df)}")
 
     # ==== Static plot ====
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -648,8 +636,11 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     # ==== Interactive plot ====
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [
-            col for col in df.columns
-            if col not in feature_cols and col not in ["UMAP1", "UMAP2"]
+            col for col in [
+                "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
+                "name", "published_phenotypes", "published_target", "published_other"
+            ]
+            if col in df.columns
         ]
 
         fig = px.scatter(
@@ -657,15 +648,19 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             x="UMAP1",
             y="UMAP2",
             color=colour_by if colour_by in df.columns else None,
-            symbol="marker_symbol",
             hover_data=hover_cols,
             template="plotly_white",
-            title=f"CLIPn UMAP ({metric}) with Highlights",
+            title=f"CLIPn UMAP ({metric}) with Highlights"
         )
 
         fig.update_traces(
             marker=dict(
-                size=df["marker_symbol"].apply(lambda x: 14 if x in ["star", "diamond"] else 6),
+                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
+                symbol=df.apply(
+                    lambda row: "star" if row["is_highlighted"]
+                    else ("diamond" if row["is_library_mcp"] else "circle"),
+                    axis=1
+                ),
                 line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
             )
         )
