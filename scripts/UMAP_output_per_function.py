@@ -79,6 +79,7 @@ def summarise_clusters(df, outdir, compound_columns):
             func_summary = df.groupby("Cluster")[col].value_counts().unstack(fill_value=0)
             func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
 
+
 def run_umap_analysis(input_path, output_dir, args):
     """
     Perform UMAP projection and optional clustering, save results and plots.
@@ -189,8 +190,13 @@ def run_umap_analysis(input_path, output_dir, args):
         plt.savefig(plot_path, dpi=300)
         plt.close()
 
-        base_hover = ["cpd_id", "cpd_type", "Library", "marker_symbol"]
-        hover_cols = [col for col in base_hover + compound_columns if col in df.columns]
+        hover_keys = [
+            "cpd_id", "cpd_type", "Library", "Dataset",
+            colour_col, "name", "published_phenotypes",
+            "published_target", "published_other"
+        ]
+        hover_cols = [col for col in hover_keys if col in df.columns]
+
 
         fig = px.scatter(
             df,
