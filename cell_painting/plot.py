@@ -524,7 +524,6 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
 
     return df
 
-
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -614,14 +613,17 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     df["UMAP2"] = embedding[:, 1]
 
     # ==== Highlighting ====
-    df["is_highlighted"] = (
-        df["cpd_id"].str.upper().str.startswith(highlight_prefix.upper()) |
-        df["Library"].astype(str).str.upper().str.contains(highlight_prefix.upper()) |
-        (df["cpd_id"].isin(highlight_list) if highlight_list else False)
-    )
+    df["is_highlighted"] = df["cpd_id"].isin(highlight_list) if highlight_list else df["cpd_id"].str.upper().str.contains(highlight_prefix.upper())
     df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
+
+    # Composite marker symbol
+    df["marker_symbol"] = df.apply(
+        lambda row: "star" if row["is_highlighted"]
+        else ("diamond" if row["is_library_mcp"] else "circle"),
+        axis=1
+    )
     print(f"[DEBUG] MCP in Library (diamond shape): {df['is_library_mcp'].sum()}/{len(df)} entries")
-    print(f"[DEBUG] Highlighted compounds: {df['is_highlighted'].sum()}/{len(df)}")
+    print(f"[DEBUG] Highlighted compounds (star or diamond): {((df['marker_symbol'] != 'circle')).sum()}/{len(df)}")
 
     # ==== Static plot ====
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -656,19 +658,15 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             x="UMAP1",
             y="UMAP2",
             color=colour_by if colour_by in df.columns else None,
+            symbol="marker_symbol",
             hover_data=hover_cols,
             template="plotly_white",
-            title=f"CLIPn UMAP ({metric}) with Highlights"
+            title=f"CLIPn UMAP ({metric}) with Highlights",
         )
 
         fig.update_traces(
             marker=dict(
-                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
-                symbol=df.apply(
-                    lambda row: "star" if row["is_highlighted"]
-                    else ("diamond" if row["is_library_mcp"] else "circle"),
-                    axis=1
-                ),
+                size=df["marker_symbol"].apply(lambda x: 14 if x in ["star", "diamond"] else 6),
                 line=dict(width=df["is_highlighted"].apply(lambda x: 2 if x else 0), color="black")
             )
         )

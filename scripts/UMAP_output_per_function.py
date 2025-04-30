@@ -52,7 +52,7 @@ import numpy as np
 
 def summarise_clusters(df, outdir, compound_columns):
     """
-    Summarise cluster composition by cpd_type and additional metadata fields.
+    Summarise cluster composition by cpd_type, marker symbol, and additional metadata fields.
 
     Parameters
     ----------
@@ -69,6 +69,10 @@ def summarise_clusters(df, outdir, compound_columns):
     if "cpd_type" in df.columns:
         cpd_summary = df.groupby("Cluster")["cpd_type"].value_counts().unstack(fill_value=0)
         cpd_summary.to_csv(os.path.join(outdir, "cluster_summary_by_cpd_type.tsv"), sep="\t")
+
+    if "marker_symbol" in df.columns:
+        marker_summary = df.groupby("Cluster")["marker_symbol"].value_counts().unstack(fill_value=0)
+        marker_summary.to_csv(os.path.join(outdir, "cluster_summary_by_marker_symbol.tsv"), sep="\t")
 
     for col in compound_columns:
         if col in df.columns:
@@ -132,7 +136,6 @@ def run_umap_analysis(input_path, output_dir, args):
     else:
         df["Cluster"] = "NA"
 
-    # Enhanced Highlighting
     def is_highlighted(row):
         cpd_match = str(row["cpd_id"]).upper().startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
         lib_match = "MCP" in str(row.get("Library", "")).upper()
@@ -141,8 +144,14 @@ def run_umap_analysis(input_path, output_dir, args):
     df["is_highlighted"] = df.apply(is_highlighted, axis=1)
     df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
 
+    df["marker_symbol"] = df.apply(
+        lambda row: "star" if row["is_highlighted"]
+        else ("diamond" if row["is_library_mcp"] else "circle"),
+        axis=1
+    )
+
     print(f"[DEBUG] MCP in Library (diamond shape): {df['is_library_mcp'].sum()}/{len(df)} entries")
-    print(f"[DEBUG] Highlighted compounds (star or diamond): {df['is_highlighted'].sum()}/{len(df)}")
+    print(f"[DEBUG] Highlighted compounds (star or diamond): {(df['marker_symbol'] != 'circle').sum()}/{len(df)}")
 
     colour_fields = args.colour_by if args.colour_by else [None]
 
@@ -180,7 +189,7 @@ def run_umap_analysis(input_path, output_dir, args):
         plt.savefig(plot_path, dpi=300)
         plt.close()
 
-        base_hover = ["cpd_id", "cpd_type", "Library"]
+        base_hover = ["cpd_id", "cpd_type", "Library", "marker_symbol"]
         hover_cols = [col for col in base_hover + compound_columns if col in df.columns]
 
         fig = px.scatter(
@@ -188,6 +197,7 @@ def run_umap_analysis(input_path, output_dir, args):
             x="UMAP1",
             y="UMAP2",
             color=colour_col if colour_col in df.columns else None,
+            symbol="marker_symbol",
             hover_data=hover_cols,
             title=f"CLIPn UMAP (Interactive, coloured by {label})",
             template="plotly_white"
@@ -195,11 +205,7 @@ def run_umap_analysis(input_path, output_dir, args):
 
         fig.update_traces(
             marker=dict(
-                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
-                symbol=df.apply(
-                    lambda row: "star" if row["is_highlighted"] else ("diamond" if row["is_library_mcp"] else "circle"),
-                    axis=1
-                ),
+                size=df["marker_symbol"].apply(lambda x: 14 if x in ["star", "diamond"] else 6),
                 line=dict(
                     width=df["is_highlighted"].apply(lambda x: 2 if x else 0),
                     color="black"
@@ -218,6 +224,8 @@ def run_umap_analysis(input_path, output_dir, args):
         print(f"Saved UMAP plot: {plot_path}")
         print(f"Saved interactive UMAP: {html_filename}")
         print(f"Saved coordinates: {coords_file}")
+
+
 
 
 def parse_args():
