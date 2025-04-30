@@ -525,7 +525,6 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
     return df
 
 
-
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -580,14 +579,13 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         "Cluster_KMeans", "Cluster_HDBSCAN", "UMAP1", "UMAP2", "is_highlighted"
     ]
 
+    exclude_keywords = ["pubchem", "pubmed", "smiles", "cpd", "info"]
     feature_cols = [
-            col for col in df.columns
-            if col not in protected_metadata_cols
-            and pd.api.types.is_numeric_dtype(df[col])
-            and not col.lower().startswith("cpd")
-            and not col.lower() in {"library", "sample", "dataset", "index"}
-        ]
-
+        col for col in df.columns
+        if col not in protected_metadata_cols
+        and pd.api.types.is_numeric_dtype(df[col])
+        and not any(key in col.lower() for key in exclude_keywords)
+    ]
 
     if not feature_cols:
         raise ValueError("No valid numeric feature columns found for UMAP after excluding metadata.")
@@ -603,6 +601,8 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     print("=================================\n")
 
     if df[feature_cols].isnull().any().any():
+        print("[ERROR] Columns with NaNs:")
+        print(df[feature_cols].isnull().sum()[df[feature_cols].isnull().sum() > 0])
         raise ValueError("UMAP input contains NaN values! Cannot run UMAP safely.")
 
     reducer = umap.UMAP(
