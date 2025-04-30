@@ -80,6 +80,7 @@ def summarise_clusters(df, outdir, compound_columns):
             func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
 
 
+
 def run_umap_analysis(input_path, output_dir, args):
     """
     Perform UMAP projection and optional clustering, save results and plots.
@@ -189,6 +190,34 @@ def run_umap_analysis(input_path, output_dir, args):
             color=colour_col if colour_col in df.columns else None,
             hover_data=hover_cols,
             title=f"CLIPn UMAP (Interactive, coloured by {label})",
+            template="plotly_white"
+        )
+
+        fig.update_traces(
+            marker=dict(
+                size=df["is_highlighted"].apply(lambda x: 14 if x else 6),
+                symbol=df.apply(
+                    lambda row: "star" if row["is_highlighted"] else ("diamond" if row["is_library_mcp"] else "circle"),
+                    axis=1
+                ),
+                line=dict(
+                    width=df["is_highlighted"].apply(lambda x: 2 if x else 0),
+                    color="black"
+                )
+            )
+        )
+
+        if args.add_labels:
+            fig.update_traces(text=df["cpd_id"], textposition="top center")
+
+        html_filename = f"clipn_umap_plot_{label}_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.html"
+        fig.write_html(os.path.join(label_folder, html_filename))
+
+        summarise_clusters(df, label_folder, compound_columns)
+
+        print(f"Saved UMAP plot: {plot_path}")
+        print(f"Saved interactive UMAP: {html_filename}")
+        print(f"Saved coordinates: {coords_file}")
 
 
 def parse_args():
