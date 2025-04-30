@@ -579,10 +579,15 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
         "published_target", "published_other", "Library", "Dataset",
         "Cluster_KMeans", "Cluster_HDBSCAN", "UMAP1", "UMAP2", "is_highlighted"
     ]
+
     feature_cols = [
-        col for col in df.columns
-        if col not in protected_metadata_cols and pd.api.types.is_numeric_dtype(df[col])
-    ]
+            col for col in df.columns
+            if col not in protected_metadata_cols
+            and pd.api.types.is_numeric_dtype(df[col])
+            and not col.lower().startswith("cpd")
+            and not col.lower() in {"library", "sample", "dataset", "index"}
+        ]
+
 
     if not feature_cols:
         raise ValueError("No valid numeric feature columns found for UMAP after excluding metadata.")
