@@ -524,6 +524,8 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
 
     return df
 
+
+
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -553,7 +555,6 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     pd.DataFrame
         DataFrame with UMAP coordinates added.
     """
-
     if args is None:
         n_neighbors = 15
         min_dist = 0.25
@@ -647,10 +648,8 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     # ==== Interactive plot ====
     if args is not None and getattr(args, "interactive", False):
         hover_cols = [
-            col for col in [
-                "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
-                "name", "published_phenotypes", "published_target", "published_other"
-            ] if col in df.columns
+            col for col in df.columns
+            if col not in feature_cols and col not in ["UMAP1", "UMAP2"]
         ]
 
         fig = px.scatter(
