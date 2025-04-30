@@ -524,6 +524,7 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
 
     return df
 
+
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -613,8 +614,14 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     df["UMAP2"] = embedding[:, 1]
 
     # ==== Highlighting ====
-    df["is_highlighted"] = df["cpd_id"].isin(highlight_list) if highlight_list else df["cpd_id"].str.upper().str.startswith(highlight_prefix.upper())
+    df["is_highlighted"] = (
+        df["cpd_id"].str.upper().str.startswith(highlight_prefix.upper()) |
+        df["Library"].astype(str).str.upper().str.contains(highlight_prefix.upper()) |
+        (df["cpd_id"].isin(highlight_list) if highlight_list else False)
+    )
     df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
+    print(f"[DEBUG] MCP in Library (diamond shape): {df['is_library_mcp'].sum()}/{len(df)} entries")
+    print(f"[DEBUG] Highlighted compounds: {df['is_highlighted'].sum()}/{len(df)}")
 
     # ==== Static plot ====
     fig, ax = plt.subplots(figsize=(8, 6))

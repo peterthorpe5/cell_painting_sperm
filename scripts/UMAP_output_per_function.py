@@ -99,11 +99,9 @@ def run_umap_analysis(input_path, output_dir, args):
         compound_meta = pd.read_csv(args.compound_metadata, sep='\t')
         print(f"[DEBUG] Compound metadata columns before rename: {list(compound_meta.columns)}")
 
-        # Drop 'library' from annotation file if 'Library' already exists
         if "Library" in df.columns and "library" in compound_meta.columns:
             compound_meta = compound_meta.drop(columns=["library"])
 
-        # Normalise common field names
         if "publish own other" in compound_meta.columns:
             compound_meta = compound_meta.rename(columns={"publish own other": "published_other"})
 
@@ -134,11 +132,17 @@ def run_umap_analysis(input_path, output_dir, args):
     else:
         df["Cluster"] = "NA"
 
-    df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
-    if "Library" not in df.columns and "library" in df.columns:
-        df["Library"] = df["library"]
+    # Enhanced Highlighting
+    def is_highlighted(row):
+        cpd_match = str(row["cpd_id"]).upper().startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
+        lib_match = "MCP" in str(row.get("Library", "")).upper()
+        return cpd_match or lib_match
+
+    df["is_highlighted"] = df.apply(is_highlighted, axis=1)
     df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
+
     print(f"[DEBUG] MCP in Library (diamond shape): {df['is_library_mcp'].sum()}/{len(df)} entries")
+    print(f"[DEBUG] Highlighted compounds (star or diamond): {df['is_highlighted'].sum()}/{len(df)}")
 
     colour_fields = args.colour_by if args.colour_by else [None]
 
@@ -214,6 +218,7 @@ def run_umap_analysis(input_path, output_dir, args):
         print(f"Saved UMAP plot: {plot_path}")
         print(f"Saved interactive UMAP: {html_filename}")
         print(f"Saved coordinates: {coords_file}")
+
 
 def parse_args():
     """
