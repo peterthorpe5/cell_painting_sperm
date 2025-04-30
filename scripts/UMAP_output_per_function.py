@@ -75,7 +75,6 @@ def summarise_clusters(df, outdir, compound_columns):
             func_summary = df.groupby("Cluster")[col].value_counts().unstack(fill_value=0)
             func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
 
-
 def run_umap_analysis(input_path, output_dir, args):
     """
     Perform UMAP projection and optional clustering, save results and plots.
@@ -91,25 +90,25 @@ def run_umap_analysis(input_path, output_dir, args):
     """
     os.makedirs(output_dir, exist_ok=True)
     df = pd.read_csv(input_path, sep='\t')
+    compound_columns = []
 
     print(f"[DEBUG] Input data shape: {df.shape}")
-    print(f"[DEBUG] Input columns: {df.columns.tolist()}")
-
-    compound_columns = []
+    print(f"[DEBUG] Input columns: {list(df.columns)}")
 
     if args.compound_metadata:
         compound_meta = pd.read_csv(args.compound_metadata, sep='\t')
-        print(f"[DEBUG] Compound metadata columns before rename: {compound_meta.columns.tolist()}")
+        print(f"[DEBUG] Compound metadata columns before rename: {list(compound_meta.columns)}")
 
-        # Rename problematic columns
-        compound_meta = compound_meta.rename(columns={"publish own other": "published_other"})
+        # Drop 'library' from annotation file if 'Library' already exists
+        if "Library" in df.columns and "library" in compound_meta.columns:
+            compound_meta = compound_meta.drop(columns=["library"])
 
-        # Standardise cpd_id for merge
-        compound_meta["cpd_id"] = compound_meta["cpd_id"].astype(str).str.strip().str.upper()
-        df["cpd_id"] = df["cpd_id"].astype(str).str.strip().str.upper()
+        # Normalise common field names
+        if "publish own other" in compound_meta.columns:
+            compound_meta = compound_meta.rename(columns={"publish own other": "published_other"})
 
         df = pd.merge(df, compound_meta, on="cpd_id", how="left")
-        compound_columns = [col for col in compound_meta.columns if col != "cpd_id" and col in df.columns]
+        compound_columns = [col for col in compound_meta.columns if col not in ["cpd_id", "library"]]
 
         print(f"[DEBUG] Compound columns merged: {compound_columns}")
         print(f"[DEBUG] Data shape after merge: {df.shape}")
@@ -136,7 +135,10 @@ def run_umap_analysis(input_path, output_dir, args):
         df["Cluster"] = "NA"
 
     df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
-    df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP") if "Library" in df.columns else False
+    if "Library" not in df.columns and "library" in df.columns:
+        df["Library"] = df["library"]
+    df["is_library_mcp"] = df["Library"].astype(str).str.upper().str.contains("MCP")
+    print(f"[DEBUG] MCP in Library (diamond shape): {df['is_library_mcp'].sum()}/{len(df)} entries")
 
     colour_fields = args.colour_by if args.colour_by else [None]
 
@@ -145,16 +147,12 @@ def run_umap_analysis(input_path, output_dir, args):
         label_folder = os.path.join(output_dir, label)
         os.makedirs(label_folder, exist_ok=True)
 
-        if colour_col and colour_col not in df.columns:
-            print(f"[WARNING] Skipping plot for missing column: {colour_col}")
-            continue
-
         coord_filename = f"clipn_umap_coordinates_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
         coords_file = os.path.join(label_folder, coord_filename)
         df.to_csv(coords_file, sep='\t', index=False)
 
         plt.figure(figsize=(12, 8))
-        if colour_col:
+        if colour_col and colour_col in df.columns:
             unique_vals = df[colour_col].unique()
             colour_map = {val: idx for idx, val in enumerate(unique_vals)}
             colours = df[colour_col].map(colour_map)
@@ -185,7 +183,7 @@ def run_umap_analysis(input_path, output_dir, args):
             df,
             x="UMAP1",
             y="UMAP2",
-            color=colour_col if colour_col else None,
+            color=colour_col if colour_col in df.columns else None,
             hover_data=hover_cols,
             title=f"CLIPn UMAP (Interactive, coloured by {label})",
             template="plotly_white"

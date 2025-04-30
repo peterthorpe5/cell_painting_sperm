@@ -524,7 +524,6 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
 
     return df
 
-
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
                   colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
     """
@@ -554,6 +553,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     pd.DataFrame
         DataFrame with UMAP coordinates added.
     """
+
     if args is None:
         n_neighbors = 15
         min_dist = 0.25
@@ -569,6 +569,9 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     if compound_file and os.path.isfile(compound_file):
         meta_df = pd.read_csv(compound_file, sep="\t")
         meta_df.columns = [c.replace("publish own other", "published_other") for c in meta_df.columns]
+        if "Library" in df.columns and "library" in meta_df.columns:
+            meta_df = meta_df.drop(columns=["library"])
+            print("[DEBUG] Dropped 'library' column from annotation to preserve latent 'Library'.")
         df = df.merge(meta_df, on="cpd_id", how="left")
         print(f"[DEBUG] Compound metadata merged: {meta_df.shape[1]} columns")
 
@@ -638,8 +641,7 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
             col for col in [
                 "cpd_id", "cpd_type", "Library", "Dataset", colour_by,
                 "name", "published_phenotypes", "published_target", "published_other"
-            ]
-            if col in df.columns
+            ] if col in df.columns
         ]
 
         fig = px.scatter(
