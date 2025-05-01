@@ -255,7 +255,7 @@ def main():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--base_dir', required=True, help='Folder containing CLIPn run subfolders')
-    parser.add_argument('--compound_id', default='MCP|DDU', help='Regex to match cpd_id names')
+    parser.add_argument('--compound_id', default='MCP|DDD', help='Regex to match cpd_id names')
     parser.add_argument('--baseline_prefix', required=True, help='Folder name prefix for selecting baseline group')
     parser.add_argument('--preferred_latent', type=int, default=20, help='Latent dim to use for baseline group')
     parser.add_argument('--plot_heatmap', action='store_true', help='Plot heatmaps for both comparisons')
