@@ -33,6 +33,30 @@ def extract_run_metadata(run_folder):
     return mode, epoch, latent_dim, metric
 
 
+
+def pivot_neighbour_table(df):
+    """
+    Convert long-format summary file to wide format with NearestNeighbours and UMAPNeighbours columns.
+
+    Args:
+        df (pd.DataFrame): Raw long-format dataframe with 'cpd_id', 'nearest_cpd_id', and 'source'.
+
+    Returns:
+        pd.DataFrame: Pivoted dataframe with 'cpd_id', 'NearestNeighbours', and 'UMAPNeighbours'.
+    """
+    df = df[df['nearest_cpd_id'].notna() & df['source'].isin(['NN', 'UMAP'])].copy()
+    grouped = (
+        df.groupby(['cpd_id', 'source'])['nearest_cpd_id']
+          .apply(lambda x: ','.join(x.astype(str)))
+          .unstack(fill_value='')
+          .reset_index()
+    )
+    grouped = grouped.rename(columns={
+        'NN': 'NearestNeighbours',
+        'UMAP': 'UMAPNeighbours'
+    })
+    return grouped
+
 def jaccard_similarity(list1, list2):
     """Calculate Jaccard similarity between two lists.
         Args:
@@ -76,14 +100,19 @@ def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern):
             try:
                 print(f"Reading: {summary_file}")
                 df = pd.read_csv(summary_file, sep='\t')
-                match_df = df[df['cpd_id'].str.contains(cpd_id_pattern, regex=True)]
+                match_df = df[df['cpd_id'].str.contains(cpd_id_pattern, regex=True)].copy()
                 found = sorted(match_df['cpd_id'].unique())
                 if found:
                     print(f"  Matched cpd_ids: {found}")
                 cpd_id_names.update(found)
+
+                # Pivot and add metadata
+                match_df = pivot_neighbour_table(match_df)
                 match_df['RunFolder'] = folder_name
                 match_df['Mode'], match_df['Epoch'], match_df['LatentDim'], match_df['Metric'] = metadata
                 all_summaries.append(match_df)
+
+
             except Exception as e:
                 print(f"Warning: Failed to process {summary_file}: {e}")
                 continue
@@ -144,8 +173,16 @@ def compare_within_run(df):
     """
     overlap_results = []
     for _, row in df.iterrows():
-        nn_list = row['NearestNeighbours'].split(',')[:5]
-        umap_list = row['UMAPNeighbours'].split(',')[:5]
+        nn_list = row.get('NearestNeighbours', '')
+        umap_list = row.get('UMAPNeighbours', '')
+
+        nn_list = nn_list.split(',')[:5] if isinstance(nn_list, str) else []
+        umap_list = umap_list.split(',')[:5] if isinstance(umap_list, str) else []
+
+        if not nn_list and not umap_list:
+            continue
+
+
         jaccard = jaccard_similarity(nn_list, umap_list)
         overlap_results.append({
             'cpd_id': row['cpd_id'],
