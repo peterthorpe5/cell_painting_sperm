@@ -172,7 +172,8 @@ def compare_within_run(df):
         pd.DataFrame: Summary table with Jaccard scores for NN vs UMAP.
     """
     overlap_results = []
-    for _, row in df.iterrows():
+    for _, row in df[~df['RunFolder'].str.startswith(baseline_prefix)].iterrows():
+
         nn_list = row.get('NearestNeighbours', '')
         umap_list = row.get('UMAPNeighbours', '')
 
