@@ -222,13 +222,20 @@ def compare_across_runs(df, baseline_lookup):
 
 
 def plot_jaccard_heatmap(df, index_col, output_file):
-    """Plot Jaccard similarity heatmap from input table and save as PDF.
+    """
+    Plot Jaccard similarity heatmap from input table and save as PDF.
+
     Args:
         df (pd.DataFrame): Jaccard similarity table.
         index_col (str): Column name to use as y-axis (usually 'cpd_id').
         output_file (str): Path to PDF output.
-        
     """
+    if 'CompareRun' not in df.columns:
+        if 'RunFolder' in df.columns:
+            df = df.assign(CompareRun=df['RunFolder'])
+        else:
+            raise ValueError("DataFrame must contain 'CompareRun' or 'RunFolder' column for plotting.")
+
     pivot = df.pivot(index=index_col, columns='CompareRun', values='Jaccard_with_baseline')
     plt.figure(figsize=(12, max(4, 0.4 * len(pivot))))
     sns.heatmap(pivot, annot=True, cmap='viridis', cbar_kws={'label': 'Jaccard Similarity'})
@@ -237,6 +244,9 @@ def plot_jaccard_heatmap(df, index_col, output_file):
     plt.savefig(output_file, format='pdf')
     plt.close()
     print(f"Saved heatmap to: {output_file}")
+
+
+
 
 def main():
     """Entry point for argument parsing and full comparison analysis.
@@ -266,7 +276,12 @@ def main():
     across_df.to_csv(f'across_runs_overlap_summary_{suffix}.tsv', sep='\t', index=False)
 
     if args.plot_heatmap:
-        plot_jaccard_heatmap(within_df.rename(columns={'Jaccard_NN_vs_UMAP': 'Jaccard_with_baseline'}), 'cpd_id', f'heatmap_within_run_{suffix}.pdf')
+        plot_jaccard_heatmap(within_df.rename(columns={'Jaccard_NN_vs_UMAP': 'Jaccard_with_baseline'})
+                    .assign(CompareRun=lambda x: x['RunFolder']), 
+                    'cpd_id',
+                    f'heatmap_within_run_{suffix}.pdf'
+                )
+
         plot_jaccard_heatmap(across_df, 'cpd_id', f'heatmap_across_runs_{suffix}.pdf')
 
 if __name__ == '__main__':
