@@ -197,7 +197,7 @@ def compare_within_run(df):
     return pd.DataFrame(overlap_results)
 
 
-def compare_across_runs(df, baseline_lookup):
+def compare_across_runs(df, baseline_lookup, baseline_prefix):
     """Compare each cpd_id's top 5 NN to baseline using Jaccard similarity.
     
     Args:
@@ -273,7 +273,7 @@ def main():
     baseline_df = filter_for_baseline_reference(all_df, args.baseline_prefix, args.preferred_latent)
     baseline_lookup = build_baseline_lookup(baseline_df)
 
-    across_df = compare_across_runs(all_df, baseline_lookup)
+    across_df = compare_across_runs(all_df, baseline_lookup, args.baseline_prefix)
     across_df.to_csv(f'across_runs_overlap_summary_{suffix}.tsv', sep='\t', index=False)
 
     if args.plot_heatmap:
