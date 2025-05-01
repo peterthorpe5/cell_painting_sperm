@@ -214,7 +214,7 @@ def main():
     parser.add_argument('--plot_heatmap', action='store_true', help='Plot heatmaps for both comparisons')
     args = parser.parse_args()
 
-    all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.cpd_id_id)
+    all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.compound_id)
     suffix = generate_output_suffix(args.baseline_prefix, args.preferred_latent)
 
     all_df.to_csv(f'combined_neighbours_{suffix}.tsv', sep='\t', index=False)
