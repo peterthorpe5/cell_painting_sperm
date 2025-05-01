@@ -1,7 +1,7 @@
 """
 compare_mcp_class_across_runs.py
 
-Compares nearest neighbour (NN) and UMAP neighbours of compound classes (e.g. MCP09/DDU)
+Compares nearest neighbour (NN) and UMAP neighbours of cpd_id classes (e.g. MCP09/DDU)
 across multiple CLIPn run folders. Computes Jaccard similarity within each run (NN vs UMAP),
 and across runs (baseline vs other setups), with optional visualisation.
 """
@@ -47,18 +47,18 @@ def jaccard_similarity(list1, list2):
     return intersection / union if union else 0
 
 
-def load_and_tag_all_neighbour_summaries(base_dir, compound_pattern):
+def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern):
     """Load and annotate all *_summary_neighbours.tsv files with metadata from folder names.
 
     Args:
         base_dir (str): Root directory containing CLIPn run subfolders.
-        compound_pattern (str): Regex pattern to filter compound IDs (e.g. 'MCP|DDU').
+        cpd_id_pattern (str): Regex pattern to filter cpd_id IDs (e.g. 'MCP|DDU').
 
     Returns:
         tuple: (DataFrame with all summaries, list of processed folder names)
         """
     all_summaries = []
-    compound_names = set()
+    cpd_id_names = set()
     valid_folders = []
     for run_folder in glob(os.path.join(base_dir, '*')):
         if not os.path.isdir(run_folder):
@@ -76,11 +76,11 @@ def load_and_tag_all_neighbour_summaries(base_dir, compound_pattern):
             try:
                 print(f"Reading: {summary_file}")
                 df = pd.read_csv(summary_file, sep='\t')
-                match_df = df[df['Compound'].str.contains(compound_pattern, regex=True)]
-                found = sorted(match_df['Compound'].unique())
+                match_df = df[df['cpd_id'].str.contains(cpd_id_pattern, regex=True)]
+                found = sorted(match_df['cpd_id'].unique())
                 if found:
-                    print(f"  Matched compounds: {found}")
-                compound_names.update(found)
+                    print(f"  Matched cpd_ids: {found}")
+                cpd_id_names.update(found)
                 match_df['RunFolder'] = folder_name
                 match_df['Mode'], match_df['Epoch'], match_df['LatentDim'], match_df['Metric'] = metadata
                 all_summaries.append(match_df)
@@ -88,8 +88,8 @@ def load_and_tag_all_neighbour_summaries(base_dir, compound_pattern):
                 print(f"Warning: Failed to process {summary_file}: {e}")
                 continue
     if not all_summaries:
-        raise ValueError("No matching neighbour summary files or compounds found.")
-    print(f"\nTotal unique compounds matched: {len(compound_names)}")
+        raise ValueError("No matching neighbour summary files or cpd_ids found.")
+    print(f"\nTotal unique cpd_ids matched: {len(cpd_id_names)}")
     return pd.concat(all_summaries, ignore_index=True), valid_folders
 
 
@@ -107,16 +107,16 @@ def filter_for_baseline_reference(df, baseline_prefix, preferred_latent):
 
 
 def build_baseline_lookup(baseline_df):
-    """Build a dictionary mapping compound to its top 5 neighbours from baseline.
+    """Build a dictionary mapping cpd_id to its top 5 neighbours from baseline.
         Args:
         baseline_df (pd.DataFrame): Filtered dataframe with only baseline rows.
 
     Returns:
-        dict: {compound_id: [neighbour1, neighbour2, ...]}
+        dict: {cpd_id_id: [neighbour1, neighbour2, ...]}
     """
     lookup = {}
     for _, row in baseline_df.iterrows():
-        lookup[row['Compound']] = row['NearestNeighbours'].split(',')[:5]
+        lookup[row['cpd_id']] = row['NearestNeighbours'].split(',')[:5]
     return lookup
 
 
@@ -137,7 +137,7 @@ def generate_output_suffix(baseline_prefix, latent_dim):
 def compare_within_run(df):
     """Calculate NN vs UMAP overlap per run using Jaccard similarity.
     Args:
-        df (pd.DataFrame): Input dataframe of compound summaries.
+        df (pd.DataFrame): Input dataframe of cpd_id summaries.
 
     Returns:
         pd.DataFrame: Summary table with Jaccard scores for NN vs UMAP.
@@ -148,7 +148,7 @@ def compare_within_run(df):
         umap_list = row['UMAPNeighbours'].split(',')[:5]
         jaccard = jaccard_similarity(nn_list, umap_list)
         overlap_results.append({
-            'Compound': row['Compound'],
+            'cpd_id': row['cpd_id'],
             'RunFolder': row['RunFolder'],
             'Mode': row['Mode'],
             'Epoch': row['Epoch'],
@@ -160,24 +160,24 @@ def compare_within_run(df):
 
 
 def compare_across_runs(df, baseline_lookup):
-    """Compare each compound's top 5 NN to baseline using Jaccard similarity.
+    """Compare each cpd_id's top 5 NN to baseline using Jaccard similarity.
     
     Args:
         df (pd.DataFrame): Full combined dataframe of all runs.
         baseline_lookup (dict): Dictionary from build_baseline_lookup().
 
     Returns:
-        pd.DataFrame: Summary of Jaccard overlap for each compound across runs.
+        pd.DataFrame: Summary of Jaccard overlap for each cpd_id across runs.
     """
     comparisons = []
     for _, row in df.iterrows():
-        compound = row['Compound']
+        cpd_id = row['cpd_id']
         run_name = row['RunFolder']
-        if compound not in baseline_lookup:
+        if cpd_id not in baseline_lookup:
             continue
-        jaccard = jaccard_similarity(baseline_lookup[compound], row['NearestNeighbours'].split(',')[:5])
+        jaccard = jaccard_similarity(baseline_lookup[cpd_id], row['NearestNeighbours'].split(',')[:5])
         comparisons.append({
-            'Compound': compound,
+            'cpd_id': cpd_id,
             'CompareRun': run_name,
             'Jaccard_with_baseline': jaccard
         })
@@ -188,7 +188,7 @@ def plot_jaccard_heatmap(df, index_col, output_file):
     """Plot Jaccard similarity heatmap from input table and save as PDF.
     Args:
         df (pd.DataFrame): Jaccard similarity table.
-        index_col (str): Column name to use as y-axis (usually 'Compound').
+        index_col (str): Column name to use as y-axis (usually 'cpd_id').
         output_file (str): Path to PDF output.
         
     """
@@ -208,13 +208,13 @@ def main():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--base_dir', required=True, help='Folder containing CLIPn run subfolders')
-    parser.add_argument('--compound_id', default='MCP|DDU', help='Regex to match compound names')
+    parser.add_argument('--cpd_id_id', default='MCP|DDU', help='Regex to match cpd_id names')
     parser.add_argument('--baseline_prefix', required=True, help='Folder name prefix for selecting baseline group')
     parser.add_argument('--preferred_latent', type=int, default=20, help='Latent dim to use for baseline group')
     parser.add_argument('--plot_heatmap', action='store_true', help='Plot heatmaps for both comparisons')
     args = parser.parse_args()
 
-    all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.compound_id)
+    all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.cpd_id_id)
     suffix = generate_output_suffix(args.baseline_prefix, args.preferred_latent)
 
     all_df.to_csv(f'combined_neighbours_{suffix}.tsv', sep='\t', index=False)
@@ -229,8 +229,8 @@ def main():
     across_df.to_csv(f'across_runs_overlap_summary_{suffix}.tsv', sep='\t', index=False)
 
     if args.plot_heatmap:
-        plot_jaccard_heatmap(within_df.rename(columns={'Jaccard_NN_vs_UMAP': 'Jaccard_with_baseline'}), 'Compound', f'heatmap_within_run_{suffix}.pdf')
-        plot_jaccard_heatmap(across_df, 'Compound', f'heatmap_across_runs_{suffix}.pdf')
+        plot_jaccard_heatmap(within_df.rename(columns={'Jaccard_NN_vs_UMAP': 'Jaccard_with_baseline'}), 'cpd_id', f'heatmap_within_run_{suffix}.pdf')
+        plot_jaccard_heatmap(across_df, 'cpd_id', f'heatmap_across_runs_{suffix}.pdf')
 
 if __name__ == '__main__':
     main()
