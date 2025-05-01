@@ -66,7 +66,9 @@ def load_and_tag_all_neighbour_summaries(base_dir, compound_pattern):
         folder_name = os.path.basename(run_folder)
         valid_folders.append(folder_name)
         metadata = extract_run_metadata(run_folder)
-        summary_files = glob(os.path.join(run_folder, 'post_clipn', '*_summary_neighbours.tsv'))
+        summary_files = (glob(os.path.join(run_folder, 'post_clipn', '*_summary_neighbours.tsv')) +
+                        glob(os.path.join(run_folder, '*_summary_neighbours.tsv'))
+                        )
         if not summary_files:
             print(f"Warning: No summary file found in {run_folder}")
             continue
