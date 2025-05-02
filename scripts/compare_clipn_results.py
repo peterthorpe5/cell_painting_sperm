@@ -172,7 +172,8 @@ def compare_within_run(df):
         pd.DataFrame: Summary table with Jaccard scores for NN vs UMAP.
     """
     overlap_results = []
-    for _, row in df[~df['RunFolder'].str.startswith(baseline_prefix)].iterrows():
+
+    for _, row in df.iterrows():
 
         nn_list = row.get('NearestNeighbours', '')
         umap_list = row.get('UMAPNeighbours', '')
@@ -208,7 +209,8 @@ def compare_across_runs(df, baseline_lookup, baseline_prefix):
         pd.DataFrame: Summary of Jaccard overlap for each cpd_id across runs.
     """
     comparisons = []
-    for _, row in df.iterrows():
+    for _, row in df[~df['RunFolder'].str.startswith(baseline_prefix)].iterrows():
+
         cpd_id = row['cpd_id']
         run_name = row['RunFolder']
         if cpd_id not in baseline_lookup:
