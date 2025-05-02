@@ -20,3 +20,4 @@ python-louvain
 optuna
 torch
 hdbscan
+xlsxwriter

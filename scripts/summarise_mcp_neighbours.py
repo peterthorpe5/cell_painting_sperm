@@ -123,7 +123,7 @@ def find_nearest_from_nn(df, target_id, top_n, max_dist=None):
     return top_hits[["cpd_id", "nearest_cpd_id", "distance_metric_NN", "source"]]
 
 
-def summarise_neighbours(folder, targets, top_n=5, metadata_file=None, max_dist=None, extra_metadata=None):
+def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist=None, extra_metadata=None):
     """
     Summarise nearest neighbours for a list of target compounds and merge annotations.
 
