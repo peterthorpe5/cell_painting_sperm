@@ -71,7 +71,7 @@ def jaccard_similarity(list1, list2):
     return intersection / union if union else 0
 
 
-def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern):
+def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern, suffix_filter=None):
     """Load and annotate all *_summary_neighbours.tsv files with metadata from folder names.
 
     Args:
@@ -84,7 +84,13 @@ def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern):
     all_summaries = []
     cpd_id_names = set()
     valid_folders = []
+    
     for run_folder in glob(os.path.join(base_dir, '*')):
+        if not os.path.isdir(run_folder):
+            continue
+        if suffix_filter and not run_folder.endswith(suffix_filter):
+            continue
+
         if not os.path.isdir(run_folder):
             continue
         folder_name = os.path.basename(run_folder)
@@ -243,6 +249,10 @@ def plot_jaccard_heatmap(df, index_col, output_file):
     plt.figure(figsize=(12, max(4, 0.4 * len(pivot))))
     sns.heatmap(pivot, annot=True, cmap='viridis', cbar_kws={'label': 'Jaccard Similarity'})
     plt.title('Jaccard Similarity Heatmap')
+    plt.xticks(rotation=90, fontsize=4)
+    plt.yticks(fontsize=6)
+    plt.tight_layout()
+
     plt.tight_layout()
     plt.savefig(output_file, format='pdf')
     plt.close()
@@ -258,16 +268,19 @@ def main():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--base_dir', required=True, help='Folder containing CLIPn run subfolders')
-    parser.add_argument('--compound_id', default='MCP|DDD', help='Regex to match cpd_id names')
+    parser.add_argument('--compound_id', default='MCP05|DDD0', help='Regex to match cpd_id names')
     parser.add_argument('--baseline_prefix', required=True, help='Folder name prefix for selecting baseline group')
     parser.add_argument('--preferred_latent', type=int, default=20, help='Latent dim to use for baseline group')
     parser.add_argument('--plot_heatmap', action='store_true', help='Plot heatmaps for both comparisons')
     parser.add_argument('--output_dir', default='comparison_results', help='Output directory for result files')
+    parser.add_argument('--suffix_filter', default=None,
+                    help='Optional suffix to restrict run folders (e.g., "_mitotox")')
+
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.compound_id)
+    all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.compound_id, args.suffix_filter)
     suffix = generate_output_suffix(args.baseline_prefix, args.preferred_latent)
 
     all_df.to_csv(os.path.join(args.output_dir, f'combined_neighbours_{suffix}.tsv'), sep='\t', index=False)
