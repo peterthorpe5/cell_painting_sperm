@@ -262,30 +262,33 @@ def main():
     parser.add_argument('--baseline_prefix', required=True, help='Folder name prefix for selecting baseline group')
     parser.add_argument('--preferred_latent', type=int, default=20, help='Latent dim to use for baseline group')
     parser.add_argument('--plot_heatmap', action='store_true', help='Plot heatmaps for both comparisons')
+    parser.add_argument('--output_dir', default='comparison_results', help='Output directory for result files')
     args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
 
     all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.compound_id)
     suffix = generate_output_suffix(args.baseline_prefix, args.preferred_latent)
 
-    all_df.to_csv(f'combined_neighbours_{suffix}.tsv', sep='\t', index=False)
+    all_df.to_csv(os.path.join(args.output_dir, f'combined_neighbours_{suffix}.tsv'), sep='\t', index=False)
 
     within_df = compare_within_run(all_df)
-    within_df.to_csv(f'within_run_overlap_summary_{suffix}.tsv', sep='\t', index=False)
+    within_df.to_csv(os.path.join(args.output_dir, f'within_run_overlap_summary_{suffix}.tsv'), sep='\t', index=False)
 
     baseline_df = filter_for_baseline_reference(all_df, args.baseline_prefix, args.preferred_latent)
     baseline_lookup = build_baseline_lookup(baseline_df)
 
     across_df = compare_across_runs(all_df, baseline_lookup, args.baseline_prefix)
-    across_df.to_csv(f'across_runs_overlap_summary_{suffix}.tsv', sep='\t', index=False)
+    across_df.to_csv(os.path.join(args.output_dir,f'across_runs_overlap_summary_{suffix}.tsv'), sep='\t', index=False)
 
     if args.plot_heatmap:
         plot_jaccard_heatmap(within_df.rename(columns={'Jaccard_NN_vs_UMAP': 'Jaccard_with_baseline'})
                     .assign(CompareRun=lambda x: x['RunFolder']), 
                     'cpd_id',
-                    f'heatmap_within_run_{suffix}.pdf'
+                    os.path.join(args.output_dir, f'heatmap_within_run_{suffix}.pdf')
                 )
 
-        plot_jaccard_heatmap(across_df, 'cpd_id', f'heatmap_across_runs_{suffix}.pdf')
+        plot_jaccard_heatmap(across_df, 'cpd_id', os.path.join(args.output_dir, f'heatmap_across_runs_{suffix}.pdf'))
 
 if __name__ == '__main__':
     main()
