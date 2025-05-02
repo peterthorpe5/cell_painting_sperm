@@ -71,7 +71,7 @@ def jaccard_similarity(list1, list2):
     return intersection / union if union else 0
 
 
-def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern, suffix_filter=None):
+def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern=None, cpd_id_list=None, suffix_filter=None):
     """Load and annotate all *_summary_neighbours.tsv files with metadata from folder names.
 
     Args:
@@ -106,7 +106,13 @@ def load_and_tag_all_neighbour_summaries(base_dir, cpd_id_pattern, suffix_filter
             try:
                 print(f"Reading: {summary_file}")
                 df = pd.read_csv(summary_file, sep='\t')
-                match_df = df[df['cpd_id'].str.contains(cpd_id_pattern, regex=True)].copy()
+                if cpd_id_list:
+                    match_df = df[df['cpd_id'].isin(cpd_id_list)].copy()
+                elif cpd_id_pattern:
+                    match_df = df[df['cpd_id'].str.contains(cpd_id_pattern, regex=True)].copy()
+                else:
+                    raise ValueError("Either cpd_id_pattern or cpd_id_list must be provided.")
+
                 found = sorted(match_df['cpd_id'].unique())
                 if found:
                     print(f"  Matched cpd_ids: {found}")
@@ -268,7 +274,10 @@ def main():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--base_dir', required=True, help='Folder containing CLIPn run subfolders')
-    parser.add_argument('--compound_id', default='MCP05|DDD0', help='Regex to match cpd_id names')
+
+    parser.add_argument('--compound_id', default=None,
+                    help='Regex to match cpd_id names (overridden by hardcoded list if not provided)')
+
     parser.add_argument('--baseline_prefix', required=True, help='Folder name prefix for selecting baseline group')
     parser.add_argument('--preferred_latent', type=int, default=20, help='Latent dim to use for baseline group')
     parser.add_argument('--plot_heatmap', action='store_true', help='Plot heatmaps for both comparisons')
@@ -279,8 +288,22 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    default_cpd_ids = {
+        'DDD02487111', 'DDD02591362', 'DDD02952619', 'DDD02952620',
+        'DDD02947912', 'DDD02941193', 'DDD02459457', 'DDD02443214',
+        'DDD02948915', 'DDD02454403', 'DDD02948916', 'DDD02948926',
+        'DDD02947919', 'MCP05', 'DDD02387619', 'DDD02941115',
+        'DDD02958365', 'DDD02487311', 'DDD02591200', 'DDD02955130',
+        'DDD02589868', 'DDD02454019'
+    }
 
-    all_df, _ = load_and_tag_all_neighbour_summaries(args.base_dir, args.compound_id, args.suffix_filter)
+
+    all_df, _ = load_and_tag_all_neighbour_summaries(
+                                base_dir=args.base_dir,
+                                cpd_id_pattern=args.compound_id if args.compound_id else None,
+                                cpd_id_list=default_cpd_ids if not args.compound_id else None, args.suffix_filter
+                            )
+
     suffix = generate_output_suffix(args.baseline_prefix, args.preferred_latent)
 
     all_df.to_csv(os.path.join(args.output_dir, f'combined_neighbours_{suffix}.tsv'), sep='\t', index=False)

@@ -1,7 +1,31 @@
+"""
+Summarise CLIPn Nearest Neighbours and Annotate Output
+
+This script identifies the top-N nearest neighbour compounds for specified target compounds
+based on both UMAP 2D projections and CLIPn latent-space nearest neighbour analysis.
+It supports merging compound-level annotations from one or more metadata files.
+
+Features
+--------
+- Computes top-N nearest neighbours by Euclidean distance in UMAP space.
+- Extracts top-N nearest neighbours from CLIPn NN output.
+- Merges compound annotations from a primary metadata TSV and an optional secondary CSV.
+- Outputs results to both TSV and Excel (.xlsx) formats.
+
+Typical usage example:
+----------------------
+python summarise_mcp_neighbours.py \
+    --folder path/to/clipn/output \
+    --metadata compound_annotations.tsv \
+    --extra_metadata extra_annotations.csv \
+    --top_n 10
+"""
+
 import argparse
 import os
 import pandas as pd
 import numpy as np
+import openpyxl
 
 def load_metadata(path):
     """
@@ -24,7 +48,28 @@ def load_metadata(path):
     print("[WARNING] No compound metadata file found.")
     return None
 
+
 def find_nearest_umap(df, target_id, top_n, max_dist=None):
+    """
+    Find top-N nearest neighbours in UMAP 2D space using Euclidean distance.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing 'UMAP1', 'UMAP2', and 'cpd_id' columns.
+    target_id : str
+        Compound ID for which neighbours will be found.
+    top_n : int
+        Number of nearest neighbours to retrieve.
+    max_dist : float, optional
+        Optional maximum distance threshold.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with nearest neighbour IDs, distances, and source label.
+    """
+
     coords = df[["UMAP1", "UMAP2"]].values
     target_row = df[df["cpd_id"].str.upper() == target_id.upper()]
     if target_row.empty:
@@ -42,7 +87,28 @@ def find_nearest_umap(df, target_id, top_n, max_dist=None):
     nearest["cpd_id"] = target_id.upper()
     return nearest[["cpd_id", "nearest_cpd_id", "distance_metric_UMAP", "source"]]
 
+
 def find_nearest_from_nn(df, target_id, top_n, max_dist=None):
+    """
+    Retrieve top-N nearest neighbours from CLIPn-generated NN results.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with columns: 'cpd_id', 'neighbour_id', and 'distance'.
+    target_id : str
+        Target compound ID for which neighbours will be identified.
+    top_n : int
+        Number of nearest neighbours to return.
+    max_dist : float, optional
+        Optional maximum distance threshold for filtering.
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered and renamed DataFrame of nearest neighbours.
+    """
+
     df = df.copy()
     df[["cpd_id", "neighbour_id"]] = df[["cpd_id", "neighbour_id"]].apply(lambda x: x.str.upper())
     target_rows = df[df["cpd_id"] == target_id.upper()]
@@ -56,7 +122,41 @@ def find_nearest_from_nn(df, target_id, top_n, max_dist=None):
     top_hits = top_hits.rename(columns={"neighbour_id": "nearest_cpd_id", "distance": "distance_metric_NN"})
     return top_hits[["cpd_id", "nearest_cpd_id", "distance_metric_NN", "source"]]
 
-def summarise_neighbours(folder, targets, top_n=5, metadata_file=None, max_dist=None):
+
+def summarise_neighbours(folder, targets, top_n=5, metadata_file=None, max_dist=None, extra_metadata=None):
+    """
+    Summarise nearest neighbours for a list of target compounds and merge annotations.
+
+    Parameters
+    ----------
+    folder : str
+        Path to the base CLIPn output folder.
+    targets : list of str
+        List of compound IDs to analyse.
+    top_n : int, optional
+        Number of top neighbours to retrieve (default is 5).
+    metadata_file : str, optional
+        Path to the primary compound metadata file (TSV).
+    max_dist : float, optional
+        Optional maximum distance cutoff for filtering.
+    extra_metadata : str, optional
+        Path to a second metadata file (CSV) to merge on 'COMPOUND_NAME'.
+
+    Returns
+    -------
+    None
+        Writes merged summary results to TSV and Excel files.
+    """
+
+
+    extra_meta = None
+    if extra_metadata and os.path.isfile(extra_metadata):
+        print(f"[INFO] Found extra annotation file: {extra_metadata}")
+        extra_meta = pd.read_csv(extra_metadata)
+        extra_meta["COMPOUND_NAME"] = extra_meta["COMPOUND_NAME"].str.upper()
+    else:
+        print("[INFO] No extra annotation file provided or file not found.")
+
     nn_path = os.path.join(folder, "post_clipn", "post_analysis_script", "nearest_neighbours.tsv")
     umap_path = os.path.join(folder, "post_clipn", "UMAP_kNone", "cpd_type", "clipn_umap_coordinates_euclidean_n15_d0.1.tsv")
     meta = load_metadata(metadata_file)
@@ -81,11 +181,20 @@ def summarise_neighbours(folder, targets, top_n=5, metadata_file=None, max_dist=
         if meta is not None and not combined.empty:
             combined = combined.merge(meta, left_on="nearest_cpd_id", right_on="cpd_id", how="left", suffixes=("", "_meta"))
             combined.drop(columns=["cpd_id_meta"], inplace=True, errors="ignore")
+
+        if extra_meta is not None and not combined.empty:
+            combined = combined.merge(extra_meta, left_on="nearest_cpd_id", right_on="COMPOUND_NAME", how="left", suffixes=("", "_extra"))
+
         all_summaries.append(combined)
 
     final_summary = pd.concat(all_summaries, ignore_index=True) if all_summaries else pd.DataFrame()
     base_folder = os.path.basename(os.path.abspath(folder.rstrip("/")))
     out_path = os.path.join(folder, f"{base_folder}_summary_neighbours.tsv")
+    excel_out_path = os.path.splitext(out_path)[0] + ".xlsx"
+    final_summary.to_excel(excel_out_path, index=False, engine='xlsxwriter')
+
+    print(f"[INFO] Excel summary written to: {excel_out_path}")
+
     final_summary.to_csv(out_path, sep="\t", index=False)
 
     print("\n[INFO] Combined neighbour summary:")
@@ -102,9 +211,17 @@ if __name__ == "__main__":
                                                         'DDD02941193', 'DDD02947912', 'DDD02947919', 'DDD02948915', 
                                                         'DDD02948916', 'DDD02948926', 'DDD02952619', 'DDD02952620', 
                                                         'DDD02955130', 'DDD02958365'], help="List of target compound IDs")
-    parser.add_argument("--top_n", type=int, default=5, help="Top N neighbours to extract")
-    parser.add_argument("--metadata", type=str, default=None, help="Path to compound metadata TSV file")
-    parser.add_argument("--max_distance", type=float, default=None, help="Optional maximum distance threshold for filtering")
+    parser.add_argument("--top_n", type=int, default=15, 
+                        help="Top N neighbours to extract")
+    parser.add_argument("--metadata", type=str, default=None,
+                        help="Path to compound metadata TSV file")
+    parser.add_argument("--max_distance", type=float, default=None, 
+                        help="Optional maximum distance threshold for filtering")
+    parser.add_argument("--extra_metadata", type=str, default=None, 
+                        help="Optional second metadata CSV file with COMPOUND_NAME to merge")
+
     args = parser.parse_args()
 
-    summarise_neighbours(args.folder, args.target, args.top_n, args.metadata, args.max_distance)
+    summarise_neighbours(args.folder, args.target, args.top_n, args.metadata, 
+                         args.max_distance, args.extra_metadata)
+
