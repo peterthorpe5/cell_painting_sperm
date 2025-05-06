@@ -91,7 +91,7 @@ def summarise_clusters(df, output_dir):
     cluster_summary.to_csv(summary_path, sep="\t", index=False)
     logger.info(f"Cluster summary saved to {summary_path}")
 
-def compute_nearest_neighbours(df, n_neighbours=5, metric="euclidean", prefix=None):
+def compute_nearest_neighbours(df, n_neighbours=20, metric="euclidean", prefix=None):
     """
     Compute nearest neighbours using latent space features.
 
