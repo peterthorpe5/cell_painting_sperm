@@ -204,7 +204,7 @@ if __name__ == "__main__":
                         help="Directory to store visualisation outputs.")
     parser.add_argument("--umap_n_neighbors", 
                         type=int, 
-                        default=15,
+                        default=40,
                         help="Number of neighbours to use for UMAP (default: 15).")
     parser.add_argument("--umap_min_dist", 
                         type=float, 

@@ -91,7 +91,8 @@ def summarise_clusters(df, output_dir):
     cluster_summary.to_csv(summary_path, sep="\t", index=False)
     logger.info(f"Cluster summary saved to {summary_path}")
 
-def compute_nearest_neighbours(df, n_neighbours=20, metric="euclidean", prefix=None):
+
+def compute_nearest_neighbours(df, n_neighbours=100, metric="euclidean", prefix=None):
     """
     Compute nearest neighbours using latent space features.
 
@@ -123,6 +124,7 @@ def compute_nearest_neighbours(df, n_neighbours=20, metric="euclidean", prefix=N
             neighbour = df.iloc[j]["cpd_id"]
             rows.append({"cpd_id": source, "neighbour_id": neighbour, "distance": dist})
     return pd.DataFrame(rows)
+
 
 def analyse_test_vs_reference(df, test_datasets, reference_list, output_dir):
     """
@@ -162,6 +164,7 @@ def analyse_test_vs_reference(df, test_datasets, reference_list, output_dir):
     pd.DataFrame(results).to_csv(out_path, sep="\t", index=False)
     logger.info(f"Test compound reference neighbour stats saved to {out_path}")
 
+
 def generate_network(df, output_dir, threshold, metric="euclidean", prefix=None):
     """
     Generate interactive compound similarity network based on threshold.
@@ -186,7 +189,7 @@ def generate_network(df, output_dir, threshold, metric="euclidean", prefix=None)
 
     try:
         features = select_latent_features(df, prefix)
-        nn = NearestNeighbors(n_neighbors=6, metric=metric).fit(features)
+        nn = NearestNeighbors(n_neighbors=100, metric=metric).fit(features)
         distances, indices = nn.kneighbors(features)
 
         g = nx.Graph()
