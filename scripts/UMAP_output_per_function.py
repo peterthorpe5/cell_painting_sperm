@@ -239,7 +239,7 @@ def parse_args():
     parser.add_argument("--output_dir", required=True, help="Directory to save UMAP plot and coordinates")
     parser.add_argument("--umap_n_neighbors", type=int, default=15, help="UMAP: number of neighbours")
     parser.add_argument("--umap_min_dist", type=float, default=0.1, help="UMAP: minimum distance")
-    parser.add_argument("--umap_metric", type=str, default="euclidean", help="UMAP: distance metric")
+    parser.add_argument("--umap_metric", type=str, default="cosine", help="UMAP: distance metric")
     parser.add_argument("--num_clusters", type=int, default=None, help="Optional: number of KMeans clusters")
     parser.add_argument("--colour_by", nargs="*", default=None, help="List of metadata columns to colour UMAP by")
     parser.add_argument("--add_labels", action="store_true", help="Add `cpd_id` text labels to interactive UMAP")
