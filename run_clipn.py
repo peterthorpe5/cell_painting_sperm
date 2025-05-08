@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
+import glob
 from clipn.model import CLIPn
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
@@ -577,18 +578,23 @@ def main(args):
 
         logger.info(f"Training CLIPn on references: {reference_names}")
 
-
-
         # Check for model loading
         if args.load_model:
-            logger.info(f"Loading pre-trained CLIPn model from: {args.load_model}")
-            torch.serialization.add_safe_globals([CLIPn])
-            model = torch.load(args.load_model, weights_only=False)
-
+            model_files = glob.glob(args.load_model)
+            if not model_files:
+                raise FileNotFoundError(f"No model files matched pattern: {args.load_model}")
+            model_path = model_files[0]
+            logger.info(f"Loading pre-trained CLIPn model from: {model_path}")
+            model = torch.load(model_path, weights_only=False)
 
             # Still need to prepare data (e.g. scaling and projection input)
-            df_scaled = standardise_numeric_columns_preserving_metadata(reference_df, meta_columns=["cpd_id", "cpd_type", "Library"])
+            df_scaled = standardise_numeric_columns_preserving_metadata(
+                reference_df,
+                meta_columns=["cpd_id", "cpd_type", "Library"]
+            )
             data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
+
+
 
             # Generate latent space without re-training
             latent_dict = model.predict(data_dict)
