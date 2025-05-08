@@ -584,7 +584,8 @@ def main(args):
             if not model_files:
                 raise FileNotFoundError(f"No model files matched pattern: {args.load_model}")
             model_path = model_files[0]
-            logger.info(f"Loading pre-trained CLIPn model from: {model_path}")
+            logger.info(f"Loading pre-trained CLIPn model from cmd line: {model_path}")
+            logger.info(f"Loading pre-trained CLIPn model from actual file: {model_path}")
             model = torch.load(model_path, weights_only=False)
 
             # Still need to prepare data (e.g. scaling and projection input)
@@ -755,7 +756,13 @@ def main(args):
             from clipn.model import CLIPn  
             torch.serialization.add_safe_globals([CLIPn])
             logger.info(f"Loading pre-trained CLIPn model from: {args.load_model}")
-            model = torch.load(args.load_model, weights_only=False)
+            model_files = glob.glob(args.load_model)
+            if not model_files:
+                raise FileNotFoundError(f"No model files matched pattern: {args.load_model}")
+            model_path = model_files[0]
+
+            logger.info(f"Loading pre-trained CLIPn model from: {model_path}")
+            model = torch.load(model_path, weights_only=False)
 
             # Standardise and prepare input data
             df_scaled = standardise_numeric_columns_preserving_metadata(combined_df, meta_columns=["cpd_id", "cpd_type", "Library"])
