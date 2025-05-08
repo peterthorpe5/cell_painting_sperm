@@ -92,7 +92,7 @@ def summarise_clusters(df, output_dir):
     logger.info(f"Cluster summary saved to {summary_path}")
 
 
-def compute_nearest_neighbours(df, n_neighbours=100, metric="euclidean", prefix=None):
+def compute_nearest_neighbours(df, n_neighbours=100, metric="cosine", prefix=None):
     """
     Compute nearest neighbours using latent space features.
 
@@ -214,11 +214,13 @@ def main():
     """
     Main driver function to run CLIPn post-analysis.
     """
+    print("WARNING HARD CODED DEFAULTS IN THE SCRIPT OPTIONS.....\n")
     parser = argparse.ArgumentParser(description="CLIPn Latent Post-Analysis")
     parser.add_argument("--latent_csv", required=True, help="TSV with latent space and metadata")
     parser.add_argument("--output_dir", required=True, help="Output directory")
-    parser.add_argument("--threshold", type=float, default=0.3, help="Distance threshold for network edges")
-    parser.add_argument("--test_dataset", nargs="+", help="Test dataset(s) to evaluate proximity")
+    parser.add_argument("--threshold", type=float, default=0.2, help="Distance threshold for network edges")
+    parser.add_argument("--test_dataset", nargs="+",  default="DDD02955130", 
+                        help="Test dataset(s) to evaluate proximity")
     parser.add_argument("--reference_dataset", nargs="+", default=[
         "MCP09", "MCP05", "DDD02387619", "DDD02443214", "DDD02454019", "DDD02454403",
         "DDD02459457", "DDD02487111", "DDD02487311", "DDD02589868", "DDD02591200",
