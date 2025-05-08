@@ -10,6 +10,8 @@ Includes:
 Usage:
     python plot_shared_neighbour_scatter.py --input nn.tsv --compound1 C1 --compound2 C2
 
+    python plot.py --input nearest_neighbours.tsv --compound1 DDD02955130 --compound2 DDD02459457
+
 """
 
 import pandas as pd
@@ -27,38 +29,41 @@ def plot_kde_scatter(df: pd.DataFrame, cpd1: str, cpd2: str, output_prefix: str)
     Includes:
         - Matplotlib static KDE plot
         - Plotly interactive scatter plot with neighbour_id tooltips
-
-    Parameters:
-        df (pd.DataFrame): Nearest neighbour dataframe.
-        cpd1 (str): First compound ID.
-        cpd2 (str): Second compound ID.
-        output_prefix (str): Prefix for saved plot filenames.
     """
+    # Deduplicate by keeping the smallest distance for each (cpd_id, neighbour_id)
+    df = df.sort_values("distance").drop_duplicates(subset=["cpd_id", "neighbour_id"], keep="first")
+
+    # Filter for each compound
     df1 = df[df["cpd_id"] == cpd1].set_index("neighbour_id")
     df2 = df[df["cpd_id"] == cpd2].set_index("neighbour_id")
-    common = df1.index.intersection(df2.index)
 
-    if common.empty:
-        print("No shared neighbours found.")
+    # Identify shared neighbours with no missing distance
+    common = df1.index.intersection(df2.index)
+    common = [n for n in common if pd.notnull(df1.at[n, "distance"]) and pd.notnull(df2.at[n, "distance"])]
+
+    if not common:
+        print("No valid shared neighbours found (after cleaning).")
         return
 
+    # Sort and align
+    common = sorted(common)
     x = 1 - df1.loc[common, "distance"]
     y = 1 - df2.loc[common, "distance"]
-    neighbours = common.tolist()
 
-    # KDE for colour density (matplotlib version)
-    xy = np.vstack([x.values, y.values])
+    # KDE for density
+    xy = np.vstack([x.to_numpy(), y.to_numpy()])
     z = gaussian_kde(xy)(xy)
 
+    # Sort by density
     idx = z.argsort()
-    x_sorted = x.values[idx]
-    y_sorted = y.values[idx]
+    x_sorted = x.to_numpy()[idx]
+    y_sorted = y.to_numpy()[idx]
     z_sorted = z[idx]
-    neighbours_sorted = np.array(neighbours)[idx]
+    neighbours_sorted = np.array(common)[idx]
 
-    # --- Static KDE plot (matplotlib) ---
+    # --- Static KDE plot ---
     plt.figure(figsize=(6, 6))
-    plt.scatter(x_sorted, y_sorted, c=z_sorted, cmap="viridis", s=60, edgecolor="")
+    plt.scatter(x_sorted, y_sorted, c=z_sorted, cmap="viridis", s=60, edgecolors="none")
     cb = plt.colorbar()
     cb.set_label("Density")
 
@@ -73,10 +78,14 @@ def plot_kde_scatter(df: pd.DataFrame, cpd1: str, cpd2: str, output_prefix: str)
 
     # --- Interactive Plotly plot ---
     df_plot = pd.DataFrame({
-        f"{cpd1} (1-distance)": x.values,
-        f"{cpd2} (1-distance)": y.values,
-        "neighbour_id": neighbours,
+        f"{cpd1} (1-distance)": x,
+        f"{cpd2} (1-distance)": y,
+        "neighbour_id": common,
     })
+
+    # Save clean shared neighbour data to TSV
+    df_plot.to_csv(f"{output_prefix}_shared_neighbours.tsv", sep="\t", index=False)
+    print(f"Shared neighbours saved to {output_prefix}_shared_neighbours.tsv")
 
     fig = px.scatter(
         df_plot,
@@ -87,7 +96,7 @@ def plot_kde_scatter(df: pd.DataFrame, cpd1: str, cpd2: str, output_prefix: str)
         width=700,
         height=700,
     )
-    fig.update_traces(marker=dict(size=10, colour="blue"))
+    fig.update_traces(marker=dict(size=10, color="blue"))
     fig.write_html(f"{output_prefix}_interactive_scatter.html")
     print(f"Interactive scatter saved to {output_prefix}_interactive_scatter.html")
 

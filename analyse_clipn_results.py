@@ -226,7 +226,7 @@ def main():
         "DDD02948915", "DDD02948916", "DDD02948926", "DDD02952619", "DDD02952620",
         "DDD02955130", "DDD02958365"
     ], help="Reference datasets or compound IDs")
-    parser.add_argument("--nn_metric", type=str, default="euclidean", help="Metric for nearest neighbour search")
+    parser.add_argument("--nn_metric", type=str, default="cosine", help="Metric for nearest neighbour search")
     parser.add_argument("--latent_prefix", type=str, default=None, help="Prefix for latent features (default uses digit-only columns)")
 
     args = parser.parse_args()

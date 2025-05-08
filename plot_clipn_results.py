@@ -212,7 +212,7 @@ if __name__ == "__main__":
                         help="Minimum distance parameter for UMAP (default: 0.25).")
     parser.add_argument("--umap_metric", 
                         type=str, 
-                        default="euclidean",
+                        default="cosine",
                         help="Distance metric for UMAP (e.g., euclidean, cosine, manhattan).")
     parser.add_argument("--num_clusters", 
                         type=int, 

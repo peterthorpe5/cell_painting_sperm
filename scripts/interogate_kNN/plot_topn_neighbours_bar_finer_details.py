@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Bar chart of top-N nearest neighbours for a single compound.
+Horizontal bar chart of top-N nearest neighbours for a single compound.
 
-Plots (1 - distance) similarity values for top N neighbours.
+Plots raw distances (lower = more similar) for top N neighbours.
 
 Usage:
     python plot_topn_neighbours_bar.py --input nn.tsv --compound DDD02955130 --top_n 10
@@ -15,7 +15,7 @@ import argparse
 
 def plot_top_n_bar(df: pd.DataFrame, cpd: str, top_n: int, output_prefix: str) -> None:
     """
-    Plot top-N nearest neighbours for a single compound as a bar chart.
+    Plot top-N nearest neighbours for a single compound as a horizontal bar chart.
 
     Parameters:
         df (pd.DataFrame): Nearest neighbour dataframe.
@@ -28,23 +28,25 @@ def plot_top_n_bar(df: pd.DataFrame, cpd: str, top_n: int, output_prefix: str) -
         print(f"No matches found for compound '{cpd}' in the input file.")
         return
 
-    subset["similarity"] = 1 - subset["distance"]
-    top_hits = subset.nlargest(top_n, "similarity")
+    top_hits = subset.nsmallest(top_n, "distance")  # lower distance = better
+    top_hits = top_hits.sort_values("distance", ascending=True)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(
-        top_hits["neighbour_id"],
-        top_hits["similarity"],
-        color="steelblue"
-    )
+    fig, ax = plt.subplots(figsize=(8, 6))
+    bars = ax.barh(top_hits["neighbour_id"], top_hits["distance"], color="steelblue")
 
-    ax.set_ylabel("1 - distance (Similarity)")
+    # Label each bar with the raw distance value
+    for bar, value in zip(bars, top_hits["distance"]):
+        ax.text(value + 0.001, bar.get_y() + bar.get_height() / 2,
+                f"{value:.3f}", va='center', ha='left', fontsize=8)
+
+    ax.set_xlabel("Distance (lower is more similar)")
     ax.set_title(f"Top {top_n} Nearest Neighbours for {cpd}")
-    ax.set_xticklabels(top_hits["neighbour_id"], rotation=45, ha="right")
+    ax.invert_yaxis()  # most similar at the top
     plt.tight_layout()
-    plt.savefig(f"{output_prefix}_{cpd}_top{top_n}_bar.pdf", dpi=1200)
+    output_file = f"{output_prefix}_{cpd}_top{top_n}_bar.pdf"
+    plt.savefig(output_file, dpi=1200)
     plt.close()
-    print(f"Top-{top_n} bar chart saved to {output_prefix}_{cpd}_top{top_n}_bar.pdf")
+    print(f"Top-{top_n} horizontal bar chart saved to {output_file}")
 
 
 def main():
