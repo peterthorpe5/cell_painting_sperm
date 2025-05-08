@@ -71,7 +71,7 @@ def setup_logging(out_dir, experiment):
     stream_handler.setFormatter(stream_formatter)
     stream_handler.setLevel(logging.INFO)
 
-    file_handler = logging.FileHandler(log_filename)
+    file_handler = logging.FileHandler(log_filename, mode='w')
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
     file_handler.setLevel(logging.DEBUG)
