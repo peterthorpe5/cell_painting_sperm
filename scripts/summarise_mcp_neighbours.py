@@ -7,7 +7,7 @@ It supports merging compound-level annotations from one or more metadata files.
 
 Features
 --------
-- Computes top-N nearest neighbours by Euclidean distance in UMAP space.
+- Computes top-N nearest neighbours by cosine distance in UMAP space.
 - Extracts top-N nearest neighbours from CLIPn NN output.
 - Merges compound annotations from a primary metadata TSV and an optional secondary CSV.
 - Outputs results to both TSV and Excel (.xlsx) formats.
@@ -51,7 +51,7 @@ def load_metadata(path):
 
 def find_nearest_umap(df, target_id, top_n, max_dist=None):
     """
-    Find top-N nearest neighbours in UMAP 2D space using Euclidean distance.
+    Find top-N nearest neighbours in UMAP 2D space using  distance.
 
     Parameters
     ----------
@@ -158,7 +158,7 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
         print("[INFO] No extra annotation file provided or file not found.")
 
     nn_path = os.path.join(folder, "post_clipn", "post_analysis_script", "nearest_neighbours.tsv")
-    umap_path = os.path.join(folder, "post_clipn", "UMAP_kNone", "cpd_type", "clipn_umap_coordinates_euclidean_n15_d0.1.tsv")
+    umap_path = os.path.join(folder, "post_clipn", "UMAP_kNone", "cpd_type", "clipn_umap_coordinates_cosine_n15_d0.1.tsv")
     meta = load_metadata(metadata_file)
 
     nn_df = pd.read_csv(nn_path, sep="\t")
