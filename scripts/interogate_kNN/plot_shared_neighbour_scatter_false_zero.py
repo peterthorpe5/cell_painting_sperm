@@ -10,8 +10,8 @@ Includes:
 Usage:
     python plot_shared_neighbour_scatter.py --input nn.tsv --compound1 C1 --compound2 C2
 
-Example:
-    python plot_shared_neighbour_scatter.py --input nearest_neighbours.tsv --compound1 DDD02955130 --compound2 DDD02459457
+    python plot.py --input nearest_neighbours.tsv --compound1 DDD02955130 --compound2 DDD02459457
+
 """
 
 import pandas as pd
@@ -29,17 +29,6 @@ def plot_kde_scatter(df: pd.DataFrame, cpd1: str, cpd2: str, output_prefix: str)
     Includes:
         - Matplotlib static KDE plot
         - Plotly interactive scatter plot with neighbour_id tooltips
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe with columns: cpd_id, neighbour_id, distance
-    cpd1 : str
-        First compound ID
-    cpd2 : str
-        Second compound ID
-    output_prefix : str
-        Prefix for saved output files
     """
     # Deduplicate by keeping the smallest distance for each (cpd_id, neighbour_id)
     df = df.sort_values("distance").drop_duplicates(subset=["cpd_id", "neighbour_id"], keep="first")
@@ -82,8 +71,6 @@ def plot_kde_scatter(df: pd.DataFrame, cpd1: str, cpd2: str, output_prefix: str)
     plt.ylabel(f"{cpd2} (1 - distance)")
     plt.title("Neighbour similarity comparison")
     plt.grid(True)
-    plt.xlim(0, 1)
-    plt.ylim(0, 1)
     plt.tight_layout()
     plt.savefig(f"{output_prefix}_scatter_kde.pdf", dpi=1200)
     plt.close()
@@ -106,14 +93,10 @@ def plot_kde_scatter(df: pd.DataFrame, cpd1: str, cpd2: str, output_prefix: str)
         y=f"{cpd2} (1-distance)",
         hover_name="neighbour_id",
         title="Interactive Neighbour Similarity Scatter",
-        width=800,
-        height=800,
+        width=700,
+        height=700,
     )
     fig.update_traces(marker=dict(size=10, color="blue"))
-    fig.update_layout(
-        xaxis=dict(range=[0, 1]),
-        yaxis=dict(range=[0, 1])
-    )
     fig.write_html(f"{output_prefix}_interactive_scatter.html")
     print(f"Interactive scatter saved to {output_prefix}_interactive_scatter.html")
 
