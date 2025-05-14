@@ -12,10 +12,11 @@ The script processes input CSV files from Cell Painting assays by:
 
 Command-Line Arguments:
 -----------------------
-    --input_dir                : Directory containing input CSV files.
+    --input                  : Directory containing input CSV files or a single CSV.
+    --input_file_list        : (Alternative) Text file with paths to input CSVs, one per line.
     --out               : Directory where outputs will be saved.
     --experiment          : Name of the experiment.
-    --impute_method            : Method for imputing missing values ('median' or 'knn').
+    --impute            : Method for imputing missing values ('median' or 'knn').
     --knn_neighbors            : Number of neighbors for KNN imputation.
     --correlation_threshold    : Threshold for removing highly correlated features.
     --annotation_file          : (Optional) Path to the annotation CSV file.
@@ -23,10 +24,10 @@ Command-Line Arguments:
 Example Usage:
 --------------
     python impute_missing_data.py \
-        --input_dir ./data/raw \
+        --input ./data/raw \
         --out ./data/processed \
         --experiment MyExperiment \
-        --impute_method knn \
+        --impute knn \
         --knn_neighbors 5 \
         --correlation_threshold 0.98 \
         --annotation_file ./annotations.csv
@@ -99,6 +100,14 @@ if __name__ == "__main__":
                         type=float, default=0.99)
     parser.add_argument("--annotation_file", 
                         required=False)
+    parser.add_argument("--input_file_list",
+                    required=False,
+                    help="Text file containing list of input CSV file paths, one per line.")
+    parser.add_argument("--force_averaging",
+                    action="store_true",
+                    help="Force averaging of technical replicates even if only one input file is given.")
+
+
 
     args = parser.parse_args()
 
@@ -136,19 +145,26 @@ if __name__ == "__main__":
 
 
     # === Load Data ===
-    input_path = Path(args.input)
+    if args.input_file_list:
+        with open(args.input_file_list, "r") as f:
+            missing = [str(p) for p in input_files if not p.exists()]
+            if missing:
+                logger.error(f"The following input files were not found:\n" + "\n".join(missing))
+                sys.exit(1)
 
-    if input_path.suffix == ".csv":
-        # Use the single specified CSV file
-        input_files = [input_path]
-        logger.info(f"Single input file provided: {input_path.name}")
+            input_files = [Path(line.strip()).resolve() for line in f if line.strip()]
+        logger.info(f"Loaded {len(input_files)} files from file list: {args.input_file_list}")
     else:
-        # Load all CSV files from directory
-        input_files = list(input_path.glob("*.csv"))
-        if not input_files:
-            logger.error(f"No CSV files found in directory: {input_path}")
-            sys.exit(1)
-        logger.info(f"Found {len(input_files)} CSV files in directory: {input_path}")
+        input_path = Path(args.input)
+        if input_path.suffix == ".csv":
+            input_files = [input_path]
+            logger.info(f"Single input file provided: {input_path.name}")
+        else:
+            input_files = list(input_path.glob("*.csv"))
+            if not input_files:
+                logger.error(f"No CSV files found in directory: {input_path}")
+                sys.exit(1)
+            logger.info(f"Found {len(input_files)} CSV files in directory: {input_path}")
 
 
     dataframes = [pd.read_csv(f, index_col=0) for f in input_files]
@@ -365,6 +381,34 @@ if __name__ == "__main__":
         logger.info(f"Ungrouped, correlation- and variance-filtered data (with metadata) saved to {ungrouped_filtered_path}")
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
+
+
+    # === Averaging Technical Replicates (multi-file or --force_averaging) ===
+    if args.force_averaging or len(input_files) > 1:
+        logger.info("Averaging technical replicates by metadata group.")
+
+        replicate_group_cols = ["cpd_id", "Library", "cpd_type", "Plate_Metadata", "Well_Metadata"]
+
+        missing_cols = [col for col in replicate_group_cols if col not in df.columns]
+        if missing_cols:
+            logger.error(f"Cannot average replicates: missing columns: {missing_cols}")
+            sys.exit(1)
+
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        numeric_cols = [col for col in numeric_cols if col not in replicate_group_cols]
+
+        grouped_df = df.groupby(replicate_group_cols, dropna=False)[numeric_cols].mean().reset_index()
+
+        logger.info(f"Averaging complete. Reduced from {df.shape[0]} to {grouped_df.shape[0]} rows.")
+
+        df = grouped_df.copy()
+    else:
+        logger.info("Skipping technical replicate averaging.")
+
+
 
 
     # === Grouping and Filtering ===
