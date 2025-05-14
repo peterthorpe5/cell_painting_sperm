@@ -85,7 +85,7 @@ if "--version" in sys.argv:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", 
-                        required=True,
+                        required=False,
                         help="input folder of cvs. OR a single csv, normalised")
     parser.add_argument("--out", 
                         default="processed")
