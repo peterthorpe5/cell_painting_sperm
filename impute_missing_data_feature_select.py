@@ -170,10 +170,24 @@ if __name__ == "__main__":
             logger.info(f"Found {len(input_files)} CSV files in directory: {input_path}")
 
 
-    dataframes = [pd.read_csv(f, index_col=0) for f in input_files]
-    df = pd.concat(dataframes, axis=0)
+    dataframes = []
+    for f in input_files:
+        try:
+            df_i = pd.read_csv(f, index_col=0, encoding="utf-8", sep=",")
+            logger.debug(f"Loaded file {f} with UTF-8 encoding.")
+        except UnicodeDecodeError:
+            logger.warning(f"UTF-8 decode failed for {f}. Trying ISO-8859-1.")
+            try:
+                df_i = pd.read_csv(f, index_col=0, encoding="ISO-8859-1", sep=",")
+                logger.debug(f"Loaded file {f} with ISO-8859-1 encoding.")
+            except Exception as e:
+                logger.error(f"Failed to read {f} with both encodings. Error: {e}")
+                sys.exit(1)
+        dataframes.append(df_i)
 
+    df = pd.concat(dataframes, axis=0)
     stage_shapes["raw_input"] = df.shape
+
 
 
     # block of code to handle inconsistant naming of cols (name, Name or cpd_id?)
