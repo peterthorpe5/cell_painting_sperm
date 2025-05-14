@@ -110,6 +110,9 @@ if __name__ == "__main__":
 
 
     args = parser.parse_args()
+    # Summary tracker for data shapes
+    stage_shapes = {}
+
 
     os.makedirs(args.out, exist_ok=True)
 
@@ -147,12 +150,12 @@ if __name__ == "__main__":
     # === Load Data ===
     if args.input_file_list:
         with open(args.input_file_list, "r") as f:
-            missing = [str(p) for p in input_files if not p.exists()]
-            if missing:
-                logger.error(f"The following input files were not found:\n" + "\n".join(missing))
-                sys.exit(1)
-
             input_files = [Path(line.strip()).resolve() for line in f if line.strip()]
+        
+        missing = [str(p) for p in input_files if not p.exists()]
+        if missing:
+            logger.error(f"The following input files were not found:\n" + "\n".join(missing))
+            sys.exit(1)
         logger.info(f"Loaded {len(input_files)} files from file list: {args.input_file_list}")
     else:
         input_path = Path(args.input)
@@ -169,6 +172,9 @@ if __name__ == "__main__":
 
     dataframes = [pd.read_csv(f, index_col=0) for f in input_files]
     df = pd.concat(dataframes, axis=0)
+
+    stage_shapes["raw_input"] = df.shape
+
 
     # block of code to handle inconsistant naming of cols (name, Name or cpd_id?)
     # Handle flexible cpd_id assignment
@@ -282,20 +288,22 @@ if __name__ == "__main__":
             logger.warning(f"Metadata column '{col}' is missing before imputation.")
 
     # Select numeric feature columns *only*, excluding metadata
-    numeric_cols = [
+    numeric_cols_impute = [
         col for col in df.columns
         if col not in metadata_cols and pd.api.types.is_numeric_dtype(df[col])
     ]
 
-    logger.debug(f"Columns selected for imputation: {numeric_cols}")
+    logger.debug(f"Columns selected for imputation: {numeric_cols_impute}")
+
 
     # Imputation
     imputer = KNNImputer(n_neighbors=args.knn_neighbors) if args.impute == "knn" else SimpleImputer(strategy="median")
-    imputed_numeric_df = imputer.fit_transform(df[numeric_cols])
-    numeric_df = pd.DataFrame(imputed_numeric_df, columns=numeric_cols)
+    imputed_numeric_df = imputer.fit_transform(df[numeric_cols_impute])
+    numeric_df = pd.DataFrame(imputed_numeric_df, columns=numeric_cols_impute)
+    non_numeric_df = df.drop(columns=numeric_cols_impute)
 
     # Merge imputed features with preserved non-numeric data
-    non_numeric_df = df.drop(columns=numeric_cols)
+    # non_numeric_df = df.drop(columns=numeric_cols)
     df = pd.concat([non_numeric_df, numeric_df], axis=1)
 
     logger.debug(f"Columns after imputation: {df.columns.tolist()}")
@@ -316,6 +324,8 @@ if __name__ == "__main__":
 
 
     logger.info(f"Imputation ({args.impute}) completed. Final shape: {df.shape}")
+    stage_shapes["after_imputation"] = df.shape
+
     # Save clean ungrouped version right after imputation
     df_ungrouped_imputed = df.copy()
 
@@ -356,8 +366,9 @@ if __name__ == "__main__":
             "cpd_id", "cpd_type", "Library",
             "Plate_Metadata", "Well_Metadata"
         ]
-        metadata_cols = [col for col in metadata_cols_to_preserve if col in df.columns]
-        metadata_df = df[metadata_cols].copy()
+
+        metadata_cols_present = [col for col in metadata_cols_to_preserve if col in df.columns]
+        metadata_df = df[metadata_cols_present].copy()
 
         # Debug: Check for blank or missing cpd_id
         if metadata_df["cpd_id"].isnull().any() or (metadata_df["cpd_id"] == "").any():
@@ -379,6 +390,7 @@ if __name__ == "__main__":
         ungrouped_filtered_path = Path(args.out) / f"{args.experiment}_imputed_ungrouped_filtered.tsv"
         df_ungrouped_filtered.to_csv(ungrouped_filtered_path, index=False, sep='\t')
         logger.info(f"Ungrouped, correlation- and variance-filtered data (with metadata) saved to {ungrouped_filtered_path}")
+        stage_shapes["after_ungrouped_filter"] = df_ungrouped_filtered.shape
     except Exception as e:
         logger.warning(f"Could not process ungrouped correlation- and variance-filtered output: {e}")
 
@@ -397,16 +409,20 @@ if __name__ == "__main__":
         if isinstance(df.index, pd.MultiIndex):
             df = df.reset_index()
 
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        numeric_cols = [col for col in numeric_cols if col not in replicate_group_cols]
+        numeric_cols_avg = df.select_dtypes(include=[np.number]).columns
+        numeric_cols_avg = [col for col in numeric_cols_avg if col not in replicate_group_cols]
 
-        grouped_df = df.groupby(replicate_group_cols, dropna=False)[numeric_cols].mean().reset_index()
+        grouped_df = df.groupby(replicate_group_cols, dropna=False)[numeric_cols_avg].mean().reset_index()
 
         logger.info(f"Averaging complete. Reduced from {df.shape[0]} to {grouped_df.shape[0]} rows.")
 
         df = grouped_df.copy()
+        stage_shapes["after_replicate_averaging"] = df.shape
+
     else:
         logger.info("Skipping technical replicate averaging.")
+        stage_shapes["after_replicate_averaging"] = df.shape
+
 
 
 
@@ -449,6 +465,8 @@ if __name__ == "__main__":
 
         grouped_filtered_df.to_csv(grouped_filtered_file, sep='\t', index=False)
         logger.info(f"Grouped and filtered data saved to {grouped_filtered_file}")
+        stage_shapes["after_grouping_filter"] = grouped_filtered_df.shape
+
 
     except Exception as e:
         logger.error(f"Error during grouping and filtering: {e}")
@@ -503,6 +521,8 @@ if __name__ == "__main__":
         output_path = Path(args.out) / f"{args.experiment}_imputed_grouped_filtered_feature_selected.tsv"
         df_selected.to_csv(output_path, index=False, sep='\t')
         logger.info(f"Final cleaned data saved to {output_path}")
+        stage_shapes["after_feature_selection"] = df_selected.shape
+
     else:
         logger.warning("No feature-selected data to save.")
 
@@ -521,7 +541,9 @@ if __name__ == "__main__":
             if isinstance(df_ungrouped_imputed.index, pd.MultiIndex):
                 df_ungrouped_imputed = df_ungrouped_imputed.reset_index()
 
-            ungrouped_metadata_df = df_ungrouped_imputed[metadata_cols].copy()
+            metadata_cols_present = [col for col in metadata_cols_to_preserve if col in df_ungrouped_imputed.columns]
+            ungrouped_metadata_df = df_ungrouped_imputed[metadata_cols_present].copy()
+
             logger.debug(f"Final ungrouped metadata columns: {ungrouped_metadata_df.columns.tolist()}")
 
 
@@ -540,3 +562,9 @@ if __name__ == "__main__":
             logger.warning("Skipping ungrouped feature-selected output because df_selected is None.")
     except Exception as e:
         logger.error(f"Could not save ungrouped feature-selected output: {e}")
+
+# === Summary of data shapes ===
+logger.info("Summary of dataset shapes at key stages:")
+for stage, shape in stage_shapes.items():
+    logger.info(f"{stage:30s}: {shape[0]} rows × {shape[1]} columns")
+
