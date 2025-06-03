@@ -1,0 +1,42 @@
+# File: my_preprocessed_config.yaml
+
+# Input data - use the split, standardised files output by your script
+train_data_file: "prepped/train_controls.tsv"
+val_data_file: "prepped/val_controls.tsv"
+test_data_file: "prepped/test_controls.tsv"
+
+# If you have treatments or queries for scoring (optional)
+#treatment_data_file: "prepped/treatments.tsv"
+
+# Metadata column names (should match your outputs)
+metadata_cols:
+  - cpd_id
+  - cpd_type
+  - Library
+  - Plate_Metadata
+  - Well_Metadata
+
+# Value that defines a negative control in cpd_type column
+negative_control: "DMSO"
+
+# Output directory for results, logs, and model
+results_dir: "outputs/anomaly_results"
+
+# (The following sections are required but can be mostly ignored if not using raw data processing)
+raw_data_file: ""
+preprocessed_data_dir: ""
+feature_selection:
+  na_thresh: 0.05
+  corr_thresh: 0.9
+  var_thresh: 0.0
+
+# Model hyperparameters (edit as needed)
+autoencoder:
+  hidden_layer_sizes: [256, 128, 64, 128, 256]
+  latent_dim: 32
+  learning_rate: 0.001
+  batch_size: 128
+  epochs: 300
+
+# Miscellaneous
+random_seed: 42
