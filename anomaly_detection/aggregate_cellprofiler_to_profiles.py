@@ -5,7 +5,7 @@
 aggregate_cellprofiler_to_profiles.py
 
 Aggregate multiple CellProfiler CSVs (one per channel/compartment) into a single wide-format
-well-level profile using pycytominer. Optionally merges in a metadata file.
+well-level profile using pycytominer. Optionally merges in a metadata file and harmonises compound type labels.
 
 Requires:
     pandas, pycytominer
@@ -16,8 +16,6 @@ Example usage:
         --output_file cellprofiler_well_profiles.tsv \
         --metadata_file plate_map.csv \
         --merge_keys Plate,Well
-
-
 """
 
 import argparse
@@ -26,30 +24,43 @@ from pathlib import Path
 import pandas as pd
 from pycytominer.aggregate import aggregate
 
+def harmonise_cpd_type_column(df, id_col="cpd_id", cpd_type_col="cpd_type", logger=None):
+    """
+    Harmonise compound type labelling, renaming the original and creating a cleaned 'cpd_type' column.
+    """
+    # Rename original cpd_type column
+    if cpd_type_col in df.columns:
+        df = df.rename(columns={cpd_type_col: "cpd_type_raw"})
+        if logger:
+            logger.info(f"Renamed original '{cpd_type_col}' column to 'cpd_type_raw'.")
+
+    # Fill with blanks if missing
+    cpd_type_vals = df.get("cpd_type_raw", pd.Series([""]*len(df))).fillna("").str.lower()
+    cpd_id_vals = df.get(id_col, pd.Series([""]*len(df))).fillna("").str.strip().str.upper()
+
+    new_types = []
+    for orig, cid in zip(cpd_type_vals, cpd_id_vals):
+        if "positive control" in orig:
+            new_types.append("positive control")
+        elif "negative control" in orig or cid == "DMSO":
+            new_types.append("DMSO")
+        elif "compound" in orig:
+            new_types.append("compound")
+        else:
+            new_types.append("compound")
+    df["cpd_type"] = new_types
+
+    if logger:
+        logger.info("Harmonised compound type column added as 'cpd_type'.")
+
+    return df
 
 def harmonise_metadata_columns(df, logger=None):
     """
     Harmonise column names in a metadata DataFrame to ensure compatibility
     with downstream merging, regardless of their original names.
-
-    Converts common variations of 'Plate', 'Well', and 'cpd_id' columns to
-    'Plate_Metadata', 'Well_Metadata', and 'cpd_id', respectively.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Input metadata DataFrame, possibly with inconsistent column names.
-    logger : logging.Logger or None
-        Logger for status messages.
-
-    Returns
-    -------
-    pandas.DataFrame
-        DataFrame with harmonised column names for Plate, Well, and cpd_id.
     """
     rename_dict = {}
-
-    # Lower-case map for robust matching
     col_map = {col.lower(): col for col in df.columns}
 
     # Plate harmonisation
@@ -73,7 +84,7 @@ def harmonise_metadata_columns(df, logger=None):
     # cpd_id harmonisation (including many possible variants)
     cpd_candidates = [
         "cpd_id", "compound_id", "comp_id", "compound", "compud_id",
-        "compund_id", "compid", "comp", "compoundid", "compoundid"
+        "compund_id", "compid", "comp", "compoundid"
     ]
     for cpdname in cpd_candidates:
         if cpdname in col_map:
@@ -105,15 +116,9 @@ def harmonise_metadata_columns(df, logger=None):
 
     return df.rename(columns=rename_dict)
 
-
 def parse_args():
     """
     Parse command-line arguments.
-
-    Returns
-    -------
-    argparse.Namespace
-        Parsed arguments.
     """
     parser = argparse.ArgumentParser(description="Aggregate CellProfiler CSVs to well-level profile.")
     parser.add_argument('--input_dir', required=True, help='Directory with CellProfiler CSV files.')
@@ -122,32 +127,27 @@ def parse_args():
     parser.add_argument('--merge_keys', default='Plate,Well',
                         help='Comma-separated list of metadata columns for merging (default: Plate,Well).')
     parser.add_argument('--sep', default='\t', help='Delimiter for output file (default: tab).')
+    parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+                        help='Set logging level (default: INFO)')
     return parser.parse_args()
 
-
-def setup_logging():
+def setup_logging(log_level="INFO"):
     """
     Set up logging to console.
-
-    Returns
-    -------
-    logging.Logger
-        Logger instance.
     """
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s: %(message)s",
         handlers=[logging.StreamHandler()]
     )
     return logging.getLogger("agg_logger")
-
 
 def main():
     """
     Main workflow for aggregation.
     """
     args = parse_args()
-    logger = setup_logging()
+    logger = setup_logging(args.log_level)
 
     # Find all CSVs in the directory
     input_dir = Path(args.input_dir)
@@ -168,7 +168,7 @@ def main():
 
     meta_cols = set([k.strip() for k in args.merge_keys.split(',')] + ["ImageNumber", "ObjectNumber"])
     feature_cols = [c for c in cp_df.columns if c not in meta_cols]
-    logger.info(f"Using {len(feature_cols)} feature columns for aggregation.")
+    logger.debug(f"Using {len(feature_cols)} feature columns for aggregation.")
     logger.debug(f"First five feature columns: {feature_cols[:5]}")
 
     agg_df = aggregate(
@@ -213,11 +213,20 @@ def main():
         else:
             logger.info("All required metadata columns are present in the final output.")
 
+    # Always harmonise cpd_type (rename and create clean version)
+    agg_df = harmonise_cpd_type_column(
+        agg_df,
+        id_col="cpd_id",
+        cpd_type_col="cpd_type",
+        logger=logger
+    )
+
     # Output as TSV or CSV
     out_path = Path(args.output_file)
     agg_df.to_csv(out_path, sep=args.sep, index=False)
     logger.info(f"Saved merged profiles to {out_path}")
-
+    logger.info(f"Output file shape: {agg_df.shape}")
+    logger.info("Aggregation complete.")
 
 if __name__ == "__main__":
     main()
