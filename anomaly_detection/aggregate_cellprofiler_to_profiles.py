@@ -17,7 +17,7 @@ Example usage:
         --metadata_file plate_map.csv \
         --merge_keys Plate,Well
 
-Author: Your Name
+
 """
 
 import argparse

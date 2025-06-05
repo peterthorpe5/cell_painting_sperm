@@ -30,6 +30,8 @@ python prepare_anomaly_detection_data.py \
 
 """
 
+
+
 import argparse
 import os
 import logging
@@ -38,6 +40,80 @@ import pandas as pd
 from pathlib import Path
 from pycytominer import feature_select
 from sklearn.impute import SimpleImputer, KNNImputer
+
+
+def harmonise_columns(df, logger=None):
+    """
+    Harmonise key metadata column names defensively (handles cpd_id, cpd_type, Library, Plate_Metadata, Well_Metadata).
+    Accepts many capitalisation and spelling variants.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame with possible variant column names.
+    logger : logging.Logger or None
+        Logger for harmonisation messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with harmonised column names.
+    """
+    rename_dict = {}
+
+    # Lower-case map for robust matching
+    col_map = {c.lower(): c for c in df.columns}
+
+    def log_change(orig, new):
+        if logger:
+            logger.info(f"Renaming column '{orig}' to '{new}'.")
+
+    # Plate
+    for platename in ["plate_metadata", "plate"]:
+        if platename in col_map:
+            rename_dict[col_map[platename]] = "Plate_Metadata"
+            log_change(col_map[platename], "Plate_Metadata")
+            break
+
+    # Well
+    for wellname in ["well_metadata", "well"]:
+        if wellname in col_map:
+            rename_dict[col_map[wellname]] = "Well_Metadata"
+            log_change(col_map[wellname], "Well_Metadata")
+            break
+
+    # cpd_id
+    cpd_id_candidates = [
+        "cpd_id", "compound_id", "comp_id", "compound", "compud_id",
+        "compund_id", "compid", "comp", "compoundid"
+    ]
+    for cname in cpd_id_candidates:
+        if cname in col_map:
+            rename_dict[col_map[cname]] = "cpd_id"
+            log_change(col_map[cname], "cpd_id")
+            break
+
+    # cpd_type
+    cpd_type_candidates = ["cpd_type", "compound_type", "type"]
+    for cname in cpd_type_candidates:
+        if cname in col_map:
+            rename_dict[col_map[cname]] = "cpd_type"
+            log_change(col_map[cname], "cpd_type")
+            break
+
+    # Library
+    library_candidates = ["library", "lib", "collection"]
+    for cname in library_candidates:
+        if cname in col_map:
+            rename_dict[col_map[cname]] = "Library"
+            log_change(col_map[cname], "Library")
+            break
+
+    if logger and not rename_dict:
+        logger.info("No metadata columns required renaming.")
+
+    return df.rename(columns=rename_dict)
+
 
 def parse_args():
     """
@@ -66,16 +142,15 @@ def parse_args():
     parser.add_argument('--val_frac', type=float, default=0.1, help='Fraction for validation set (default: 0.1)')
     parser.add_argument('--test_frac', type=float, default=0.5, help='Fraction for test set (default: 0.5)')
     parser.add_argument('--na_cutoff', type=float, default=0.05,
-                    help='Maximum allowed NA fraction per feature (default: 0.05)')
+                        help='Maximum allowed NA fraction per feature (default: 0.05)')
     parser.add_argument('--corr_threshold', type=float, default=0.9,
                         help='Correlation threshold for dropping features (default: 0.9)')
     parser.add_argument('--variance_threshold', type=float, default=0.05,
                         help='Variance threshold for dropping features (default: 0.05)')
     parser.add_argument('--unique_cutoff', type=float, default=0.01,
                         help='Threshold for dropping features with low unique value ratio (default: 0.01)')
-
-
     return parser.parse_args()
+
 
 def setup_logging(out_dir):
     """
@@ -104,25 +179,10 @@ def setup_logging(out_dir):
     return logging.getLogger("prep_logger")
 
 
-def feature_selection(df, metadata_cols, na_cutoff=0.05, corr_threshold=0.9, 
-                      variance_threshold=0.05, unique_cutoff=0.01):
+def feature_selection(df, metadata_cols, na_cutoff=0.05, corr_threshold=0.9,
+                      variance_threshold=0.05, unique_cutoff=0.01, logger=None):
     """
     Apply pycytominer feature selection: remove highly correlated, null, and invariant features.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame with well-level data.
-    metadata_cols : list
-        List of metadata column names to preserve.
-    na_cutoff : float
-        Maximum NA fraction per feature.
-    corr_threshold : float
-        Correlation threshold for dropping features.
-    variance_threshold : float
-        Variance threshold for dropping features.
-    unique_cutoff : float
-        Threshold for dropping features with low unique value ratio.
 
     Returns
     -------
@@ -144,27 +204,15 @@ def feature_selection(df, metadata_cols, na_cutoff=0.05, corr_threshold=0.9,
         na_cutoff=na_cutoff,
         unique_cutoff=unique_cutoff
     )
+    if logger:
+        logger.info(f"Feature selection reduced from {len(feature_cols)} to {selected.shape[1]} features.")
     # Return with metadata
     return pd.concat([df[metadata_cols].reset_index(drop=True), selected.reset_index(drop=True)], axis=1)
-
 
 
 def impute_missing(df, method="median", knn_neighbors=5, metadata_cols=None, logger=None):
     """
     Impute missing values in features using median or KNN, preserving all metadata columns.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame to impute.
-    method : str
-        Imputation method: 'median' or 'knn'.
-    knn_neighbors : int
-        Number of neighbours for KNN imputation.
-    metadata_cols : list or None
-        List of metadata columns to exclude from imputation.
-    logger : logging.Logger or None
-        Logger for status messages.
 
     Returns
     -------
@@ -191,20 +239,10 @@ def impute_missing(df, method="median", knn_neighbors=5, metadata_cols=None, log
         logger.info(f"Imputation complete (method={method}, shape={out.shape}).")
     return out
 
+
 def standardise_features(df, train_controls, metadata_cols, method="mean"):
     """
     Standardise features using either mean/std or median/MAD from training controls.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame to standardise.
-    train_controls : pandas.DataFrame
-        DataFrame of training control wells.
-    metadata_cols : list
-        List of metadata column names to preserve.
-    method : str
-        Standardisation method: 'mean' (z-score) or 'median' (robust, median/MAD).
 
     Returns
     -------
@@ -217,13 +255,9 @@ def standardise_features(df, train_controls, metadata_cols, method="mean"):
         scale = train_controls[feature_cols].std(ddof=0)
     elif method == "median":
         location = train_controls[feature_cols].median()
-        # For MAD, use normalisation so that for normal distribution, median/MAD ~ z-score
-        scale = train_controls[feature_cols].mad()
-        # Optionally use: scale = 1.4826 * MAD for normal consistency
-        scale = scale * 1.4826
+        scale = train_controls[feature_cols].mad() * 1.4826  # Consistent with robust z-score
     else:
         raise ValueError("Unknown z-score method: %s" % method)
-    # Avoid division by zero
     scale_replaced = scale.replace(0, np.nan)
     df_z = df.copy()
     df_z[feature_cols] = (df[feature_cols] - location) / scale_replaced
@@ -234,30 +268,10 @@ def split_controls(df, plate_col, cpd_type_col, control_label, train_frac=0.4, v
     """
     For each plate, randomly split controls into train/validation/test sets based on provided fractions.
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame with all wells.
-    plate_col : str
-        Column name identifying plates.
-    cpd_type_col : str
-        Column name identifying compound type (controls vs treatments).
-    control_label : str
-        Label used to identify control wells.
-    train_frac : float
-        Fraction of controls for training set.
-    val_frac : float
-        Fraction of controls for validation set.
-    test_frac : float
-        Fraction of controls for test set.
-    seed : int, optional
-        Random seed (default 42).
-
     Returns
     -------
     tuple of pandas.DataFrame
         (train_controls, validation_controls, test_controls)
-
     """
     assert abs(train_frac + val_frac + test_frac - 1.0) < 1e-5, "Split fractions must sum to 1.0"
     rng = np.random.default_rng(seed)
@@ -280,45 +294,35 @@ def split_controls(df, plate_col, cpd_type_col, control_label, train_frac=0.4, v
     return pd.concat(train), pd.concat(val), pd.concat(test)
 
 
-
 def main():
     """
     Main execution workflow for preparing anomaly detection data.
-
-    Loads input, imputes missing data if requested, standardises metadata columns, splits controls,
-    applies feature selection, standardises features, and saves tab-separated outputs.
     """
     args = parse_args()
     logger = setup_logging(args.output_dir)
 
-    logger.info(f"Standardisation method: {args.zscore_method} "
-                f"({'mean/std' if args.zscore_method == 'mean' else 'median/MAD'}). "
-                "No min-max normalisation is performed in this script."
-                )
-    logger.info(f"Feature selection: na_cutoff={args.na_cutoff}, "
-                f"corr_threshold={args.corr_threshold}, "
-                f"variance_threshold={args.variance_threshold}, "
-                f"unique_cutoff={args.unique_cutoff}"
-                )
-
-
-
-    # Load data
+    # Load data and harmonise metadata columns defensively
     if args.input_file.endswith(".csv"):
         df = pd.read_csv(args.input_file)
     else:
         df = pd.read_csv(args.input_file, sep="\t")
     logger.info(f"Loaded input with shape {df.shape}")
 
-    # Standardise and check metadata columns
-    required_metadata = ["cpd_id", args.cpd_type_col, "Library", args.plate_col, args.well_col]
+    df = harmonise_columns(df, logger=logger)
+
+    # Defensive check/fill for all metadata columns (cpd_id, cpd_type, Library, Plate_Metadata, Well_Metadata)
+    required_metadata = ["cpd_id", args.cpd_type_col, "Plate_Metadata", "Well_Metadata"]
+    if "Library" in df.columns:
+        required_metadata.append("Library")
+
     for col in required_metadata:
         if col not in df.columns:
             logger.warning(f"Column '{col}' missing — will fill with 'unknown'.")
             df[col] = "unknown"
     metadata_cols = required_metadata.copy()
+    logger.info(f"Using metadata columns: {metadata_cols}")
 
-    # Backup MultiIndex if present (will always flatten for output)
+    # Backup MultiIndex if present (not used for output, but tracked for completeness)
     index_backup = df.index.to_frame(index=False) if isinstance(df.index, pd.MultiIndex) else None
     df = df.reset_index(drop=True)
 
@@ -334,7 +338,7 @@ def main():
 
     train_ctrl, val_ctrl, test_ctrl = split_controls(
         df,
-        plate_col=args.plate_col,
+        plate_col="Plate_Metadata",
         cpd_type_col=args.cpd_type_col,
         control_label=args.control_label,
         train_frac=args.train_frac,
@@ -342,7 +346,6 @@ def main():
         test_frac=args.test_frac,
         seed=args.seed
     )
-
 
     treatments = df[df[args.cpd_type_col] != args.control_label]
     logger.info(f"Train controls: {train_ctrl.shape}, Validation controls: {val_ctrl.shape}, Test controls: {test_ctrl.shape}, Treatments: {treatments.shape}")
@@ -354,29 +357,30 @@ def main():
         na_cutoff=args.na_cutoff,
         corr_threshold=args.corr_threshold,
         variance_threshold=args.variance_threshold,
-        unique_cutoff=args.unique_cutoff
+        unique_cutoff=args.unique_cutoff,
+        logger=logger
     )
     selected_treatments = feature_selection(
         treatments, metadata_cols,
         na_cutoff=args.na_cutoff,
         corr_threshold=args.corr_threshold,
         variance_threshold=args.variance_threshold,
-        unique_cutoff=args.unique_cutoff
+        unique_cutoff=args.unique_cutoff,
+        logger=logger
     )
-
 
     # Standardise features (fit only on training controls)
     train_ctrl_std = standardise_features(
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label], 
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label], 
+        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
+        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
         metadata_cols, method=args.zscore_method
     )
     val_ctrl_std = standardise_features(
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label], 
+        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
         train_ctrl_std, metadata_cols, method=args.zscore_method
     )
     test_ctrl_std = standardise_features(
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label], 
+        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
         train_ctrl_std, metadata_cols, method=args.zscore_method
     )
     treatments_std = standardise_features(selected_treatments, train_ctrl_std, metadata_cols, method=args.zscore_method)
@@ -393,6 +397,7 @@ def main():
         logger.info("MultiIndex restoration not implemented here, but index is preserved in output columns for downstream merging.")
 
     logger.info("Completed data preparation for anomaly detection.")
+
 
 if __name__ == "__main__":
     main()
