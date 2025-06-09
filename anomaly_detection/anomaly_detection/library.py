@@ -19,6 +19,7 @@ from scipy.stats import shapiro
 
 
 
+
 def harmonise_metadata_columns(df, logger=None):
     """
     Harmonise column names in a metadata DataFrame to ensure compatibility
@@ -79,6 +80,46 @@ def harmonise_metadata_columns(df, logger=None):
         logger.info("No metadata columns required renaming.")
 
     return df.rename(columns=rename_dict)
+
+
+
+# ---- Defensive Metadata Harmonisation ----
+def harmonise_plate_well_columns(df, logger=None, desired_plate="Plate_Metadata", desired_well="Well_Metadata"):
+    """
+    Harmonise plate and well column names to standard expected by pipeline.
+    Returns a DataFrame with columns renamed and a tuple of (plate_col, well_col).
+    """
+    # All common variants
+    plate_variants = ["Plate_Metadata", "Metadata_Plate", "Plate", "Image_Metadata_Plate"]
+    well_variants  = ["Well_Metadata", "Metadata_Well", "Well", "Image_Metadata_Well"]
+
+    # Detect plate
+    plate_col = None
+    for cand in plate_variants:
+        if cand in df.columns:
+            plate_col = cand
+            break
+    if plate_col is None:
+        raise ValueError(f"No recognised plate column found in: {df.columns}")
+    if plate_col != desired_plate:
+        df = df.rename(columns={plate_col: desired_plate})
+        if logger:
+            logger.warning(f"Renamed plate column: {plate_col} → {desired_plate}")
+
+    # Detect well
+    well_col = None
+    for cand in well_variants:
+        if cand in df.columns:
+            well_col = cand
+            break
+    if well_col is None:
+        raise ValueError(f"No recognised well column found in: {df.columns}")
+    if well_col != desired_well:
+        df = df.rename(columns={well_col: desired_well})
+        if logger:
+            logger.warning(f"Renamed well column: {well_col} → {desired_well}")
+
+    return df, desired_plate, desired_well
 
 
 
@@ -440,7 +481,7 @@ def standardise_features(df, train_controls, metadata_cols, method="mean", logge
         scale = train_controls[feature_cols].std(ddof=0)
     elif method == "median":
         location = train_controls[feature_cols].median()
-        scale = train_controls[feature_cols].mad() * 1.4826
+        scale = train_controls[feature_cols].apply(lambda x: np.median(np.abs(x - np.median(x))), axis=0) * 1.4826
     else:
         raise ValueError("Unknown z-score method: %s" % method)
     scale_replaced = scale.replace(0, np.nan)
@@ -466,12 +507,28 @@ def split_controls(df, plate_col, cpd_type_col, control_label, train_frac=0.4, v
         if n == 0:
             continue
         indices = rng.permutation(n)
-        n_train = int(n * train_frac)
-        n_val = int(n * val_frac)
+        # Use np.round to reduce bias and always ensure at least one sample in each if n >= 3
+        n_train = int(np.round(n * train_frac))
+        n_val = int(np.round(n * val_frac))
         n_test = n - n_train - n_val
+        # Handle rounding to always sum to n, and ensure at least 1 sample if possible
+        if n_train == 0 and n >= 1:
+            n_train = 1
+        if n_val == 0 and n - n_train >= 2:
+            n_val = 1
+        n_test = n - n_train - n_val
+        # If still something is 0, assign at least 1 to each, reduce from largest as needed
+        splits = [n_train, n_val, n_test]
+        for i in range(3):
+            if splits[i] == 0 and n > 2:
+                splits[i] = 1
+                j = np.argmax(splits)
+                if splits[j] > 1:
+                    splits[j] -= 1
+        n_train, n_val, n_test = splits
         idx_train = controls.iloc[indices[:n_train]].index
-        idx_val = controls.iloc[indices[n_train:n_train+n_val]].index
-        idx_test = controls.iloc[indices[n_train+n_val:]].index
+        idx_val = controls.iloc[indices[n_train:n_train + n_val]].index
+        idx_test = controls.iloc[indices[n_train + n_val:]].index
         train.append(df.loc[idx_train])
         val.append(df.loc[idx_val])
         test.append(df.loc[idx_test])

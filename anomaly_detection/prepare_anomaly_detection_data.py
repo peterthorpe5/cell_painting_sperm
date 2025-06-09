@@ -36,6 +36,7 @@ python prepare_anomaly_detection_data.py \
 """
 
 import argparse
+import sys
 import os
 import logging
 import numpy as np
@@ -72,7 +73,7 @@ def parse_args():
     parser.add_argument('--well_col', default='Well_Metadata', help='Well metadata column name.')
     parser.add_argument("--experiment", required=True, type=str, help="Experiment name or prefix to add to all output files")
     parser.add_argument('--cpd_type_col', default='cpd_type', help='Compound type column.')
-    parser.add_argument('--zscore_method', choices=['mean', 'median'], default='mean',
+    parser.add_argument('--zscore_method', choices=['mean', 'median'], default='median',
                         help='How to perform z-scoring: "mean" (standard z-score) or "median" (robust, median/MAD).')
     parser.add_argument('--impute', choices=['none', 'median', 'knn'], default='knn',
                         help='Impute missing values before scaling: "none", "median", or "knn".')
@@ -131,6 +132,9 @@ def main():
 
     args = parse_args()
     logger = setup_logging(args.output_dir)
+    logger.info(f"Python Version: {sys.version_info}")
+    logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
+    logger.info(f"Experiment Name: {args.experiment}")
 
     # Load and harmonise
     if args.input_file.endswith(".csv"):
@@ -155,6 +159,29 @@ def main():
     df = df.reset_index(drop=True)
 
     # ========== IMPUTATION (now BEFORE scaling) ==========
+    logger.info("Checking for inf/-inf values in features... these break things ...")
+    # Only check numeric columns for inf/-inf/huge values
+    numeric_df = df.select_dtypes(include=[np.number])
+
+    logger.info("Checking for inf/-inf values in numeric features...")
+    n_inf = np.isinf(numeric_df).sum().sum()
+    n_neg_inf = np.isneginf(numeric_df).sum().sum()
+    logger.info(f"Number of inf values: {n_inf}")
+    logger.info(f"Number of -inf values: {n_neg_inf}")
+
+    logger.info("Checking for very large values (>|1e10|) in numeric features...")
+    n_large = (numeric_df.abs() > 1e10).sum().sum()
+    logger.info(f"Number of very large values: {n_large}")
+
+    # Replace in the original DataFrame (numeric columns only)
+    df[numeric_df.columns] = numeric_df.replace([np.inf, -np.inf], np.nan)
+    df[numeric_df.columns] = df[numeric_df.columns].applymap(lambda x: np.nan if isinstance(x, float) and abs(x) > 1e10 else x)
+
+    if n_inf or n_neg_inf or n_large:
+        logger.warning(f"Replaced {n_inf} inf, {n_neg_inf} -inf, {n_large} very large values with NaN before imputation.")
+
+
+
     if args.impute != "none":
         logger.info(f"Imputing missing values with method '{args.impute}' (KNN neighbours: {args.knn_neighbours})")
         df = impute_missing(df, method=args.impute, knn_neighbours=args.knn_neighbours, metadata_cols=metadata_cols, logger=logger)
@@ -186,6 +213,7 @@ def main():
         raise ValueError("Split fractions must sum to 1.0 (got %.2f)" %
                         (args.train_frac + args.val_frac + args.test_frac))
 
+    # Split controls into train/val/test
     train_ctrl, val_ctrl, test_ctrl = split_controls(
         df,
         plate_col="Plate_Metadata",
@@ -197,10 +225,23 @@ def main():
         seed=args.seed
     )
 
+    # Record indices for each split before feature selection
+    train_ctrl_idx = train_ctrl.index
+    val_ctrl_idx = val_ctrl.index
+    test_ctrl_idx = test_ctrl.index
+
     treatments = df[df[args.cpd_type_col] != args.control_label]
     logger.info(f"Train controls: {train_ctrl.shape}, Validation controls: {val_ctrl.shape}, Test controls: {test_ctrl.shape}, Treatments: {treatments.shape}")
 
-    # ========== FEATURE SELECTION ==========
+
+    # ========== Feature selection ==========
+    # Feature selection on ALL controls, not each split separately
+    meta_cols = metadata_cols
+    # Save metadata for each split
+    train_ctrl_meta = train_ctrl[meta_cols].copy()
+    val_ctrl_meta = val_ctrl[meta_cols].copy()
+    test_ctrl_meta = test_ctrl[meta_cols].copy()
+
     logger.info("Applying pycytominer feature selection to controls and treatments...")
     all_ctrls = pd.concat([train_ctrl, val_ctrl, test_ctrl])
     selected_ctrls = feature_selection(
@@ -209,8 +250,14 @@ def main():
         corr_threshold=args.corr_threshold,
         unique_cutoff=args.unique_cutoff,
         freq_cut=args.freq_cut,
-        logger=logger
-    )
+        logger=logger)
+
+    # For each split, get rows in selected_ctrls that match the split metadata
+    train_ctrl = pd.merge(train_ctrl_meta, selected_ctrls, on=meta_cols, how="inner")
+    val_ctrl = pd.merge(val_ctrl_meta, selected_ctrls, on=meta_cols, how="inner")
+    test_ctrl = pd.merge(test_ctrl_meta, selected_ctrls, on=meta_cols, how="inner")
+
+
     selected_treatments = feature_selection(
         treatments, metadata_cols,
         na_cutoff=args.na_cutoff,
@@ -219,6 +266,8 @@ def main():
         freq_cut=args.freq_cut,
         logger=logger
     )
+
+
 
     # === Write out the feature-selected, harmonised, imputed, and scaled dataset ===
     combined_selected = pd.concat([selected_ctrls, selected_treatments], axis=0, ignore_index=True)
@@ -245,23 +294,25 @@ def main():
     # better for data that are not normally distributed.
 
     logger.info(f"Standardising features (z-score method={args.zscore_method}) using training controls...")
+
     train_ctrl_std = standardise_features(
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
-        metadata_cols, method=args.zscore_method, logger=logger
+        train_ctrl, train_ctrl, metadata_cols, method=args.zscore_method, 
+        logger=logger
     )
     val_ctrl_std = standardise_features(
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
-        train_ctrl_std, metadata_cols, method=args.zscore_method, logger=logger
+        val_ctrl, train_ctrl, metadata_cols, method=args.zscore_method, 
+        logger=logger
     )
     test_ctrl_std = standardise_features(
-        selected_ctrls[selected_ctrls[args.cpd_type_col] == args.control_label],
-        train_ctrl_std, metadata_cols, method=args.zscore_method, logger=logger
+        test_ctrl, train_ctrl, metadata_cols, method=args.zscore_method, 
+        logger=logger
     )
     treatments_std = standardise_features(
-        selected_treatments, train_ctrl_std, metadata_cols,
-        method=args.zscore_method, logger=logger
+        selected_treatments, train_ctrl, metadata_cols, method=args.zscore_method, 
+        logger=logger
     )
+
+
 
     # ========== ALIGN OUTPUT COLUMNS ==========
     aligned = align_columns(

@@ -21,10 +21,14 @@ Example usage:
 import argparse
 import logging
 from pathlib import Path
+import sys
+import numpy as np
 import pandas as pd
 from pycytominer.aggregate import aggregate
 from anomaly_detection.library import  (harmonise_cpd_type_column, 
-                                        harmonise_metadata_columns)
+                                        harmonise_metadata_columns,
+                                        harmonise_plate_well_columns)
+
 
 def parse_args():
     """
@@ -52,12 +56,15 @@ def setup_logging(log_level="INFO"):
     )
     return logging.getLogger("agg_logger")
 
+
 def main():
     """
     Main workflow for aggregation.
     """
     args = parse_args()
     logger = setup_logging(args.log_level)
+    logger.info(f"Python Version: {sys.version_info}")
+    logger.info(f"Command-line Arguments: {' '.join(sys.argv)}")
 
     # Find all CSVs in the directory
     input_dir = Path(args.input_dir)
@@ -73,21 +80,32 @@ def main():
     cp_df = pd.concat(dataframes, axis=0, ignore_index=True)
     logger.info(f"Concatenated DataFrame shape: {cp_df.shape}")
 
+    # Defensive cleaning: replace bad strings with NaN
+    # bad data has been found :(
+    bad_strings = ['#NAME?', '#VALUE!', '#DIV/0!', 'N/A', 'NA', '', ' ']
+    cp_df.replace(bad_strings, np.nan, inplace=True)
+    logger.info("Replaced known bad strings in numeric columns with NaN.")
+
+    # Harmonise plate/well columns before aggregation
+    cp_df, plate_col, well_col = harmonise_plate_well_columns(
+        cp_df,
+        logger=logger,
+        desired_plate="Plate_Metadata",
+        desired_well="Well_Metadata"
+    )
+    meta_cols = set([plate_col, well_col, "ImageNumber", "ObjectNumber"])
+    feature_cols = [c for c in cp_df.columns if c not in meta_cols]
+    logger.info(f"Using plate column: {plate_col}, well column: {well_col}")
+    logger.debug(f"Using {len(feature_cols)} feature columns for aggregation.")
+
     # Aggregate to well-level using pycytominer
     logger.info("Aggregating to well-level profiles (using mean for each well)...")
-
-    meta_cols = set([k.strip() for k in args.merge_keys.split(',')] + ["ImageNumber", "ObjectNumber"])
-    feature_cols = [c for c in cp_df.columns if c not in meta_cols]
-    logger.debug(f"Using {len(feature_cols)} feature columns for aggregation.")
-    logger.debug(f"First five feature columns: {feature_cols[:5]}")
-
     agg_df = aggregate(
         population_df=cp_df,
-        strata=[k.strip() for k in args.merge_keys.split(',')],
+        strata=[plate_col, well_col],
         features=feature_cols,
         operation="mean"
     )
-
     logger.info(f"Aggregated DataFrame shape: {agg_df.shape}")
 
     # Merge metadata if provided
@@ -95,8 +113,14 @@ def main():
         logger.info(f"Loading and harmonising metadata file: {args.metadata_file}")
         meta_df = pd.read_csv(args.metadata_file)
         meta_df = harmonise_metadata_columns(meta_df, logger=logger)
-
-        keys = ["Plate_Metadata", "Well_Metadata"]
+        # Harmonise metadata table columns as well
+        meta_df, meta_plate_col, meta_well_col = harmonise_plate_well_columns(
+            meta_df,
+            logger=logger,
+            desired_plate=plate_col,
+            desired_well=well_col
+        )
+        keys = [plate_col, well_col]
         logger.info(f"Merging on keys: {keys}")
         # Defensive check for merge keys
         for k in keys:
@@ -111,7 +135,7 @@ def main():
         logger.info(f"Shape after metadata merge: {agg_df.shape}")
 
         # After merging metadata, check for essential columns
-        required_cols = ["cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata"]
+        required_cols = ["cpd_id", "cpd_type", plate_col, well_col]
         if "Library" in meta_df.columns:
             required_cols.append("Library")
         missing_cols = [col for col in required_cols if col not in agg_df.columns]
@@ -137,6 +161,8 @@ def main():
     logger.info(f"Saved merged profiles to {out_path}")
     logger.info(f"Output file shape: {agg_df.shape}")
     logger.info("Aggregation complete.")
+
+
 
 if __name__ == "__main__":
     main()
