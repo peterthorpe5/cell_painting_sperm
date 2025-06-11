@@ -157,7 +157,8 @@ def get_well_level(df, cpd_id, cpd_id_col='cpd_id'):
     mask = df[cpd_id_col].astype(str).str.upper() == str(cpd_id).upper()
     return df[mask]
 
-def get_wells_for_dmso(df, cpd_type_col='cpd_type', dmso_label='DMSO'):
+
+def get_wells_for_dmso_on_col(df, cpd_type_col='cpd_type', dmso_label='DMSO'):
     """
     Extract all DMSO wells (robust to capitalisation and variants).
 
@@ -171,6 +172,23 @@ def get_wells_for_dmso(df, cpd_type_col='cpd_type', dmso_label='DMSO'):
     """
     mask = df[cpd_type_col].astype(str).str.upper().str.contains(dmso_label.upper())
     return df[mask]
+
+
+def get_wells_for_dmso(df, dmso_label='DMSO'):
+    """
+    Extract all DMSO wells (robust: returns any row where any column contains the string 'DMSO', ignoring case).
+
+    Args:
+        df (pd.DataFrame): DataFrame of well-level data.
+        dmso_label (str): String label for DMSO.
+
+    Returns:
+        pd.DataFrame: Subset for DMSO controls.
+    """
+    mask = df.apply(lambda row: row.astype(str).str.upper().str.contains(dmso_label.upper()).any(), axis=1)
+    return df[mask]
+
+
 
 def compare_distributions(df1, df2, feature_cols, test='mw'):
     """
@@ -301,7 +319,8 @@ def main():
 
     # DMSO wells (all files)
     logger.info("Extracting DMSO wells (control distribution)...")
-    dmso_df = get_wells_for_dmso(df, cpd_type_col=args.cpd_type_col, dmso_label=args.dmso_label)
+    dmso_df = get_wells_for_dmso(df, dmso_label=args.dmso_label)
+
     logger.info(f"Found {dmso_df.shape[0]} DMSO wells.")
 
 
