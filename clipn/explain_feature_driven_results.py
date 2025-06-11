@@ -66,7 +66,7 @@ def setup_logger(log_file):
     logger.setLevel(logging.DEBUG)
     fmt = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
 
-    fh = logging.FileHandler(log_file)
+    fh = logging.FileHandler(log_file, mode="w")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
 
