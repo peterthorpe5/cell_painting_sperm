@@ -50,6 +50,7 @@ import logging
 from statsmodels.stats.multitest import multipletests
 from scipy.stats import mannwhitneyu, ks_2samp
 from collections import defaultdict
+import warnings
 
 def setup_logger(log_file):
     """
@@ -303,6 +304,10 @@ def main():
     dmso_df = get_wells_for_dmso(df, cpd_type_col=args.cpd_type_col, dmso_label=args.dmso_label)
     logger.info(f"Found {dmso_df.shape[0]} DMSO wells.")
 
+
+    # Suppress openpyxl warnings
+    warnings.simplefilter("ignore")
+
     # Feature grouping: use provided file or infer compartments
     if args.feature_group_file:
         group_map = load_groupings(args.feature_group_file)
@@ -328,16 +333,24 @@ def main():
         q_dmso_stats = compare_distributions(query_df, dmso_df, feature_cols, test=args.test)
         _, q_dmso_stats['pvalue_bh'], _, _ = multipletests(q_dmso_stats['raw_pvalue'], method='fdr_bh')
         q_dmso_stats_sorted = q_dmso_stats.sort_values('abs_median_diff', ascending=False).head(args.top_features)
-        q_dmso_stats_sorted.to_csv(os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_features.tsv"),
-                                  sep="\t", index=False)
+        out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_features.tsv")
+        q_dmso_stats_sorted.to_csv(out_tsv, sep="\t", index=False)
+        out_xlsx = out_tsv.replace(".tsv", ".xlsx")
+        q_dmso_stats_sorted.to_excel(out_xlsx, index=False)
         logger.info(f"Saved top features distinguishing {query_id} from DMSO: {q_dmso_stats_sorted['feature'].tolist()}")
+
+
 
         if group_map:
             q_dmso_group_stats = group_feature_stats(q_dmso_stats, group_map)
             q_dmso_group_stats = q_dmso_group_stats.sort_values('mean_abs_median_diff', ascending=False).head(args.top_features)
-            q_dmso_group_stats.to_csv(os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_groups.tsv"),
-                                      sep="\t", index=False)
+            out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_groups.tsv")
+            q_dmso_group_stats.to_csv(out_tsv, sep="\t", index=False)
+            out_xlsx = out_tsv.replace(".tsv", ".xlsx")
+            q_dmso_group_stats.to_excel(out_xlsx, index=False)
             logger.info(f"Saved top compartments distinguishing {query_id} from DMSO: {q_dmso_group_stats['group'].tolist()}")
+
+
 
         # Nearest neighbours (from NN table)
         nn_ids = load_nn_table(args.nn_file, query_id, nn_per_query=args.nn_per_query)
@@ -347,21 +360,27 @@ def main():
             nn_df = get_well_level(df, nn_id, cpd_id_col=args.cpd_id_col)
             if nn_df.empty:
                 logger.warning(f"No wells found for NN {nn_id}, skipping.")
-                continue
+                continue                        
             logger.info(f"Comparing {query_id} to NN {nn_id}...")
             q_nn_stats = compare_distributions(query_df, nn_df, feature_cols, test=args.test)
             _, q_nn_stats['pvalue_bh'], _, _ = multipletests(q_nn_stats['raw_pvalue'], method='fdr_bh')
             q_nn_stats_sorted = q_nn_stats.sort_values('abs_median_diff').head(args.top_features)
-            q_nn_stats_sorted.to_csv(os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_features.tsv"),
-                                     sep="\t", index=False)
+            out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_features.tsv")
+            q_nn_stats_sorted.to_csv(out_tsv, sep="\t", index=False)
+            out_xlsx = out_tsv.replace(".tsv", ".xlsx")
+            q_nn_stats_sorted.to_excel(out_xlsx, index=False)
             logger.info(f"Saved top features explaining similarity between {query_id} and {nn_id}: {q_nn_stats_sorted['feature'].tolist()}")
 
             if group_map:
+                
                 q_nn_group_stats = group_feature_stats(q_nn_stats, group_map)
                 q_nn_group_stats = q_nn_group_stats.sort_values('mean_abs_median_diff').head(args.top_features)
-                q_nn_group_stats.to_csv(os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv"),
-                                        sep="\t", index=False)
+                out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv")
+                q_nn_group_stats.to_csv(out_tsv, sep="\t", index=False)
+                out_xlsx = out_tsv.replace(".tsv", ".xlsx")
+                q_nn_group_stats.to_excel(out_xlsx, index=False)
                 logger.info(f"Saved top compartments explaining similarity between {query_id} and {nn_id}: {q_nn_group_stats['group'].tolist()}")
+
 
 if __name__ == "__main__":
     main()
