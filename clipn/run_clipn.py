@@ -816,8 +816,15 @@ def main(args):
             lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
             axis=1
         )
-        renamed_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
 
+        # Drop rows with NaN before output
+        n_before = decoded_with_index.shape[0]
+        decoded_with_index = decoded_with_index.dropna(axis=0)
+        n_after = decoded_with_index.shape[0]
+        if n_before != n_after:
+            print(f"[WARNING] Dropped {n_before - n_after} rows containing NaNs from latent space output.")
+
+        renamed_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
         decoded_with_index.to_csv(renamed_path, index=False)
 
         cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.tsv"
@@ -831,6 +838,7 @@ def main(args):
             logger.info(f"Saved Plate/Well metadata to: {plate_well_file}")
         else:
             logger.warning("Plate_Metadata or Well_Metadata missing in decoded output — skipping plate/well export.")
+
 
 
         # here we add annotation data. Note the excel file is messy
