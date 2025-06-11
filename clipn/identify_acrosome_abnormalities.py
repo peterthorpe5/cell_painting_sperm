@@ -9,7 +9,6 @@ Batch comparison: All compounds vs. DMSO—Acrosome Features
 
 Usage:
     python batch_acrosome_vs_dmso.py --ungrouped_list dataset_paths.txt [--output_dir acrosome_vs_DMSO]
-
 """
 
 import argparse
@@ -230,16 +229,19 @@ def main():
         # All features
         logger.info(f"Comparing {cpd_id} to DMSO across all features.")
         all_stats = compare_distributions(query_df, dmso_df, feature_cols, logger)
-        _, all_stats['pvalue_bh'], _, _ = multipletests(all_stats['raw_pvalue'], method='fdr_bh')
+        # Always assign pvalue_bh before slicing!
+        reject, pvals_bh, _, _ = multipletests(all_stats['raw_pvalue'], method='fdr_bh')
+        all_stats['pvalue_bh'] = pvals_bh
         all_stats = all_stats.sort_values('abs_median_diff', ascending=False)
         all_tsv = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_top_features.tsv")
         all_xlsx = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_top_features.xlsx")
-        all_stats.head(args.top_features).to_csv(all_tsv, sep="\t", index=False)
-        all_stats.head(args.top_features).to_excel(all_xlsx, index=False)
+        top_all_stats = all_stats.head(args.top_features).copy()
+        top_all_stats.to_csv(all_tsv, sep="\t", index=False)
+        top_all_stats.to_excel(all_xlsx, index=False)
         logger.info(f"Saved top feature stats for {cpd_id}: {all_tsv}")
 
         # Significant only
-        sig_stats = all_stats[all_stats['pvalue_bh'] <= args.fdr_alpha]
+        sig_stats = all_stats[all_stats['pvalue_bh'] <= args.fdr_alpha].copy()
         if not sig_stats.empty:
             sig_tsv = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_significant_features.tsv")
             sig_xlsx = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_significant_features.xlsx")
@@ -251,15 +253,17 @@ def main():
         if acrosome_feats:
             logger.info(f"Comparing {cpd_id} to DMSO across acrosome features.")
             acro_stats = compare_distributions(query_df, dmso_df, acrosome_feats, logger)
-            _, acro_stats['pvalue_bh'], _, _ = multipletests(acro_stats['raw_pvalue'], method='fdr_bh')
+            reject, pvals_bh, _, _ = multipletests(acro_stats['raw_pvalue'], method='fdr_bh')
+            acro_stats['pvalue_bh'] = pvals_bh
             acro_stats = acro_stats.sort_values('abs_median_diff', ascending=False)
             acro_tsv = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_top_features.tsv")
             acro_xlsx = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_top_features.xlsx")
-            acro_stats.head(args.top_features).to_csv(acro_tsv, sep="\t", index=False)
-            acro_stats.head(args.top_features).to_excel(acro_xlsx, index=False)
+            top_acro_stats = acro_stats.head(args.top_features).copy()
+            top_acro_stats.to_csv(acro_tsv, sep="\t", index=False)
+            top_acro_stats.to_excel(acro_xlsx, index=False)
             logger.info(f"Saved acrosome feature stats for {cpd_id}: {acro_tsv}")
 
-            sig_acro = acro_stats[acro_stats['pvalue_bh'] <= args.fdr_alpha]
+            sig_acro = acro_stats[acro_stats['pvalue_bh'] <= args.fdr_alpha].copy()
             if not sig_acro.empty:
                 sig_acro_tsv = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_features.tsv")
                 sig_acro_xlsx = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_features.xlsx")
@@ -279,7 +283,7 @@ def main():
             logger.info(f"Saved acrosome group stats for {cpd_id}: {acro_grp_tsv}")
 
             # Significant only (min_raw_pvalue threshold)
-            sig_grp = acro_group_stats[acro_group_stats['min_raw_pvalue'] <= args.fdr_alpha]
+            sig_grp = acro_group_stats[acro_group_stats['min_raw_pvalue'] <= args.fdr_alpha].copy()
             if not sig_grp.empty:
                 sig_grp_tsv = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_group.tsv")
                 sig_grp_xlsx = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_group.xlsx")
@@ -288,6 +292,7 @@ def main():
                 logger.info(f"Saved significant acrosome group stats for {cpd_id}: {sig_grp_tsv}")
 
     logger.info("Batch comparison complete.")
+
 
 if __name__ == "__main__":
     main()
