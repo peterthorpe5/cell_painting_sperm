@@ -291,9 +291,10 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Statistical attribution for cell painting NNs vs DMSO (batch mode)")
     parser.add_argument('--ungrouped_list', required=True, help="CSV/TSV with column 'path' for ungrouped feature files")
-    parser.add_argument('--query_ids', required=True, default=[
-                        "DDD02387619", "DDD02948916",
-                        "DDD02955130", "DDD02958365"], help="Comma-separated, one-per-line, or file with query IDs")
+    parser.add_argument('--query_ids',
+                        required=False, 
+    default="DDD02387619,DDD02948916,DDD02955130,DDD02958365", help="Comma-separated string, one-per-line file, or filename with query IDs")
+
     parser.add_argument('--nn_file', required=True, help="Nearest neighbours TSV (cpd_id, neighbour_id, distance)")
     parser.add_argument('--cpd_type_col', default='cpd_type', help="Column for compound type")
     parser.add_argument('--cpd_id_col', default='cpd_id', help="Column for compound ID")
