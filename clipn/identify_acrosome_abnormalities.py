@@ -253,8 +253,8 @@ def main():
 
     standard_col_order = ["feature", "stat", "raw_pvalue", "abs_median_diff", 
                           "emd", "med_query", "med_comp", "pvalue_bh"]
-    standard_col_order_group = ["feature", "stat", "raw_pvalue", "abs_median_diff", 
-                                "emd", "med_query", "med_comp", "pvalue_bh"]
+
+    standard_col_order_group = ["group", "mean_abs_median_diff", "min_raw_pvalue"]
 
 
     os.makedirs(args.output_dir, exist_ok=True)

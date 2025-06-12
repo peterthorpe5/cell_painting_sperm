@@ -294,7 +294,7 @@ def reorder_and_write(df, filename, col_order, logger, filetype="tsv"):
     elif filetype == "excel":
         df_out.to_excel(filename, index=False)
     logger.debug(f"Wrote {filename} with columns: {df_out.columns.tolist()}")
-    
+
 
 def load_nn_table(nn_file, query_id, nn_per_query=10):
     """
@@ -351,8 +351,9 @@ def main():
     standard_col_order = [
     "feature", "stat", "raw_pvalue", "abs_median_diff", "emd", "med_query", "med_comp", "pvalue_bh"]
 
-    standard_col_order_group = [
-    "feature", "stat", "raw_pvalue", "abs_median_diff", "emd", "med_query", "med_comp", "pvalue_bh"]
+    standard_col_order_group = ["group", "mean_abs_median_diff", "min_raw_pvalue"]
+
+
 
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.output_dir, args.log_file))
