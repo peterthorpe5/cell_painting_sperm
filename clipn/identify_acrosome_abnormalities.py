@@ -50,6 +50,26 @@ def setup_logger(log_file):
     return logger
 
 
+def reorder_and_write(df, filename, col_order, logger, filetype="tsv"):
+    """
+    Ensure output DataFrame has all desired columns, in order.
+    Any missing columns will be filled with NaN.
+
+    Args:
+        df (pd.DataFrame): Data to write.
+        filename (str): Output file path.
+        col_order (list): Desired column order.
+        logger (logging.Logger): Logger for messages.
+        filetype (str): 'tsv' or 'excel'.
+    """
+    df_out = df.reindex(columns=col_order)
+    if filetype == "tsv":
+        df_out.to_csv(filename, sep="\t", index=False)
+    elif filetype == "excel":
+        df_out.to_excel(filename, index=False)
+    logger.debug(f"Wrote {filename} with columns: {col_order}")
+
+
 def load_ungrouped_files(list_file, logger):
     """
     Load and concatenate all well-level feature files listed in a file.
@@ -230,6 +250,10 @@ def main():
     parser.add_argument('--log_file', default="acrosome_vs_dmso.log", help="Log file name")
     args = parser.parse_args()
 
+    standard_col_order = [
+        "feature", "stat", "raw_pvalue", "abs_median_diff", "emd", "med_query", "med_comp", "pvalue_bh"
+    ]
+
     os.makedirs(args.output_dir, exist_ok=True)
     sig_dir = os.path.join(args.output_dir, "significant")
     os.makedirs(sig_dir, exist_ok=True)
@@ -271,8 +295,10 @@ def main():
         all_tsv = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_top_features.tsv")
         all_xlsx = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_top_features.xlsx")
         top_all_stats = all_stats.head(args.top_features).copy()
-        top_all_stats.to_csv(all_tsv, sep="\t", index=False)
-        top_all_stats.to_excel(all_xlsx, index=False)
+
+        reorder_and_write(top_all_stats, all_tsv, standard_col_order, logger, "tsv")
+        reorder_and_write(top_all_stats, all_xlsx, standard_col_order, logger, "excel")
+
         logger.info(f"Saved top feature stats for {cpd_id}: {all_tsv}")
 
         # Significant only
@@ -280,8 +306,10 @@ def main():
         if not sig_stats.empty:
             sig_tsv = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_significant_features.tsv")
             sig_xlsx = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_significant_features.xlsx")
-            sig_stats.to_csv(sig_tsv, sep="\t", index=False)
-            sig_stats.to_excel(sig_xlsx, index=False)
+            reorder_and_write(sig_stats, sig_tsv, standard_col_order, logger, "tsv")
+            reorder_and_write(sig_stats, sig_xlsx, standard_col_order, logger, "excel")
+
+
             logger.info(f"Saved significant features for {cpd_id}: {sig_tsv}")
 
         # Acrosome features
@@ -294,16 +322,21 @@ def main():
             acro_tsv = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_top_features.tsv")
             acro_xlsx = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_top_features.xlsx")
             top_acro_stats = acro_stats.head(args.top_features).copy()
-            top_acro_stats.to_csv(acro_tsv, sep="\t", index=False)
-            top_acro_stats.to_excel(acro_xlsx, index=False)
+            reorder_and_write(top_acro_stats, acro_tsv, standard_col_order, logger, "tsv")
+            reorder_and_write(top_acro_stats, acro_xlsx, standard_col_order, logger, "excel")
+
+
+
             logger.info(f"Saved acrosome feature stats for {cpd_id}: {acro_tsv}")
 
             sig_acro = acro_stats[acro_stats['pvalue_bh'] <= args.fdr_alpha].copy()
             if not sig_acro.empty:
                 sig_acro_tsv = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_features.tsv")
                 sig_acro_xlsx = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_features.xlsx")
-                sig_acro.to_csv(sig_acro_tsv, sep="\t", index=False)
-                sig_acro.to_excel(sig_acro_xlsx, index=False)
+                reorder_and_write(sig_acro, sig_acro_tsv, standard_col_order, logger, "tsv")
+                reorder_and_write(sig_acro, sig_acro_xlsx, standard_col_order, logger, "excel")
+
+
                 logger.info(f"Saved significant acrosome features for {cpd_id}: {sig_acro_tsv}")
 
         # Acrosome group
@@ -313,8 +346,8 @@ def main():
             acro_group_stats = group_feature_stats(all_stats, acro_group, logger)
             acro_grp_tsv = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_group.tsv")
             acro_grp_xlsx = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_group.xlsx")
-            acro_group_stats.to_csv(acro_grp_tsv, sep="\t", index=False)
-            acro_group_stats.to_excel(acro_grp_xlsx, index=False)
+            reorder_and_write(acro_group_stats, acro_grp_tsv, standard_col_order, logger, "tsv")
+            reorder_and_write(acro_group_stats, acro_grp_xlsx, standard_col_order, logger, "excel")
             logger.info(f"Saved acrosome group stats for {cpd_id}: {acro_grp_tsv}")
 
             # Significant only (min_raw_pvalue threshold)
@@ -322,8 +355,8 @@ def main():
             if not sig_grp.empty:
                 sig_grp_tsv = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_group.tsv")
                 sig_grp_xlsx = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_group.xlsx")
-                sig_grp.to_csv(sig_grp_tsv, sep="\t", index=False)
-                sig_grp.to_excel(sig_grp_xlsx, index=False)
+                reorder_and_write(sig_grp, sig_grp_tsv, standard_col_order, logger, "tsv")
+                reorder_and_write(sig_grp, sig_grp_xlsx, standard_col_order, logger, "excel")
                 logger.info(f"Saved significant acrosome group stats for {cpd_id}: {sig_grp_tsv}")
 
     logger.info("Batch comparison complete.")

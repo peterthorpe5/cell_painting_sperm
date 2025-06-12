@@ -269,6 +269,26 @@ def parse_query_ids(query_ids_arg):
     return [x.strip() for x in query_ids_arg.split(',') if x.strip()]
 
 
+def reorder_and_write(df, filename, col_order, logger, filetype="tsv"):
+    """
+    Ensure output DataFrame has all desired columns, in order.
+    Any missing columns will be filled with NaN.
+
+    Args:
+        df (pd.DataFrame): Data to write.
+        filename (str): Output file path.
+        col_order (list): Desired column order.
+        logger (logging.Logger): Logger for messages.
+        filetype (str): 'tsv' or 'excel'.
+    """
+    df_out = df.reindex(columns=col_order)
+    if filetype == "tsv":
+        df_out.to_csv(filename, sep="\t", index=False)
+    elif filetype == "excel":
+        df_out.to_excel(filename, index=False)
+    logger.debug(f"Wrote {filename} with columns: {col_order}")
+
+
 def load_nn_table(nn_file, query_id, nn_per_query=10):
     """
     Load nearest neighbours for a given query from NN table.
@@ -320,6 +340,11 @@ def main():
     parser.add_argument('--log_file', default="feature_attribution.log",
                         help="Log file name")
     args = parser.parse_args()
+
+    standard_col_order = [
+    "feature", "stat", "raw_pvalue", "abs_median_diff", "emd", "med_query", "med_comp", "pvalue_bh"
+]
+
 
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.output_dir, args.log_file))
@@ -375,8 +400,8 @@ def main():
         top_dmso = q_dmso_stats.head(args.top_features).copy()
         out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_features.tsv")
         out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-        top_dmso.to_csv(out_tsv, sep="\t", index=False)
-        top_dmso.to_excel(out_xlsx, index=False)
+        reorder_and_write(top_dmso, out_tsv, standard_col_order, logger, "tsv")
+        reorder_and_write(top_dmso, out_xlsx, standard_col_order, logger, "excel")
         logger.info(f"Saved top features distinguishing {query_id} from DMSO: {top_dmso['feature'].tolist()}")
 
         # Groups (compartments)
@@ -386,8 +411,9 @@ def main():
             top_grp = q_dmso_group_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_groups.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-            top_grp.to_csv(out_tsv, sep="\t", index=False)
-            top_grp.to_excel(out_xlsx, index=False)
+            reorder_and_write(top_grp, out_tsv, standard_col_order_group, logger, "tsv")
+            reorder_and_write(top_grp, out_xlsx, standard_col_order_group, logger, "excel")
+
             logger.info(f"Saved top compartments distinguishing {query_id} from DMSO: {top_grp['group'].tolist()}")
 
         # Nearest neighbours (from NN table)
@@ -412,8 +438,8 @@ def main():
             top_nn = q_nn_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_features.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-            top_nn.to_csv(out_tsv, sep="\t", index=False)
-            top_nn.to_excel(out_xlsx, index=False)
+            reorder_and_write(top_nn, out_tsv, standard_col_order, logger, "tsv")
+            reorder_and_write(top_nn, out_xlsx, standard_col_order, logger, "excel")
             logger.info(f"Saved top features explaining similarity between {query_id} and {nn_id}: {top_nn['feature'].tolist()}")
 
             if group_map:
@@ -422,8 +448,8 @@ def main():
                 top_grp = q_nn_group_stats.head(args.top_features).copy()
                 out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv")
                 out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-                top_grp.to_csv(out_tsv, sep="\t", index=False)
-                top_grp.to_excel(out_xlsx, index=False)
+                reorder_and_write(top_grp, out_tsv, standard_group_col_order, logger, "tsv")
+                reorder_and_write(top_grp, out_xlsx, standard_group_col_order, logger, "excel")
                 logger.info(f"Saved top compartments explaining similarity between {query_id} and {nn_id}: {top_grp['group'].tolist()}")
 
     logger.info("Feature attribution and statistical comparison completed.")
