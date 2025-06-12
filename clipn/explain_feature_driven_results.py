@@ -449,8 +449,8 @@ def main():
                 top_grp = q_nn_group_stats.head(args.top_features).copy()
                 out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv")
                 out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-                reorder_and_write(top_grp, out_tsv, standard_group_col_order, logger, "tsv")
-                reorder_and_write(top_grp, out_xlsx, standard_group_col_order, logger, "excel")
+                reorder_and_write(top_grp, out_tsv, standard_col_order, logger, "tsv")
+                reorder_and_write(top_grp, out_xlsx, standard_col_order, logger, "excel")
                 logger.info(f"Saved top compartments explaining similarity between {query_id} and {nn_id}: {top_grp['group'].tolist()}")
 
     logger.info("Feature attribution and statistical comparison completed.")
