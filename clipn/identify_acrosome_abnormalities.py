@@ -250,9 +250,11 @@ def main():
     parser.add_argument('--log_file', default="acrosome_vs_dmso.log", help="Log file name")
     args = parser.parse_args()
 
-    standard_col_order = [
-        "feature", "stat", "raw_pvalue", "abs_median_diff", "emd", "med_query", "med_comp", "pvalue_bh"
-    ]
+    standard_col_order = ["feature", "stat", "raw_pvalue", "abs_median_diff", 
+                          "emd", "med_query", "med_comp", "pvalue_bh"]
+    standard_col_order_group = ["feature", "stat", "raw_pvalue", "abs_median_diff", 
+                                "emd", "med_query", "med_comp", "pvalue_bh"]
+
 
     os.makedirs(args.output_dir, exist_ok=True)
     sig_dir = os.path.join(args.output_dir, "significant")
