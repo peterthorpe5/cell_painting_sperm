@@ -349,8 +349,9 @@ def main():
             acro_group_stats = group_feature_stats(all_stats, acro_group, logger)
             acro_grp_tsv = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_group.tsv")
             acro_grp_xlsx = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_group.xlsx")
-            reorder_and_write(acro_group_stats, acro_grp_tsv, standard_col_order, logger, "tsv")
-            reorder_and_write(acro_group_stats, acro_grp_xlsx, standard_col_order, logger, "excel")
+            # CORRECT — use group col order
+            reorder_and_write(acro_group_stats, acro_grp_tsv, standard_col_order_group, logger, "tsv")
+            reorder_and_write(acro_group_stats, acro_grp_xlsx, standard_col_order_group, logger, "excel")
             logger.info(f"Saved acrosome group stats for {cpd_id}: {acro_grp_tsv}")
 
             # Significant only (min_raw_pvalue threshold)
@@ -358,9 +359,10 @@ def main():
             if not sig_grp.empty:
                 sig_grp_tsv = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_group.tsv")
                 sig_grp_xlsx = os.path.join(sig_dir, f"{cpd_id}_vs_DMSO_acrosome_significant_group.xlsx")
-                reorder_and_write(sig_grp, sig_grp_tsv, standard_col_order, logger, "tsv")
-                reorder_and_write(sig_grp, sig_grp_xlsx, standard_col_order, logger, "excel")
+                reorder_and_write(sig_grp, sig_grp_tsv, standard_col_order_group, logger, "tsv")
+                reorder_and_write(sig_grp, sig_grp_xlsx, standard_col_order_group, logger, "excel")
                 logger.info(f"Saved significant acrosome group stats for {cpd_id}: {sig_grp_tsv}")
+
 
     logger.info("Batch comparison complete.")
 
