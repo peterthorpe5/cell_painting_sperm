@@ -32,6 +32,8 @@ from statsmodels.stats.multitest import multipletests
 from scipy.stats import mannwhitneyu, ks_2samp
 from collections import defaultdict
 import warnings
+from scipy.stats import mannwhitneyu, ks_2samp, wasserstein_distance
+import numpy as np
 
 
 def setup_logger(log_file):
@@ -160,44 +162,65 @@ def get_wells_for_dmso(df, dmso_label='DMSO'):
     return df[mask]
 
 
+
+
 def compare_distributions(df1, df2, feature_cols, test='mw', logger=None):
     """
-    Compare distributions of each feature between two well sets. Returns stats and p-values.
+    Compare distributions of each feature between two well sets using non-parametric
+    statistical tests and Earth Mover's Distance (EMD/Wasserstein).
 
     Args:
-        df1 (pd.DataFrame): DataFrame for set 1 (e.g., query).
-        df2 (pd.DataFrame): DataFrame for set 2 (e.g., DMSO or NN).
-        feature_cols (list): List of feature columns.
-        test (str): 'mw' for Mann–Whitney U, 'ks' for Kolmogorov–Smirnov.
-        logger (logging.Logger): Logger for messages.
+        df1 (pd.DataFrame): DataFrame for group 1 (e.g., query).
+        df2 (pd.DataFrame): DataFrame for group 2 (e.g., DMSO/NN).
+        feature_cols (list): List of feature column names.
+        logger (logging.Logger): Logger for diagnostic output.
+        test (str): Statistical test to use ('mw' for Mann–Whitney U, 'ks' for Kolmogorov–Smirnov).
 
     Returns:
-        pd.DataFrame: Results with stat, raw_pvalue, abs_median_diff, med_query, med_comp.
+        pd.DataFrame: Results with stat, raw_pvalue, abs_median_diff, emd, med_query, med_comp.
     """
     stats = []
     for feat in feature_cols:
         x1 = df1[feat].dropna()
         x2 = df2[feat].dropna()
         if len(x1) < 2 or len(x2) < 2:
-            stat, p = np.nan, np.nan
-            if logger:
-                logger.debug(f"Not enough data for feature '{feat}' (min 2 per group).")
+            stat, p, emd = np.nan, np.nan, np.nan
+            logger.debug(f"Skipping {feat}: not enough values in one or both groups.")
         else:
-            try:
-                if test == 'mw':
+            # Choose test
+            if test == 'mw':
+                try:
                     stat, p = mannwhitneyu(x1, x2, alternative='two-sided')
-                else:
+                except Exception as e:
+                    logger.warning(f"Mann–Whitney failed for {feat}: {e}")
+                    stat, p = np.nan, np.nan
+            else:
+                try:
                     stat, p = ks_2samp(x1, x2)
+                except Exception as e:
+                    logger.warning(f"KS test failed for {feat}: {e}")
+                    stat, p = np.nan, np.nan
+            # EMD/Wasserstein
+            try:
+                emd = wasserstein_distance(x1, x2)
             except Exception as e:
-                if logger:
-                    logger.warning(f"Stat test failed for feature {feat}: {e}")
-                stat, p = np.nan, np.nan
+                logger.warning(f"EMD failed for {feat}: {e}")
+                emd = np.nan
         med1 = np.median(x1) if len(x1) else np.nan
         med2 = np.median(x2) if len(x2) else np.nan
         abs_diff = np.abs(med1 - med2)
-        stats.append({'feature': feat, 'stat': stat, 'raw_pvalue': p,
-                      'abs_median_diff': abs_diff, 'med_query': med1, 'med_comp': med2})
+        stats.append({
+            'feature': feat,
+            'stat': stat,
+            'raw_pvalue': p,
+            'abs_median_diff': abs_diff,
+            'emd': emd,
+            'med_query': med1,
+            'med_comp': med2
+        })
+    logger.info("Completed comparison for all features with EMD.")
     return pd.DataFrame(stats)
+
 
 
 def group_feature_stats(feat_stats, group_map, logger=None):
