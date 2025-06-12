@@ -222,18 +222,18 @@ def compare_distributions(df1, df2, feature_cols, test='mw', logger=None):
     return pd.DataFrame(stats)
 
 
-
-def group_feature_stats(feat_stats, group_map, logger=None):
+def group_feature_stats(feat_stats, group_map, fdr_alpha=0.05, logger=None):
     """
-    Summarise feature stats by group (mean abs_median_diff and min p-value per group).
+    Summarise per-feature stats by group, including size and FDR counts.
 
     Args:
-        feat_stats (pd.DataFrame): Per-feature stats.
+        feat_stats (pd.DataFrame): Per-feature stats with FDR.
         group_map (dict): Mapping from group to feature list.
-        logger (logging.Logger): Logger for messages.
+        fdr_alpha (float): FDR threshold.
+        logger (logging.Logger): Logger.
 
     Returns:
-        pd.DataFrame: Grouped stats by compartment.
+        pd.DataFrame: Per-group stats.
     """
     grouped = []
     for group, feats in group_map.items():
@@ -242,11 +242,23 @@ def group_feature_stats(feat_stats, group_map, logger=None):
             continue
         abs_diff = group_df['abs_median_diff'].mean()
         min_p = group_df['raw_pvalue'].min()
-        grouped.append({'group': group, 'mean_abs_median_diff': abs_diff,
-                        'min_raw_pvalue': min_p})
+        mean_emd = group_df['emd'].mean() if 'emd' in group_df.columns else np.nan
+        min_fdr = group_df['pvalue_bh'].min() if 'pvalue_bh' in group_df.columns else np.nan
+        n_features = len(group_df)
+        n_sig_fdr = (group_df['pvalue_bh'] <= fdr_alpha).sum() if 'pvalue_bh' in group_df.columns else np.nan
+        grouped.append({
+            'group': group,
+            'mean_abs_median_diff': abs_diff,
+            'min_raw_pvalue': min_p,
+            'mean_emd': mean_emd,
+            'min_pvalue_bh': min_fdr,
+            'n_features_in_group': n_features,
+            'n_features_sig_fdr': n_sig_fdr
+        })
     if logger:
         logger.debug(f"Summarised {len(grouped)} feature groups.")
     return pd.DataFrame(grouped)
+
 
 
 def parse_query_ids(query_ids_arg):
@@ -351,8 +363,15 @@ def main():
     standard_col_order = [
     "feature", "stat", "raw_pvalue", "abs_median_diff", "emd", "med_query", "med_comp", "pvalue_bh"]
 
-    standard_col_order_group = ["group", "mean_abs_median_diff", "min_raw_pvalue"]
 
+    standard_col_order_group = [
+    "group",
+    "mean_abs_median_diff",
+    "min_raw_pvalue",
+    "mean_emd",
+    "min_pvalue_bh",
+    "n_features_sig_fdr",
+    "n_features_in_group"]
 
 
     os.makedirs(args.output_dir, exist_ok=True)
