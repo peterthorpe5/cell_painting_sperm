@@ -364,7 +364,8 @@ def main():
         if "acrosome" in group_map:
             logger.info(f"Summarising group stats for acrosome ({cpd_id}).")
             acro_group = {"acrosome": group_map["acrosome"]}
-            acro_group_stats = group_feature_stats(all_stats, acro_group, logger)
+            acro_group_stats = group_feature_stats(all_stats, acro_group, logger=logger)
+
             acro_grp_tsv = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_group.tsv")
             acro_grp_xlsx = os.path.join(args.output_dir, f"{cpd_id}_vs_DMSO_acrosome_group.xlsx")
             # CORRECT — use group col order
