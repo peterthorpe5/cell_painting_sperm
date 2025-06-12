@@ -281,13 +281,20 @@ def reorder_and_write(df, filename, col_order, logger, filetype="tsv"):
         logger (logging.Logger): Logger for messages.
         filetype (str): 'tsv' or 'excel'.
     """
-    df_out = df.reindex(columns=col_order)
+    # Only include columns that are present, in order. Add missing as NaN.
+    for col in col_order:
+        if col not in df.columns:
+            df[col] = np.nan
+    cols_in_order = [col for col in col_order if col in df.columns]
+    # Append any others at the end
+    remaining = [c for c in df.columns if c not in cols_in_order]
+    df_out = df[cols_in_order + remaining]
     if filetype == "tsv":
         df_out.to_csv(filename, sep="\t", index=False)
     elif filetype == "excel":
         df_out.to_excel(filename, index=False)
-    logger.debug(f"Wrote {filename} with columns: {col_order}")
-
+    logger.debug(f"Wrote {filename} with columns: {df_out.columns.tolist()}")
+    
 
 def load_nn_table(nn_file, query_id, nn_per_query=10):
     """
