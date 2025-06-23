@@ -413,6 +413,9 @@ def main():
             logger.warning(f"No wells found for query {query_id}, skipping.")
             continue
 
+        n_query_wells = query_df.shape[0]
+        n_dmso_wells = dmso_df.shape[0]
+
         # Query vs DMSO
         logger.info(f"Comparing query compound {query_id} to DMSO controls...")
         q_dmso_stats = compare_distributions(query_df, dmso_df, feature_cols, test=args.test, logger=logger)
@@ -424,12 +427,16 @@ def main():
         else:
             q_dmso_stats['pvalue_bh'] = np.nan
 
+        q_dmso_stats['n_query_wells'] = n_query_wells
+        q_dmso_stats['n_dmso_wells'] = n_dmso_wells
+
         q_dmso_stats = q_dmso_stats.sort_values('abs_median_diff', ascending=False)
         top_dmso = q_dmso_stats.head(args.top_features).copy()
         out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_features.tsv")
         out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-        reorder_and_write(top_dmso, out_tsv, standard_col_order, logger, "tsv")
-        reorder_and_write(top_dmso, out_xlsx, standard_col_order, logger, "excel")
+        reorder_and_write(top_dmso, out_tsv, standard_col_order + ["n_query_wells", "n_dmso_wells"], logger, "tsv")
+        reorder_and_write(top_dmso, out_xlsx, standard_col_order + ["n_query_wells", "n_dmso_wells"], logger, "excel")
+
         logger.info(f"Saved top features distinguishing {query_id} from DMSO: {top_dmso['feature'].tolist()}")
 
         # Groups (compartments)
@@ -439,8 +446,11 @@ def main():
             top_grp = q_dmso_group_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_groups.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-            reorder_and_write(top_grp, out_tsv, standard_col_order_group, logger, "tsv")
-            reorder_and_write(top_grp, out_xlsx, standard_col_order_group, logger, "excel")
+            
+            q_dmso_group_stats['n_query_wells'] = n_query_wells
+            q_dmso_group_stats['n_dmso_wells'] = n_dmso_wells
+            reorder_and_write(top_grp, out_tsv, standard_col_order_group + ["n_query_wells", "n_dmso_wells"], logger, "tsv")
+            reorder_and_write(top_grp, out_xlsx, standard_col_order_group + ["n_query_wells", "n_dmso_wells"], logger, "excel")
 
             logger.info(f"Saved top compartments distinguishing {query_id} from DMSO: {top_grp['group'].tolist()}")
 
@@ -466,8 +476,12 @@ def main():
             top_nn = q_nn_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_features.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-            reorder_and_write(top_nn, out_tsv, standard_col_order, logger, "tsv")
-            reorder_and_write(top_nn, out_xlsx, standard_col_order, logger, "excel")
+
+            q_nn_stats['n_query_wells'] = n_query_wells
+            q_nn_stats['n_nn_wells'] = n_nn_wells
+            reorder_and_write(top_nn, out_tsv, standard_col_order + ["n_query_wells", "n_nn_wells"], logger, "tsv")
+            reorder_and_write(top_nn, out_xlsx, standard_col_order + ["n_query_wells", "n_nn_wells"], logger, "excel")
+
             logger.info(f"Saved top features explaining similarity between {query_id} and {nn_id}: {top_nn['feature'].tolist()}")
 
             if group_map:
@@ -476,8 +490,12 @@ def main():
                 top_grp = q_nn_group_stats.head(args.top_features).copy()
                 out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv")
                 out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-                reorder_and_write(top_grp, out_tsv, standard_col_order_group, logger, "tsv")
-                reorder_and_write(top_grp, out_xlsx, standard_col_order_group, logger, "excel")
+
+                q_nn_group_stats['n_query_wells'] = n_query_wells
+                q_nn_group_stats['n_nn_wells'] = n_nn_wells
+                reorder_and_write(top_grp, out_tsv, standard_col_order_group + ["n_query_wells", "n_nn_wells"], logger, "tsv")
+                reorder_and_write(top_grp, out_xlsx, standard_col_order_group + ["n_query_wells", "n_nn_wells"], logger, "excel")
+
                 logger.info(f"Saved top compartments explaining similarity between {query_id} and {nn_id}: {top_grp['group'].tolist()}")
 
     logger.info("Feature attribution and statistical comparison completed.")
