@@ -524,7 +524,7 @@ def main():
     print("Total rows:", df.shape[0])
     print("DMSO rows:", get_wells_for_dmso(df).shape[0])
     print("Files loaded:", df_list['path'].tolist())
-    get_wells_for_dmso(combined).to_csv("all_dmso_rows.tsv", sep="\t", index=False)
+    get_wells_for_dmso(df).to_csv("all_dmso_rows.tsv", sep="\t", index=False)
 
 
 
