@@ -83,6 +83,8 @@ def load_ungrouped_files(list_file):
     dfs = []
     for p in df_list['path']:
         tmp = pd.read_csv(p, sep="\t")
+        # Ensure cpd_type is present
+        tmp = ensure_column(tmp, "cpd_type", "missing")
         dfs.append(tmp)
     # Harmonise columns (intersection)
     common_cols = set(dfs[0].columns)
@@ -91,6 +93,7 @@ def load_ungrouped_files(list_file):
     dfs = [d[list(common_cols)] for d in dfs]
     combined = pd.concat(dfs, ignore_index=True)
     return combined
+
 
 
 def load_groupings(group_file):
@@ -260,6 +263,23 @@ def group_feature_stats(feat_stats, group_map, fdr_alpha=0.05, logger=None):
     return pd.DataFrame(grouped)
 
 
+def ensure_column(df, colname, fill_value="missing"):
+    """
+    Ensure the specified column exists in the DataFrame.
+    If missing, add it with the given fill value.
+
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        colname (str): Column name to ensure.
+        fill_value (Any): Value to fill if column is missing.
+
+    Returns:
+        pd.DataFrame: DataFrame with the column present.
+    """
+    if colname not in df.columns:
+        df[colname] = fill_value
+    return df
+
 
 def parse_query_ids(query_ids_arg):
     """
@@ -404,6 +424,13 @@ def main():
     # Query IDs
     query_ids = parse_query_ids(args.query_ids)
     logger.info(f"Processing {len(query_ids)} query compounds: {query_ids}")
+
+    print("Total rows:", combined.shape[0])
+    print("DMSO rows:", get_wells_for_dmso(combined).shape[0])
+    print("Files loaded:", df_list['path'].tolist())
+    get_wells_for_dmso(combined).to_csv("all_dmso_rows.tsv", sep="\t", index=False)
+
+
 
     for query_id in query_ids:
         logger.info(f"\n=== Analysing query: {query_id} ===")
