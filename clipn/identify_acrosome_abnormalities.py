@@ -77,17 +77,39 @@ def reorder_and_write(df, filename, col_order, logger, filetype="tsv"):
     logger.debug(f"Wrote {filename} with columns: {df_out.columns.tolist()}")
     
 
-def load_ungrouped_files(list_file, logger):
+def ensure_columns(df, required_cols, fill_value="missing"):
     """
-    Load and concatenate all well-level feature files listed in a file.
+    Ensure all columns in required_cols exist in the DataFrame,
+    adding with fill_value if missing.
+
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        required_cols (list): List of required column names.
+        fill_value (Any): Value to fill for missing columns.
+
+    Returns:
+        pd.DataFrame: DataFrame with all required columns.
+    """
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = fill_value
+    return df
+
+def load_ungrouped_files(list_file, logger, required_cols=None):
+    """
+    Load and concatenate all well-level feature files listed in a file,
+    ensuring essential columns are present.
 
     Args:
         list_file (str): Path to dataset list (CSV/TSV) with column 'path'.
         logger (logging.Logger): Logger for messages.
+        required_cols (list): Columns to ensure are present in each file.
 
     Returns:
         pd.DataFrame: Concatenated well-level data.
     """
+    if required_cols is None:
+        required_cols = ["cpd_id", "cpd_type"]
     logger.info(f"Reading file-of-files: {list_file}")
     df_list = pd.read_csv(list_file, sep=None, engine='python')
     if "path" not in df_list.columns:
@@ -97,6 +119,7 @@ def load_ungrouped_files(list_file, logger):
     for path in df_list['path']:
         logger.info(f"Reading well-level data: {path}")
         tmp = pd.read_csv(path, sep="\t")
+        tmp = ensure_columns(tmp, required_cols, fill_value="missing")
         dfs.append(tmp)
     # Harmonise columns (intersection only)
     common_cols = set(dfs[0].columns)
@@ -110,6 +133,7 @@ def load_ungrouped_files(list_file, logger):
     combined = pd.concat(dfs, ignore_index=True)
     logger.info(f"Combined well-level data shape: {combined.shape}")
     return combined
+
 
 
 def infer_acrosome_features(feature_cols, logger):
