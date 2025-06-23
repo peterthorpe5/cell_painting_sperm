@@ -425,13 +425,6 @@ def main():
     query_ids = parse_query_ids(args.query_ids)
     logger.info(f"Processing {len(query_ids)} query compounds: {query_ids}")
 
-    print("Total rows:", combined.shape[0])
-    print("DMSO rows:", get_wells_for_dmso(combined).shape[0])
-    print("Files loaded:", df_list['path'].tolist())
-    get_wells_for_dmso(combined).to_csv("all_dmso_rows.tsv", sep="\t", index=False)
-
-
-
     for query_id in query_ids:
         logger.info(f"\n=== Analysing query: {query_id} ===")
         # Query wells
@@ -527,6 +520,13 @@ def main():
                 logger.info(f"Saved top compartments explaining similarity between {query_id} and {nn_id}: {top_grp['group'].tolist()}")
 
     logger.info("Feature attribution and statistical comparison completed.")
+
+    print("Total rows:", combined.shape[0])
+    print("DMSO rows:", get_wells_for_dmso(combined).shape[0])
+    print("Files loaded:", df_list['path'].tolist())
+    get_wells_for_dmso(combined).to_csv("all_dmso_rows.tsv", sep="\t", index=False)
+
+
 
 
 if __name__ == "__main__":
