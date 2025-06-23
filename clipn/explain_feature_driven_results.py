@@ -463,6 +463,7 @@ def main():
             if nn_df.empty:
                 logger.warning(f"No wells found for NN {nn_id}, skipping.")
                 continue
+            n_nn_wells = nn_df.shape[0]
             logger.info(f"Comparing {query_id} to NN {nn_id}...")
             q_nn_stats = compare_distributions(query_df, nn_df, feature_cols, test=args.test, logger=logger)
             if not q_nn_stats.empty and q_nn_stats['raw_pvalue'].notna().any():
