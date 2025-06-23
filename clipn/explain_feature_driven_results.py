@@ -521,8 +521,8 @@ def main():
 
     logger.info("Feature attribution and statistical comparison completed.")
 
-    print("Total rows:", combined.shape[0])
-    print("DMSO rows:", get_wells_for_dmso(combined).shape[0])
+    print("Total rows:", df.shape[0])
+    print("DMSO rows:", get_wells_for_dmso(df).shape[0])
     print("Files loaded:", df_list['path'].tolist())
     get_wells_for_dmso(combined).to_csv("all_dmso_rows.tsv", sep="\t", index=False)
 
