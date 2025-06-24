@@ -286,8 +286,12 @@ def main():
     parser.add_argument('--log_file', default="acrosome_vs_dmso.log", help="Log file name")
     args = parser.parse_args()
 
-    standard_col_order = ["feature", "stat", "raw_pvalue", "abs_median_diff", 
-                          "emd", "med_query", "med_comp", "pvalue_bh"]
+
+    
+    standard_col_order = ["feature", "stat", "raw_pvalue", "abs_median_diff",
+                         "emd", "med_query", "med_comp", "pvalue_bh",
+                         "n_query_wells", "n_dmso_wells"]
+
 
     standard_col_order_group = [
         "group",
@@ -333,6 +337,11 @@ def main():
         # All features
         logger.info(f"Comparing {cpd_id} to DMSO across all features.")
         all_stats = compare_distributions(query_df, dmso_df, feature_cols, logger)
+        n_query_wells = query_df.shape[0]
+        n_dmso_wells = dmso_df.shape[0]
+        all_stats['n_query_wells'] = n_query_wells
+        all_stats['n_dmso_wells'] = n_dmso_wells
+
         # Always assign pvalue_bh before slicing!
         reject, pvals_bh, _, _ = multipletests(all_stats['raw_pvalue'], method='fdr_bh')
         all_stats['pvalue_bh'] = pvals_bh
@@ -361,6 +370,13 @@ def main():
         if acrosome_feats:
             logger.info(f"Comparing {cpd_id} to DMSO across acrosome features.")
             acro_stats = compare_distributions(query_df, dmso_df, acrosome_feats, logger)
+            n_query_wells = query_df.shape[0]
+            n_dmso_wells = dmso_df.shape[0]
+            acro_stats['n_query_wells'] = n_query_wells
+            acro_stats['n_dmso_wells'] = n_dmso_wells
+
+
+
             reject, pvals_bh, _, _ = multipletests(acro_stats['raw_pvalue'], method='fdr_bh')
             acro_stats['pvalue_bh'] = pvals_bh
             acro_stats = acro_stats.sort_values('abs_median_diff', ascending=False)

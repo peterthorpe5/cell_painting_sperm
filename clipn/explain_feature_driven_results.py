@@ -433,9 +433,6 @@ def main():
             logger.warning(f"No wells found for query {query_id}, skipping.")
             continue
 
-        n_query_wells = query_df.shape[0]
-        n_dmso_wells = dmso_df.shape[0]
-
         # Query vs DMSO
         logger.info(f"Comparing query compound {query_id} to DMSO controls...")
         q_dmso_stats = compare_distributions(query_df, dmso_df, feature_cols, test=args.test, logger=logger)
@@ -447,6 +444,8 @@ def main():
         else:
             q_dmso_stats['pvalue_bh'] = np.nan
 
+        n_query_wells = query_df.shape[0]
+        n_dmso_wells = dmso_df.shape[0]
         q_dmso_stats['n_query_wells'] = n_query_wells
         q_dmso_stats['n_dmso_wells'] = n_dmso_wells
 
@@ -462,13 +461,12 @@ def main():
         # Groups (compartments)
         if group_map:
             q_dmso_group_stats = group_feature_stats(q_dmso_stats, group_map, logger=logger)
+            q_dmso_group_stats['n_query_wells'] = n_query_wells
+            q_dmso_group_stats['n_dmso_wells'] = n_dmso_wells
             q_dmso_group_stats = q_dmso_group_stats.sort_values('mean_abs_median_diff', ascending=False)
             top_grp = q_dmso_group_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_groups.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-            
-            q_dmso_group_stats['n_query_wells'] = n_query_wells
-            q_dmso_group_stats['n_dmso_wells'] = n_dmso_wells
             reorder_and_write(top_grp, out_tsv, standard_col_order_group + ["n_query_wells", "n_dmso_wells"], logger, "tsv")
             reorder_and_write(top_grp, out_xlsx, standard_col_order_group + ["n_query_wells", "n_dmso_wells"], logger, "excel")
 
@@ -483,8 +481,8 @@ def main():
             if nn_df.empty:
                 logger.warning(f"No wells found for NN {nn_id}, skipping.")
                 continue
-            n_nn_wells = nn_df.shape[0]
             logger.info(f"Comparing {query_id} to NN {nn_id}...")
+            n_nn_wells = nn_df.shape[0]
             q_nn_stats = compare_distributions(query_df, nn_df, feature_cols, test=args.test, logger=logger)
             if not q_nn_stats.empty and q_nn_stats['raw_pvalue'].notna().any():
                 _, q_nn_stats['pvalue_bh'], _, _ = multipletests(
@@ -492,14 +490,13 @@ def main():
                 )
             else:
                 q_nn_stats['pvalue_bh'] = np.nan
+            q_nn_stats['n_query_wells'] = n_query_wells
+            q_nn_stats['n_nn_wells'] = n_nn_wells
 
-            q_nn_stats = q_nn_stats.sort_values('abs_median_diff')
+            q_nn_stats = q_nn_stats.sort_values('abs_median_diff', ascending=False)
             top_nn = q_nn_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_features.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-
-            q_nn_stats['n_query_wells'] = n_query_wells
-            q_nn_stats['n_nn_wells'] = n_nn_wells
             reorder_and_write(top_nn, out_tsv, standard_col_order + ["n_query_wells", "n_nn_wells"], logger, "tsv")
             reorder_and_write(top_nn, out_xlsx, standard_col_order + ["n_query_wells", "n_nn_wells"], logger, "excel")
 
@@ -507,16 +504,14 @@ def main():
 
             if group_map:
                 q_nn_group_stats = group_feature_stats(q_nn_stats, group_map, logger=logger)
-                q_nn_group_stats = q_nn_group_stats.sort_values('mean_abs_median_diff')
+                q_nn_group_stats['n_query_wells'] = n_query_wells
+                q_nn_group_stats['n_nn_wells'] = n_nn_wells
+                q_nn_group_stats = q_nn_group_stats.sort_values('mean_abs_median_diff', ascending=False)
                 top_grp = q_nn_group_stats.head(args.top_features).copy()
                 out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv")
                 out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-
-                q_nn_group_stats['n_query_wells'] = n_query_wells
-                q_nn_group_stats['n_nn_wells'] = n_nn_wells
                 reorder_and_write(top_grp, out_tsv, standard_col_order_group + ["n_query_wells", "n_nn_wells"], logger, "tsv")
                 reorder_and_write(top_grp, out_xlsx, standard_col_order_group + ["n_query_wells", "n_nn_wells"], logger, "excel")
-
                 logger.info(f"Saved top compartments explaining similarity between {query_id} and {nn_id}: {top_grp['group'].tolist()}")
 
     logger.info("Feature attribution and statistical comparison completed.")
