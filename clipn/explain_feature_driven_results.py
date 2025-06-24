@@ -449,7 +449,7 @@ def main():
         q_dmso_stats['n_query_wells'] = n_query_wells
         q_dmso_stats['n_dmso_wells'] = n_dmso_wells
 
-        q_dmso_stats = q_dmso_stats.sort_values('abs_median_diff', ascending=False)
+        q_dmso_stats = q_dmso_stats.sort_values('abs_median_diff', ascending=True)
         top_dmso = q_dmso_stats.head(args.top_features).copy()
         out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_features.tsv")
         out_xlsx = out_tsv.replace(".tsv", ".xlsx")
@@ -463,7 +463,7 @@ def main():
             q_dmso_group_stats = group_feature_stats(q_dmso_stats, group_map, logger=logger)
             q_dmso_group_stats['n_query_wells'] = n_query_wells
             q_dmso_group_stats['n_dmso_wells'] = n_dmso_wells
-            q_dmso_group_stats = q_dmso_group_stats.sort_values('mean_abs_median_diff', ascending=False)
+            q_dmso_group_stats = q_dmso_group_stats.sort_values('mean_abs_median_diff', ascending=True)
             top_grp = q_dmso_group_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_groups.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
@@ -493,7 +493,7 @@ def main():
             q_nn_stats['n_query_wells'] = n_query_wells
             q_nn_stats['n_nn_wells'] = n_nn_wells
 
-            q_nn_stats = q_nn_stats.sort_values('abs_median_diff', ascending=False)
+            q_nn_stats = q_nn_stats.sort_values('abs_median_diff', ascending=True)
             top_nn = q_nn_stats.head(args.top_features).copy()
             out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_features.tsv")
             out_xlsx = out_tsv.replace(".tsv", ".xlsx")
@@ -506,7 +506,7 @@ def main():
                 q_nn_group_stats = group_feature_stats(q_nn_stats, group_map, logger=logger)
                 q_nn_group_stats['n_query_wells'] = n_query_wells
                 q_nn_group_stats['n_nn_wells'] = n_nn_wells
-                q_nn_group_stats = q_nn_group_stats.sort_values('mean_abs_median_diff', ascending=False)
+                q_nn_group_stats = q_nn_group_stats.sort_values('mean_abs_median_diff', ascending=True)
                 top_grp = q_nn_group_stats.head(args.top_features).copy()
                 out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv")
                 out_xlsx = out_tsv.replace(".tsv", ".xlsx")
