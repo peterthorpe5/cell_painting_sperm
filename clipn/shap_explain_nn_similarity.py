@@ -110,6 +110,34 @@ def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_
         logger.error(f"Could not generate SHAP plot: {e}")
 
 
+def plot_feature_importance_bar(features, importance, output_file, title, logger):
+    """
+    Plot a horizontal bar plot of feature importances and save as PDF.
+    
+    Args:
+        features (pd.Index or list): Feature names.
+        importance (np.array or list): Importances (e.g. mean abs SHAP).
+        output_file (str): Path to output PDF.
+        title (str): Plot title.
+        logger (logging.Logger): Logger for messages.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(8, 0.5 * len(features) + 2))
+        y = np.arange(len(features))
+        plt.barh(y, importance[::-1], align='center')
+        plt.yticks(y, [f for f in features[::-1]])
+        plt.xlabel("Mean absolute SHAP value")
+        plt.title(title)
+        plt.tight_layout()
+        plt.savefig(output_file)
+        plt.close()
+        logger.info(f"Wrote feature importance bar plot: {output_file}")
+    except Exception as e:
+        logger.error(f"Could not generate bar plot: {e}")
+
+
+
 def run_shap(features, n_top_features, output_dir, query_id, logger, small_sample_threshold=30):
     """
     Fit model (logistic regression for small sample, else random forest), run SHAP, and output summary.
@@ -218,6 +246,23 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
 
         out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
         plot_shap_summary(X, shap_arr, X.columns, out_pdf, logger, n_top_features=n_top_features)
+        # Plot for “most different” (top features)
+        plot_feature_importance_bar(
+            top_features,
+            top_importance,
+            os.path.join(output_dir, f"{query_id}_top_shap_features_bar.pdf"),
+            title=f"{query_id}: Features Driving Most Difference",
+            logger=logger,
+        )
+
+        # Plot for “most similar” (lowest features)
+        plot_feature_importance_bar(
+            lowest_features,
+            lowest_importance,
+            os.path.join(output_dir, f"{query_id}_most_similar_features_bar.pdf"),
+            title=f"{query_id}: Features Driving Most Similarity",
+            logger=logger,)
+
     except Exception as e:
         logger.error(f"Feature extraction, TSV writing, or plotting failed: {e}")
         logger.error(traceback.format_exc())
