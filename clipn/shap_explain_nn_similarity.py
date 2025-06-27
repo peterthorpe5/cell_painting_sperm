@@ -75,37 +75,26 @@ def setup_logger(log_file):
     logger.addHandler(sh)
     return logger
 
+
 def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_features=10):
     """
     Generate a SHAP summary plot and save to output_file. Handles binary classification.
     """
     try:
-        # If binary, shap_values is a list of arrays, pick the 'query' class (label 1)
-        if isinstance(shap_values, list):
-            if len(shap_values) == 2:
-                shap_vals_to_plot = shap_values[1]
-            else:
-                shap_vals_to_plot = shap_values[0]
-        else:
-            shap_vals_to_plot = shap_values
-
-        # Check shape
-        if shap_vals_to_plot.shape != X.shape:
-            logger.error(f"Could not generate SHAP plot: The shape of the shap_values matrix ({shap_vals_to_plot.shape}) does not match the shape of the provided data matrix ({X.shape}).")
+        shap_array = np.asarray(shap_values)
+        shap_array = np.squeeze(shap_array)
+        if shap_array.ndim != 2:
+            logger.error(f"SHAP array shape is not 2D after squeeze: {shap_array.shape}")
             return
-
         plt.figure(figsize=(10, 6))
-        if isinstance(shap_values, list):
-            shap_vals_to_plot = shap_values[class_index]
-        else:
-            shap_vals_to_plot = shap_values  # For rare edge case
-        shap.summary_plot(shap_vals_to_plot, X.values, feature_names=feature_names, show=False, max_display=n_top_features, plot_type="bar")
+        shap.summary_plot(shap_array, X.values, feature_names=feature_names, show=False, max_display=n_top_features, plot_type="bar")
         plt.tight_layout()
         plt.savefig(output_file)
         plt.close()
         logger.info(f"Wrote SHAP summary plot: {output_file}")
     except Exception as e:
         logger.error(f"Could not generate SHAP plot: {e}")
+
 
 
 def run_shap(features, n_top_features, output_dir, query_id, logger, small_sample_threshold=30):
@@ -192,31 +181,7 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
 
 
     out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
-    try:
-        import matplotlib.pyplot as plt
-        # Convert to 2D numpy array if not already
-        # painful bug here!!!!!!
-        if isinstance(shap_values, list):
-            shap_array = np.asarray(shap_values[1])  # For binary RF
-        else:
-            shap_array = np.asarray(shap_values)
-        # Squeeze to 2D: (n_samples, n_features)
-        shap_array = np.atleast_2d(shap_array)
-        if shap_array.ndim > 2:
-            # Sometimes shape is (n_samples, n_features, 1) or (n_samples, n_features, n_classes)
-            shap_array = shap_array.squeeze()
-            # After squeeze, still not 2D?
-            if shap_array.ndim != 2:
-                raise ValueError(f"SHAP values shape {shap_array.shape} is not 2D after squeeze.")
-        plt.figure(figsize=(10, 6))
-        shap.summary_plot(shap_array, X.values, feature_names=X.columns, show=False, max_display=n_top_features)
-        plt.tight_layout()
-        plt.savefig(out_pdf)
-        plt.close()
-        logger.info(f"Wrote SHAP summary plot: {out_pdf}")
-    except Exception as e:
-        logger.error(f"Could not generate SHAP plot: {e}")
-
+    plot_shap_summary(X, shap_values, X.columns, out_pdf, logger, n_top_features=n_top_features)
 
 
 def load_feature_files(list_file, logger):
