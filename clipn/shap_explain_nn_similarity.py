@@ -92,80 +92,69 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
         n_top_features (int): Number of top features to output.
         output_dir (str): Output directory.
         query_id (str): Query compound ID.
-        logger (logging.Logger): Logger object.
+        logger (logging.Logger): Logger for messages.
 
     Outputs:
         - TSV of top SHAP features.
-        - PDF SHAP summary plot.
+        - PDF SHAP summary plot (if possible).
     """
+    # Exclude non-feature columns
     non_feature_cols = ['cpd_id', 'target', 'Dataset', 'Library', 'Plate_Metadata', 'Well_Metadata']
-    feature_cols = [c for c in features.columns if c not in non_feature_cols and features[c].dtype in [np.float32, np.float64, np.int64, np.int32]]
-
-    logger.info(f"Number of feature columns available for SHAP: {len(feature_cols)}")
-    logger.debug(f"Feature columns: {feature_cols}")
-
-    X = features[feature_cols]
+    X = features[[c for c in features.columns if c not in non_feature_cols and features[c].dtype in [np.float32, np.float64, np.int64, np.int32]]]
     y = features['target']
+
     logger.info(f"Shape of X (features): {X.shape}")
-    logger.info(f"Value counts for y (target):\n{y.value_counts(dropna=False)}")
+    logger.info(f"Value counts for y (target):\n{y.value_counts()}")
 
     if X.shape[1] == 0:
-        logger.error("No feature columns detected for SHAP analysis. Exiting.")
-        raise ValueError("No feature columns detected for SHAP analysis.")
+        logger.error("No feature columns detected for SHAP analysis.")
+        return
 
-    if len(np.unique(y)) != 2:
-        logger.error(f"Target variable y must have exactly 2 classes (query vs NN). Found: {np.unique(y)}")
-        raise ValueError("Target variable y must have exactly 2 classes.")
+    if y.value_counts().min() < 2:
+        logger.warning(f"Very few samples in one class (target):\n{y.value_counts()}")
+        logger.warning("SHAP results may be unstable. At least a few query and NN wells are recommended.")
 
-    try:
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(X, y)
-        logger.info("RandomForestClassifier model fit successfully.")
-    except Exception as e:
-        logger.error(f"RandomForestClassifier fit failed: {e}")
-        raise
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    logger.info("RandomForestClassifier model fit successfully.")
 
-    try:
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X)
-        logger.info("SHAP values computed successfully.")
-    except Exception as e:
-        logger.error(f"SHAP value computation failed: {e}")
-        raise
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)
+    logger.info("SHAP values computed successfully.")
 
-    # SHAP values for 'query' class (label 1)
-    shap_vals_query = shap_values[1]
+    # Use the correct class index depending on how scikit-learn encoded it
+    class_index = 1 if len(shap_values) > 1 else 0
+    shap_vals_query = shap_values[class_index]
+
     feature_importance = np.abs(shap_vals_query).mean(axis=0)
-    n_nonzero = (feature_importance > 0).sum()
-    logger.info(f"Number of features with nonzero mean_abs_shap: {n_nonzero}")
-
     top_idx = np.argsort(feature_importance)[::-1][:n_top_features]
     top_features = X.columns[top_idx]
     top_importance = feature_importance[top_idx]
 
-    logger.info(f"Top {n_top_features} features (by mean_abs_shap): {top_features.tolist()}")
+    logger.info(f"Number of features with nonzero mean_abs_shap: {(feature_importance > 0).sum()}")
+    logger.info(f"Top {n_top_features} features (by mean_abs_shap): {list(top_features)}")
+
+    # Write TSV
     out_tsv = os.path.join(output_dir, f"{query_id}_top_shap_features.tsv")
     pd.DataFrame({'feature': top_features, 'mean_abs_shap': top_importance}).to_csv(out_tsv, sep="\t", index=False)
     logger.info(f"Wrote top SHAP features TSV: {out_tsv}")
 
-    # Optionally: also output all features, sorted
-    all_out_tsv = os.path.join(output_dir, f"{query_id}_all_shap_features.tsv")
-    df_all = pd.DataFrame({'feature': X.columns, 'mean_abs_shap': feature_importance})
-    df_all = df_all.sort_values('mean_abs_shap', ascending=False)
-    df_all.to_csv(all_out_tsv, sep="\t", index=False)
-    logger.info(f"Wrote all SHAP features TSV: {all_out_tsv}")
-
-    # Plot
-    plt.figure(figsize=(10, 6))
+    # SHAP summary plot: only if more than one positive sample
+    out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
     try:
-        shap.summary_plot(shap_vals_query, X, feature_names=X.columns, show=False, max_display=n_top_features)
-        plt.tight_layout()
-        out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
-        plt.savefig(out_pdf)
-        plt.close()
-        logger.info(f"Wrote SHAP summary plot PDF: {out_pdf}")
+        if y.value_counts().min() > 1:
+            plt.figure(figsize=(10, 6))
+            shap.summary_plot(shap_vals_query, X, feature_names=X.columns, show=False, max_display=n_top_features)
+            plt.tight_layout()
+            plt.savefig(out_pdf)
+            plt.close()
+            logger.info(f"Wrote SHAP summary plot: {out_pdf}")
+        else:
+            logger.warning("Skipping SHAP summary plot: too few samples in at least one class.")
     except Exception as e:
-        logger.error(f"Failed to generate SHAP summary plot: {e}")
+        logger.error(f"Could not generate SHAP plot: {e}")
+
+
 
 def load_feature_files(list_file, logger):
     """
@@ -289,6 +278,8 @@ def main():
 
     query_ids = parse_query_ids(args.query_id)
     logger.info(f"Running SHAP analysis for {len(query_ids)} query compound(s): {query_ids}")
+    logger.info("SHAP (SHapley Additive exPlanations) quantifies each feature's contribution to the model's classification, with higher mean absolute SHAP values indicating features most responsible for distinguishing the query compound from its nearest neighbours.")
+
 
     for query_id in query_ids:
         logger.info(f"===== Analysing query: {query_id} =====")
