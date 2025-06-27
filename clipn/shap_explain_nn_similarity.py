@@ -201,6 +201,7 @@ def load_feature_files(list_file, logger):
     logger.info(f"Loaded single feature file: {list_file}, shape: {df.shape}")
     return df
 
+
 def load_data(features_file, nn_file, query_id, n_neighbors, logger):
     """
     Load well-level data and subset wells for the query and its N nearest neighbours.
@@ -210,32 +211,45 @@ def load_data(features_file, nn_file, query_id, n_neighbors, logger):
         nn_file (str): Path to nearest neighbours file (TSV).
         query_id (str): Query compound ID.
         n_neighbors (int): Number of neighbours to use.
-        logger (logging.Logger): Logger.
+        logger (logging.Logger): Logger for messages.
 
     Returns:
         pd.DataFrame: Feature data for query and NNs, with 'target' column.
     """
-    features = load_feature_files(features_file, logger)
+    features = load_feature_files(features_file)
     logger.info(f"Input features file shape: {features.shape}")
+
     nn = pd.read_csv(nn_file, sep="\t")
     logger.info(f"NN table shape: {nn.shape}")
+    logger.info(f"NN table columns: {nn.columns.tolist()}")
 
-    neighbours = nn.loc[nn['query_id'].astype(str) == str(query_id), 'neighbour_id'].astype(str).unique()
-    logger.info(f"Found {len(neighbours)} neighbours for query {query_id}: {neighbours}")
+    # Accept either 'query_id' or 'cpd_id' as the query column
+    query_col = None
+    for candidate in ['query_id', 'cpd_id']:
+        if candidate in nn.columns:
+            query_col = candidate
+            break
+    if not query_col:
+        logger.error(f"No suitable query column found in NN table (expected 'query_id' or 'cpd_id'). Columns are: {nn.columns.tolist()}")
+        raise ValueError("Nearest neighbour file must have a 'query_id' or 'cpd_id' column.")
+
+    neighbours = nn.loc[nn[query_col].astype(str) == str(query_id), 'neighbour_id'].astype(str).unique()
+    logger.info(f"Found {len(neighbours)} neighbours for query {query_id} using column '{query_col}': {neighbours}")
 
     if len(neighbours) == 0:
-        logger.error(f"No neighbours found for query {query_id} in {nn_file}")
-        raise ValueError(f"No neighbours found for query {query_id} in {nn_file}")
+        logger.error(f"No neighbours found for query {query_id} in {nn_file} (using column '{query_col}')")
+        raise ValueError(f"No neighbours found for query {query_id} in {nn_file} (using column '{query_col}')")
+
     neighbours = neighbours[:n_neighbors]
     ids_of_interest = [query_id] + list(neighbours)
 
-    features_subset = features[features['cpd_id'].astype(str).isin(ids_of_interest)].copy()
-    logger.info(f"Subset features shape (query + NNs): {features_subset.shape}")
+    # Subset wells for query and NNs
+    features = features[features['cpd_id'].astype(str).isin(ids_of_interest)].copy()
+    features['target'] = (features['cpd_id'].astype(str) == query_id).astype(int)
+    logger.info(f"Subset feature dataframe shape: {features.shape}")
+    logger.info(f"Query wells: {features[features['target'] == 1].shape[0]}; NN wells: {features[features['target'] == 0].shape[0]}")
+    return features
 
-    features_subset['target'] = (features_subset['cpd_id'].astype(str) == query_id).astype(int)
-    logger.info(f"Target class distribution in subset:\n{features_subset['target'].value_counts(dropna=False)}")
-
-    return features_subset
 
 def parse_query_ids(query_id_arg):
     """
