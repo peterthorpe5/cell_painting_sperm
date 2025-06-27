@@ -123,12 +123,10 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         small_sample_threshold (int): Use logistic regression if n_samples < this.
 
     Outputs:
-    - Top N SHAP features per query (most different, TSV).
-    - N features with lowest mean absolute SHAP (most similar, TSV).
-    - SHAP summary plot per query (PDF).
-
+        - Top N SHAP features per query (most different, TSV).
+        - N features with lowest mean absolute SHAP (most similar, TSV).
+        - SHAP summary plot per query (PDF).
     """
-
     non_feature_cols = ['cpd_id', 'target', 'Dataset', 'Library', 'Plate_Metadata', 'Well_Metadata']
     X = features[[c for c in features.columns if c not in non_feature_cols and features[c].dtype in [np.float32, np.float64, np.int64, np.int32]]]
     y = features['target']
@@ -147,56 +145,83 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
     logger.info(f"{(X.var(axis=0) > 0).sum()} features have variance > 0 in this batch")
     logger.info("Variance of features (top 20):\n" + str(X.var(axis=0).sort_values(ascending=False).head(20)))
 
-    if X.shape[0] < small_sample_threshold:
-        logger.info(f"Sample size ({X.shape[0]}) < {small_sample_threshold}. Using logistic regression.")
-        model = LogisticRegression(max_iter=1000, random_state=42)
-        model.fit(X, y)
-        logger.info("LogisticRegression model fit successfully.")
-        explainer = shap.Explainer(model, X)
-        shap_values = explainer(X).values
-    else:
-        logger.info(f"Sample size ({X.shape[0]}) >= {small_sample_threshold}. Using random forest.")
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(X, y)
-        logger.info("RandomForestClassifier model fit successfully.")
-        explainer = shap.TreeExplainer(model)
-        shap_values_rf = explainer.shap_values(X)
-        # Handle SHAP output for binary classification
-        if isinstance(shap_values_rf, list):
-            # Select class 1 (query wells)
-            shap_values = shap_values_rf[1]
-        else:
-            shap_values = shap_values_rf  # Already 2D (n_samples, n_features)
-
-    logger.info("SHAP values computed successfully.")
-
-    feature_importance = np.abs(shap_values).mean(axis=0)
-    top_idx = np.argsort(feature_importance)[::-1][:n_top_features]
-    top_features = X.columns[top_idx]
-    top_importance = feature_importance[top_idx]
-
-    logger.info(f"Number of features with nonzero mean_abs_shap: {(feature_importance > 0).sum()}")
-    logger.info(f"Top {n_top_features} features (by mean_abs_shap): {list(top_features)}")
-
-    # Write TSV (always n_top_features rows)
-    out_tsv = os.path.join(output_dir, f"{query_id}_top_shap_features_driving_difference.tsv")
-    pd.DataFrame({'feature': top_features, 'mean_abs_shap': top_importance}).to_csv(out_tsv, sep="\t", index=False)
-    logger.info(f"Wrote top SHAP features TSV: {out_tsv}")
-
-    # Also output the N features with lowest mean absolute SHAP (i.e., most similar between query and NNs)
-    lowest_idx = np.argsort(feature_importance)[:n_top_features]
-    lowest_features = X.columns[lowest_idx]
-    lowest_importance = feature_importance[lowest_idx]
-
-    out_tsv_sim = os.path.join(output_dir, f"{query_id}_most_similar_features.tsv")
-    pd.DataFrame({'feature': lowest_features, 'mean_abs_shap': lowest_importance}).to_csv(out_tsv_sim, sep="\t", index=False)
-    logger.info(f"Wrote most similar features TSV: {out_tsv_sim}")
-    out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
     try:
-        plot_shap_summary(X, shap_values, X.columns, out_pdf, logger, n_top_features=n_top_features)
+        if X.shape[0] < small_sample_threshold:
+            logger.info(f"Sample size ({X.shape[0]}) < {small_sample_threshold}. Using logistic regression.")
+            model = LogisticRegression(max_iter=1000, random_state=42)
+            model.fit(X, y)
+            logger.info("LogisticRegression model fit successfully.")
+            explainer = shap.Explainer(model, X)
+            shap_values = explainer(X).values
+        else:
+            logger.info(f"Sample size ({X.shape[0]}) >= {small_sample_threshold}. Using random forest.")
+            model = RandomForestClassifier(n_estimators=100, random_state=42)
+            model.fit(X, y)
+            logger.info("RandomForestClassifier model fit successfully.")
+            explainer = shap.TreeExplainer(model)
+            shap_values_rf = explainer.shap_values(X)
+            # Handle SHAP output for binary classification
+            if isinstance(shap_values_rf, list):
+                shap_values = shap_values_rf[1]
+            else:
+                shap_values = shap_values_rf  # Already 2D (n_samples, n_features)
+        logger.info("SHAP values computed successfully.")
     except Exception as e:
-        logger.error(f"Plotting failed for {query_id}, but results will continue: {e}")
+        logger.error(f"SHAP model/explainer failed: {e}")
+        logger.error(traceback.format_exc())
+        return  # Do not proceed if SHAP fails
 
+    try:
+        feature_importance = np.abs(shap_values).mean(axis=0)
+        top_idx = np.argsort(feature_importance)[::-1][:n_top_features]
+        top_features = X.columns[top_idx]
+        top_importance = feature_importance[top_idx]
+
+        lowest_idx = np.argsort(feature_importance)[:n_top_features]
+        lowest_features = X.columns[lowest_idx]
+        lowest_importance = feature_importance[lowest_idx]
+
+        logger.info(f"Number of features with nonzero mean_abs_shap: {(feature_importance > 0).sum()}")
+        logger.info(f"Top {n_top_features} features (by mean_abs_shap): {list(top_features)}")
+
+        # Output TSVs (these will always be written, even if plotting fails)
+        out_tsv = os.path.join(output_dir, f"{query_id}_top_shap_features_driving_difference.tsv")
+        pd.DataFrame({'feature': top_features, 'mean_abs_shap': top_importance}).to_csv(out_tsv, sep="\t", index=False)
+        logger.info(f"Wrote top SHAP features TSV: {out_tsv}")
+
+        out_tsv_sim = os.path.join(output_dir, f"{query_id}_most_similar_features.tsv")
+        pd.DataFrame({'feature': lowest_features, 'mean_abs_shap': lowest_importance}).to_csv(out_tsv_sim, sep="\t", index=False)
+        logger.info(f"Wrote most similar features TSV: {out_tsv_sim}")
+
+        # Robust SHAP plotting
+        out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
+        try:
+            if isinstance(shap_values, list):
+                if len(shap_values) == 2:
+                    shap_array = np.asarray(shap_values[1])
+                else:
+                    shap_array = np.asarray(shap_values[0])
+            else:
+                shap_array = np.asarray(shap_values)
+            shap_array = np.squeeze(shap_array)
+            # Attempt to flatten to 2D if needed
+            if shap_array.ndim > 2:
+                logger.warning(f"SHAP array has {shap_array.ndim} dimensions, shape: {shap_array.shape}. Attempting to reshape to 2D.")
+                shap_array = shap_array.reshape(shap_array.shape[0], -1)
+            if shap_array.ndim != 2 or shap_array.shape[1] != X.shape[1]:
+                logger.error(f"SHAP array shape after squeeze/reshape: {shap_array.shape}, feature matrix: {X.shape}. Skipping plot.")
+            else:
+                plot_shap_summary(X, shap_array, X.columns, out_pdf, logger, n_top_features=n_top_features)
+        except Exception as e:
+            logger.error(f"Could not process/plot SHAP values for {query_id}: {e}")
+            logger.error(traceback.format_exc())
+    except Exception as e:
+        logger.error(f"Feature extraction or TSV writing failed: {e}")
+        logger.error(traceback.format_exc())
+        # But keep going to next query
+
+
+ 
 
 def load_feature_files(list_file, logger):
     """
