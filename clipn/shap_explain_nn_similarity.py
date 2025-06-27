@@ -173,35 +173,27 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
     try:
         # Always flatten and check shape before any feature ranking or plotting
         # A wole load of PAINFUL bug fixing. 
+        # --- handling for 2D SHAP values ---
         shap_arr = np.asarray(shap_values)
         shap_arr = np.squeeze(shap_arr)
-
-        # Handle (N, 2 * n_features) -- "flattened" class output (most common)
-        if shap_arr.ndim == 2 and shap_arr.shape[1] == 2 * X.shape[1]:
-            logger.warning(
-                f"SHAP array shape ({shap_arr.shape}) is double the feature count; splitting to select class 1."
-            )
-            shap_arr = shap_arr[:, X.shape[1]:]
-
-        # Handle (N, 2, n_features) -- "raw" class-by-feature
-        if shap_arr.ndim == 3 and shap_arr.shape[1] == 2 and shap_arr.shape[2] == X.shape[1]:
-            logger.warning(
-                f"SHAP array shape ({shap_arr.shape}) is (N, 2, n_features); using class 1 (index 1)."
-            )
-            shap_arr = shap_arr[:, 1, :]
-
-        # Fallback flatten if still >2D
-        if shap_arr.ndim > 2:
-            logger.warning(
-                f"SHAP array shape ({shap_arr.shape}) is still >2D after class handling; flattening last two dimensions."
-            )
-            shap_arr = shap_arr.reshape(shap_arr.shape[0], -1)
-
+        # If shap_arr is a list (shouldn't be here, but just in case)
+        if isinstance(shap_arr, list):
+            if len(shap_arr) == 2:  # Binary
+                shap_arr = np.asarray(shap_arr[1])  # Use class 1
+            else:
+                shap_arr = np.asarray(shap_arr[0])  # Fallback
+        # If we have 3D (n_samples, n_features, 2), select class 1
+        if shap_arr.ndim == 3 and shap_arr.shape[2] == 2:
+            logger.warning(f"SHAP array shape {shap_arr.shape} is 3D; selecting class 1 along last axis.")
+            shap_arr = shap_arr[:, :, 1]
+        # Now should be (n_samples, n_features)
         if shap_arr.ndim != 2 or shap_arr.shape[1] != X.shape[1]:
             logger.error(
-                f"SHAP array shape is not 2D and feature-matching after all handling: {shap_arr.shape}, feature matrix: {X.shape}. Skipping feature ranking and plot."
+                f"SHAP array shape after robust handling: {shap_arr.shape}, feature matrix: {X.shape}. "
+                "Skipping feature ranking and plot."
             )
             return
+
 
 
         feature_importance = np.abs(shap_arr).mean(axis=0)
