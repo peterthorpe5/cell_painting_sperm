@@ -25,7 +25,14 @@ Example usage:
         --n_neighbors 5 \
         --n_top_features 10
 
-Author: Your Name, 2024
+--n_neighbors 5
+For each query compound, the script collects the feature data for that compound plus its 5 nearest neighbours (i.e. a total of 6 sets of well data: 1 query + 5 NNs, but if you have multiple wells per compound, all wells are included for each compound).
+
+--n_top_features 10
+It then uses a Random Forest model and SHAP to rank all features by their mean absolute SHAP value—i.e., how much each feature contributes to distinguishing the query compound from its NNs.
+The output is the top 10 features (with the highest mean absolute SHAP values) that most strongly separate the query from its neighbours.
+        
+
 """
 
 import os
@@ -35,22 +42,6 @@ import numpy as np
 import shap
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from sklearn.ensemble import RandomForestClassifier
-import logging
-
-#!/usr/bin/env python3
-"""
-SHAP-based Feature Attribution for Cell Painting Nearest Neighbour Similarity
-
-[...as before...]
-"""
-
-import os
-import argparse
-import pandas as pd
-import numpy as np
-import shap
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 import logging
@@ -83,6 +74,34 @@ def setup_logger(log_file):
     logger.addHandler(sh)
     return logger
 
+def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_features=10):
+    """
+    Generate a SHAP summary plot and save to output_file. Handles binary classification.
+    """
+    try:
+        # If binary, shap_values is a list of arrays, pick the 'query' class (label 1)
+        if isinstance(shap_values, list):
+            if len(shap_values) == 2:
+                shap_vals_to_plot = shap_values[1]
+            else:
+                shap_vals_to_plot = shap_values[0]
+        else:
+            shap_vals_to_plot = shap_values
+
+        # Check shape
+        if shap_vals_to_plot.shape != X.shape:
+            logger.error(f"Could not generate SHAP plot: The shape of the shap_values matrix ({shap_vals_to_plot.shape}) does not match the shape of the provided data matrix ({X.shape}).")
+            return
+
+        plt.figure(figsize=(10, 6))
+        shap.summary_plot(shap_vals_to_plot, X, feature_names=feature_names, show=False, max_display=n_top_features, plot_type="bar")
+        plt.tight_layout()
+        plt.savefig(output_file)
+        plt.close()
+        logger.info(f"Wrote SHAP summary plot: {output_file}")
+    except Exception as e:
+        logger.error(f"Could not generate SHAP plot: {e}")
+
 def run_shap(features, n_top_features, output_dir, query_id, logger):
     """
     Fit model, run SHAP, and output summary.
@@ -98,7 +117,6 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
         - TSV of top SHAP features.
         - PDF SHAP summary plot (if possible).
     """
-    # Exclude non-feature columns
     non_feature_cols = ['cpd_id', 'target', 'Dataset', 'Library', 'Plate_Metadata', 'Well_Metadata']
     X = features[[c for c in features.columns if c not in non_feature_cols and features[c].dtype in [np.float32, np.float64, np.int64, np.int32]]]
     y = features['target']
@@ -122,11 +140,12 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
     shap_values = explainer.shap_values(X)
     logger.info("SHAP values computed successfully.")
 
-    # Use the correct class index depending on how scikit-learn encoded it
-    class_index = 1 if len(shap_values) > 1 else 0
+    # Use the correct class index for binary classification
+    class_index = 1 if isinstance(shap_values, list) and len(shap_values) > 1 else 0
     shap_vals_query = shap_values[class_index]
 
     feature_importance = np.abs(shap_vals_query).mean(axis=0)
+    # Always output the top N features (even if all are zero)
     top_idx = np.argsort(feature_importance)[::-1][:n_top_features]
     top_features = X.columns[top_idx]
     top_importance = feature_importance[top_idx]
@@ -134,27 +153,14 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
     logger.info(f"Number of features with nonzero mean_abs_shap: {(feature_importance > 0).sum()}")
     logger.info(f"Top {n_top_features} features (by mean_abs_shap): {list(top_features)}")
 
-    # Write TSV
+    # Write TSV (always n_top_features rows)
     out_tsv = os.path.join(output_dir, f"{query_id}_top_shap_features.tsv")
     pd.DataFrame({'feature': top_features, 'mean_abs_shap': top_importance}).to_csv(out_tsv, sep="\t", index=False)
     logger.info(f"Wrote top SHAP features TSV: {out_tsv}")
 
-    # SHAP summary plot: only if more than one positive sample
+    # SHAP summary plot
     out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
-    try:
-        if y.value_counts().min() > 1:
-            plt.figure(figsize=(10, 6))
-            shap.summary_plot(shap_vals_query, X, feature_names=X.columns, show=False, max_display=n_top_features)
-            plt.tight_layout()
-            plt.savefig(out_pdf)
-            plt.close()
-            logger.info(f"Wrote SHAP summary plot: {out_pdf}")
-        else:
-            logger.warning("Skipping SHAP summary plot: too few samples in at least one class.")
-    except Exception as e:
-        logger.error(f"Could not generate SHAP plot: {e}")
-
-
+    plot_shap_summary(X, shap_values, X.columns, out_pdf, logger, n_top_features=n_top_features)
 
 def load_feature_files(list_file, logger):
     """
@@ -190,7 +196,6 @@ def load_feature_files(list_file, logger):
     logger.info(f"Loaded single feature file: {list_file}, shape: {df.shape}")
     return df
 
-
 def load_data(features_file, nn_file, query_id, n_neighbors, logger):
     """
     Load well-level data and subset wells for the query and its N nearest neighbours.
@@ -212,7 +217,6 @@ def load_data(features_file, nn_file, query_id, n_neighbors, logger):
     logger.info(f"NN table shape: {nn.shape}")
     logger.info(f"NN table columns: {nn.columns.tolist()}")
 
-    # Accept either 'query_id' or 'cpd_id' as the query column
     query_col = None
     for candidate in ['query_id', 'cpd_id']:
         if candidate in nn.columns:
@@ -232,13 +236,11 @@ def load_data(features_file, nn_file, query_id, n_neighbors, logger):
     neighbours = neighbours[:n_neighbors]
     ids_of_interest = [query_id] + list(neighbours)
 
-    # Subset wells for query and NNs
     features = features[features['cpd_id'].astype(str).isin(ids_of_interest)].copy()
     features['target'] = (features['cpd_id'].astype(str) == query_id).astype(int)
     logger.info(f"Subset feature dataframe shape: {features.shape}")
     logger.info(f"Query wells: {features[features['target'] == 1].shape[0]}; NN wells: {features[features['target'] == 0].shape[0]}")
     return features
-
 
 def parse_query_ids(query_id_arg):
     """
@@ -280,7 +282,6 @@ def main():
     logger.info(f"Running SHAP analysis for {len(query_ids)} query compound(s): {query_ids}")
     logger.info("SHAP (SHapley Additive exPlanations) quantifies each feature's contribution to the model's classification, with higher mean absolute SHAP values indicating features most responsible for distinguishing the query compound from its nearest neighbours.")
 
-
     for query_id in query_ids:
         logger.info(f"===== Analysing query: {query_id} =====")
         try:
@@ -292,4 +293,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
