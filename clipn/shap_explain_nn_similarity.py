@@ -44,6 +44,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 import logging
 
 def setup_logger(log_file):
@@ -94,6 +95,10 @@ def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_
             return
 
         plt.figure(figsize=(10, 6))
+        if isinstance(shap_values, list):
+            shap_vals_to_plot = shap_values[class_index]
+        else:
+            shap_vals_to_plot = shap_values  # For rare edge case
         shap.summary_plot(shap_vals_to_plot, X, feature_names=feature_names, show=False, max_display=n_top_features, plot_type="bar")
         plt.tight_layout()
         plt.savefig(output_file)
@@ -102,9 +107,10 @@ def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_
     except Exception as e:
         logger.error(f"Could not generate SHAP plot: {e}")
 
-def run_shap(features, n_top_features, output_dir, query_id, logger):
+
+def run_shap(features, n_top_features, output_dir, query_id, logger, small_sample_threshold=30):
     """
-    Fit model, run SHAP, and output summary.
+    Fit model (logistic regression for small sample, else random forest), run SHAP, and output summary.
 
     Args:
         features (pd.DataFrame): Data for query and NNs, with 'target' column.
@@ -112,7 +118,7 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
         output_dir (str): Output directory.
         query_id (str): Query compound ID.
         logger (logging.Logger): Logger for messages.
-
+        small_sample_threshold (int): Use logistic regression if n_samples < this.
     Outputs:
         - TSV of top SHAP features.
         - PDF SHAP summary plot (if possible).
@@ -132,20 +138,34 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
         logger.warning(f"Very few samples in one class (target):\n{y.value_counts()}")
         logger.warning("SHAP results may be unstable. At least a few query and NN wells are recommended.")
 
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X, y)
-    logger.info("RandomForestClassifier model fit successfully.")
+    logger.info(f"{(X.var(axis=0) > 0).sum()} features have variance > 0 in this batch")
+    logger.info("Variance of features (top 20):\n" + str(X.var(axis=0).sort_values(ascending=False).head(20)))
 
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(X)
+    # Model selection: logistic regression if sample size is small, else random forest
+    if X.shape[0] < small_sample_threshold:
+        logger.info(f"Sample size ({X.shape[0]}) < {small_sample_threshold}. Using logistic regression.")
+        model = LogisticRegression(max_iter=1000, random_state=42)
+        model.fit(X, y)
+        logger.info("LogisticRegression model fit successfully.")
+        explainer = shap.Explainer(model, X)
+        shap_values = explainer(X).values
+        # shap_values shape: (n_samples, n_features)
+    else:
+        logger.info(f"Sample size ({X.shape[0]}) >= {small_sample_threshold}. Using random forest.")
+        from sklearn.ensemble import RandomForestClassifier
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X, y)
+        logger.info("RandomForestClassifier model fit successfully.")
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X)
+        # For binary classification, shap_values is a list of two arrays
+        if isinstance(shap_values, list) and len(shap_values) == 2:
+            # Use class 1 (query compound wells) for explanations
+            shap_values = shap_values[1]
+
     logger.info("SHAP values computed successfully.")
 
-    # Use the correct class index for binary classification
-    class_index = 1 if isinstance(shap_values, list) and len(shap_values) > 1 else 0
-    shap_vals_query = shap_values[class_index]
-
-    feature_importance = np.abs(shap_vals_query).mean(axis=0)
-    # Always output the top N features (even if all are zero)
+    feature_importance = np.abs(shap_values).mean(axis=0)
     top_idx = np.argsort(feature_importance)[::-1][:n_top_features]
     top_features = X.columns[top_idx]
     top_importance = feature_importance[top_idx]
@@ -158,9 +178,19 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
     pd.DataFrame({'feature': top_features, 'mean_abs_shap': top_importance}).to_csv(out_tsv, sep="\t", index=False)
     logger.info(f"Wrote top SHAP features TSV: {out_tsv}")
 
-    # SHAP summary plot
+    # SHAP summary plot (handles array shape for both models)
     out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
-    plot_shap_summary(X, shap_values, X.columns, out_pdf, logger, n_top_features=n_top_features)
+    try:
+        plt.figure(figsize=(10, 6))
+        shap.summary_plot(shap_values, X, feature_names=X.columns, show=False, max_display=n_top_features)
+        plt.tight_layout()
+        plt.savefig(out_pdf)
+        plt.close()
+        logger.info(f"Wrote SHAP summary plot: {out_pdf}")
+    except Exception as e:
+        logger.error(f"Could not generate SHAP plot: {e}")
+
+
 
 def load_feature_files(list_file, logger):
     """
