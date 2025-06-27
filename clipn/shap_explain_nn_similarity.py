@@ -40,6 +40,7 @@ import argparse
 import pandas as pd
 import numpy as np
 import shap
+import traceback
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -109,7 +110,6 @@ def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_
         logger.error(f"Could not generate SHAP plot: {e}")
 
 
-
 def run_shap(features, n_top_features, output_dir, query_id, logger, small_sample_threshold=30):
     """
     Fit model (logistic regression for small sample, else random forest), run SHAP, and output summary.
@@ -160,19 +160,27 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
             logger.info("RandomForestClassifier model fit successfully.")
             explainer = shap.TreeExplainer(model)
             shap_values_rf = explainer.shap_values(X)
-            # Handle SHAP output for binary classification
             if isinstance(shap_values_rf, list):
                 shap_values = shap_values_rf[1]
             else:
-                shap_values = shap_values_rf  # Already 2D (n_samples, n_features)
+                shap_values = shap_values_rf
         logger.info("SHAP values computed successfully.")
     except Exception as e:
         logger.error(f"SHAP model/explainer failed: {e}")
         logger.error(traceback.format_exc())
-        return  # Do not proceed if SHAP fails
+        return
 
     try:
-        feature_importance = np.abs(shap_values).mean(axis=0)
+        # Always flatten and check shape before any feature ranking or plotting
+        shap_arr = np.asarray(shap_values)
+        shap_arr = np.squeeze(shap_arr)
+        if shap_arr.ndim > 2:
+            shap_arr = shap_arr.reshape(shap_arr.shape[0], -1)
+        if shap_arr.ndim != 2 or shap_arr.shape[1] != X.shape[1]:
+            logger.error(f"SHAP array shape is not 2D and feature-matching after reshape: {shap_arr.shape}, feature matrix: {X.shape}. Skipping feature ranking and plot.")
+            return
+
+        feature_importance = np.abs(shap_arr).mean(axis=0)
         top_idx = np.argsort(feature_importance)[::-1][:n_top_features]
         top_features = X.columns[top_idx]
         top_importance = feature_importance[top_idx]
@@ -184,7 +192,6 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         logger.info(f"Number of features with nonzero mean_abs_shap: {(feature_importance > 0).sum()}")
         logger.info(f"Top {n_top_features} features (by mean_abs_shap): {list(top_features)}")
 
-        # Output TSVs (these will always be written, even if plotting fails)
         out_tsv = os.path.join(output_dir, f"{query_id}_top_shap_features_driving_difference.tsv")
         pd.DataFrame({'feature': top_features, 'mean_abs_shap': top_importance}).to_csv(out_tsv, sep="\t", index=False)
         logger.info(f"Wrote top SHAP features TSV: {out_tsv}")
@@ -193,32 +200,11 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         pd.DataFrame({'feature': lowest_features, 'mean_abs_shap': lowest_importance}).to_csv(out_tsv_sim, sep="\t", index=False)
         logger.info(f"Wrote most similar features TSV: {out_tsv_sim}")
 
-        # Robust SHAP plotting
         out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
-        try:
-            if isinstance(shap_values, list):
-                if len(shap_values) == 2:
-                    shap_array = np.asarray(shap_values[1])
-                else:
-                    shap_array = np.asarray(shap_values[0])
-            else:
-                shap_array = np.asarray(shap_values)
-            shap_array = np.squeeze(shap_array)
-            # Attempt to flatten to 2D if needed
-            if shap_array.ndim > 2:
-                logger.warning(f"SHAP array has {shap_array.ndim} dimensions, shape: {shap_array.shape}. Attempting to reshape to 2D.")
-                shap_array = shap_array.reshape(shap_array.shape[0], -1)
-            if shap_array.ndim != 2 or shap_array.shape[1] != X.shape[1]:
-                logger.error(f"SHAP array shape after squeeze/reshape: {shap_array.shape}, feature matrix: {X.shape}. Skipping plot.")
-            else:
-                plot_shap_summary(X, shap_array, X.columns, out_pdf, logger, n_top_features=n_top_features)
-        except Exception as e:
-            logger.error(f"Could not process/plot SHAP values for {query_id}: {e}")
-            logger.error(traceback.format_exc())
+        plot_shap_summary(X, shap_arr, X.columns, out_pdf, logger, n_top_features=n_top_features)
     except Exception as e:
-        logger.error(f"Feature extraction or TSV writing failed: {e}")
+        logger.error(f"Feature extraction, TSV writing, or plotting failed: {e}")
         logger.error(traceback.format_exc())
-        # But keep going to next query
 
 
  
