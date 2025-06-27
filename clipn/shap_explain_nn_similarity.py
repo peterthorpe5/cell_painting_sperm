@@ -99,7 +99,7 @@ def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_
             shap_vals_to_plot = shap_values[class_index]
         else:
             shap_vals_to_plot = shap_values  # For rare edge case
-        shap.summary_plot(shap_vals_to_plot, X, feature_names=feature_names, show=False, max_display=n_top_features, plot_type="bar")
+        shap.summary_plot(shap_vals_to_plot, X.values, feature_names=feature_names, show=False, max_display=n_top_features, plot_type="bar")
         plt.tight_layout()
         plt.savefig(output_file)
         plt.close()
@@ -119,6 +119,12 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         query_id (str): Query compound ID.
         logger (logging.Logger): Logger for messages.
         small_sample_threshold (int): Use logistic regression if n_samples < this.
+
+    Outputs:
+    - Top N SHAP features per query (most different, TSV).
+    - N features with lowest mean absolute SHAP (most similar, TSV).
+    - SHAP summary plot per query (PDF).
+
     """
 
     non_feature_cols = ['cpd_id', 'target', 'Dataset', 'Library', 'Plate_Metadata', 'Well_Metadata']
@@ -170,9 +176,20 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
     logger.info(f"Number of features with nonzero mean_abs_shap: {(feature_importance > 0).sum()}")
     logger.info(f"Top {n_top_features} features (by mean_abs_shap): {list(top_features)}")
 
-    out_tsv = os.path.join(output_dir, f"{query_id}_top_shap_features.tsv")
+    # Write TSV (always n_top_features rows)
+    out_tsv = os.path.join(output_dir, f"{query_id}_top_shap_features_driving_difference.tsv")
     pd.DataFrame({'feature': top_features, 'mean_abs_shap': top_importance}).to_csv(out_tsv, sep="\t", index=False)
     logger.info(f"Wrote top SHAP features TSV: {out_tsv}")
+
+    # Also output the N features with lowest mean absolute SHAP (i.e., most similar between query and NNs)
+    lowest_idx = np.argsort(feature_importance)[:n_top_features]
+    lowest_features = X.columns[lowest_idx]
+    lowest_importance = feature_importance[lowest_idx]
+
+    out_tsv_sim = os.path.join(output_dir, f"{query_id}_most_similar_features.tsv")
+    pd.DataFrame({'feature': lowest_features, 'mean_abs_shap': lowest_importance}).to_csv(out_tsv_sim, sep="\t", index=False)
+    logger.info(f"Wrote most similar features TSV: {out_tsv_sim}")
+
 
     out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
     try:
@@ -192,7 +209,7 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
             if shap_array.ndim != 2:
                 raise ValueError(f"SHAP values shape {shap_array.shape} is not 2D after squeeze.")
         plt.figure(figsize=(10, 6))
-        shap.summary_plot(shap_array, X, feature_names=X.columns, show=False, max_display=n_top_features)
+        shap.summary_plot(shap_array, X.values, feature_names=X.columns, show=False, max_display=n_top_features)
         plt.tight_layout()
         plt.savefig(out_pdf)
         plt.close()
