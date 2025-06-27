@@ -81,13 +81,26 @@ def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_
     Generate a SHAP summary plot and save to output_file. Handles binary classification.
     """
     try:
-        shap_array = np.asarray(shap_values)
+        # If list (as in binary classification), pick class 1
+        if isinstance(shap_values, list):
+            if len(shap_values) == 2:
+                shap_array = np.asarray(shap_values[1])
+            else:
+                shap_array = np.asarray(shap_values[0])
+        else:
+            shap_array = np.asarray(shap_values)
+
         shap_array = np.squeeze(shap_array)
+        logger.info(f"shap_array type: {type(shap_array)}, shape: {getattr(shap_array, 'shape', None)}")
         if shap_array.ndim != 2:
             logger.error(f"SHAP array shape is not 2D after squeeze: {shap_array.shape}")
             return
+
         plt.figure(figsize=(10, 6))
-        shap.summary_plot(shap_array, X.values, feature_names=feature_names, show=False, max_display=n_top_features, plot_type="bar")
+        shap.summary_plot(
+            shap_array, X.values, feature_names=feature_names,
+            show=False, max_display=n_top_features, plot_type="bar"
+        )
         plt.tight_layout()
         plt.savefig(output_file)
         plt.close()
