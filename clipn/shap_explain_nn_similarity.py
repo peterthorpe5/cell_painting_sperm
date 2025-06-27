@@ -216,7 +216,7 @@ def load_data(features_file, nn_file, query_id, n_neighbors, logger):
     Returns:
         pd.DataFrame: Feature data for query and NNs, with 'target' column.
     """
-    features = load_feature_files(features_file)
+    features = load_feature_files(features_file, logger)
     logger.info(f"Input features file shape: {features.shape}")
 
     nn = pd.read_csv(nn_file, sep="\t")
