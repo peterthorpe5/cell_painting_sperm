@@ -21,3 +21,4 @@ optuna
 torch
 hdbscan
 xlsxwriter
+shap
