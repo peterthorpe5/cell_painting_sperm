@@ -137,6 +137,45 @@ def plot_feature_importance_bar(features, importance, output_file, title, logger
         logger.error(f"Could not generate bar plot: {e}")
 
 
+def plot_shap_summary_all(X, shap_values, feature_names, output_prefix, logger, n_top_features=10):
+    """
+    Generate both SHAP summary bar and beeswarm (dot) plots for feature attribution.
+    Args:
+        X (pd.DataFrame): Feature data (n_samples, n_features).
+        shap_values (np.ndarray): SHAP values (n_samples, n_features).
+        feature_names (list): List of feature names.
+        output_prefix (str): Output file path prefix (without extension).
+        logger (logging.Logger): Logger for messages.
+        n_top_features (int): Number of features to plot.
+    """
+    try:
+        # --- Bar chart (mean |SHAP| values) ---
+        plt.figure(figsize=(10, 6))
+        shap.summary_plot(
+            shap_values, X.values, feature_names=feature_names,
+            show=False, max_display=n_top_features, plot_type="bar"
+        )
+        plt.tight_layout()
+        bar_path = f"{output_prefix}_bar.pdf"
+        plt.savefig(bar_path)
+        plt.close()
+        logger.info(f"Wrote SHAP summary bar plot: {bar_path}")
+
+        # --- Beeswarm (dot) chart (classic SHAP summary plot) ---
+        plt.figure(figsize=(10, 6))
+        shap.summary_plot(
+            shap_values, X.values, feature_names=feature_names,
+            show=False, max_display=n_top_features, plot_type="dot"
+        )
+        plt.tight_layout()
+        beeswarm_path = f"{output_prefix}_beeswarm.pdf"
+        plt.savefig(beeswarm_path)
+        plt.close()
+        logger.info(f"Wrote SHAP summary beeswarm plot: {beeswarm_path}")
+    except Exception as e:
+        logger.error(f"Could not generate SHAP summary plots: {e}")
+
+
 
 def run_shap(features, n_top_features, output_dir, query_id, logger, small_sample_threshold=30):
     """
@@ -233,6 +272,21 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         lowest_features = X.columns[lowest_idx]
         lowest_importance = feature_importance[lowest_idx]
 
+        X_top = X.iloc[:, top_idx]
+        X_lowest = X.iloc[:, lowest_idx]
+        shap_top = shap_arr[:, top_idx]
+        shap_lowest = shap_arr[:, lowest_idx]
+        top_features = X.columns[top_idx]
+        lowest_features = X.columns[lowest_idx]
+
+        # Plot for top SHAP features (driving difference)
+        output_prefix_top = os.path.join(output_dir, f"{query_id}_shap_summary_top")
+        plot_shap_summary_all(X_top, shap_top, top_features, output_prefix_top, logger, n_top_features=n_top_features)
+
+        # Plot for lowest SHAP features (most similar)
+        output_prefix_lowest = os.path.join(output_dir, f"{query_id}_shap_summary_similar")
+        plot_shap_summary_all(X_lowest, shap_lowest, lowest_features, output_prefix_lowest, logger, n_top_features=n_top_features)
+
         logger.info(f"Number of features with nonzero mean_abs_shap: {(feature_importance > 0).sum()}")
         logger.info(f"Top {n_top_features} features (by mean_abs_shap): {list(top_features)}")
 
@@ -244,8 +298,11 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         pd.DataFrame({'feature': lowest_features, 'mean_abs_shap': lowest_importance}).to_csv(out_tsv_sim, sep="\t", index=False)
         logger.info(f"Wrote most similar features TSV: {out_tsv_sim}")
 
-        out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
-        plot_shap_summary(X, shap_arr, X.columns, out_pdf, logger, n_top_features=n_top_features)
+        # out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
+        # plot_shap_summary(X, shap_arr, X.columns, out_pdf, logger, n_top_features=n_top_features)
+        output_prefix = os.path.join(output_dir, f"{query_id}_shap_summary")
+        plot_shap_summary_all(X, shap_arr, X.columns, output_prefix, logger, n_top_features=n_top_features)
+
         # Plot for “most different” (top features)
         plot_feature_importance_bar(
             top_features,
