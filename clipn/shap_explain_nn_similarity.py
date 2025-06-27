@@ -177,9 +177,22 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
     out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
     try:
         import matplotlib.pyplot as plt
+        # Convert to 2D numpy array if not already
+        # painful bug here!!!!!!
+        if isinstance(shap_values, list):
+            shap_array = np.asarray(shap_values[1])  # For binary RF
+        else:
+            shap_array = np.asarray(shap_values)
+        # Squeeze to 2D: (n_samples, n_features)
+        shap_array = np.atleast_2d(shap_array)
+        if shap_array.ndim > 2:
+            # Sometimes shape is (n_samples, n_features, 1) or (n_samples, n_features, n_classes)
+            shap_array = shap_array.squeeze()
+            # After squeeze, still not 2D?
+            if shap_array.ndim != 2:
+                raise ValueError(f"SHAP values shape {shap_array.shape} is not 2D after squeeze.")
         plt.figure(figsize=(10, 6))
-        # Always ensure 2D shape is passed
-        shap.summary_plot(np.asarray(shap_values), X, feature_names=X.columns, show=False, max_display=n_top_features)
+        shap.summary_plot(shap_array, X, feature_names=X.columns, show=False, max_display=n_top_features)
         plt.tight_layout()
         plt.savefig(out_pdf)
         plt.close()
