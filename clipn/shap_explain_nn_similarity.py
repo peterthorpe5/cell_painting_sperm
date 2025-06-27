@@ -191,10 +191,11 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
     out_tsv_sim = os.path.join(output_dir, f"{query_id}_most_similar_features.tsv")
     pd.DataFrame({'feature': lowest_features, 'mean_abs_shap': lowest_importance}).to_csv(out_tsv_sim, sep="\t", index=False)
     logger.info(f"Wrote most similar features TSV: {out_tsv_sim}")
-
-
     out_pdf = os.path.join(output_dir, f"{query_id}_shap_summary.pdf")
-    plot_shap_summary(X, shap_values, X.columns, out_pdf, logger, n_top_features=n_top_features)
+    try:
+        plot_shap_summary(X, shap_values, X.columns, out_pdf, logger, n_top_features=n_top_features)
+    except Exception as e:
+        logger.error(f"Plotting failed for {query_id}, but results will continue: {e}")
 
 
 def load_feature_files(list_file, logger):
