@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 import logging
 
+
 def setup_logger(log_path):
     """
     Set up a logger that writes to file and stdout.
@@ -67,6 +68,7 @@ def setup_logger(log_path):
     logger.addHandler(fh)
     logger.addHandler(sh)
     return logger
+
 
 def load_feature_files(list_file, logger):
     """
@@ -107,6 +109,7 @@ def load_feature_files(list_file, logger):
     except Exception as e:
         logger.error(f"Could not load feature file: {e}")
         raise
+
 
 def parse_query_ids(query_id_arg, logger):
     """
@@ -164,6 +167,7 @@ def load_data(features_file, nn_file, query_id, n_neighbors, logger):
     logger.info(f"Subset features shape for query and NNs: {features.shape}")
     return features
 
+
 def run_shap(features, n_top_features, output_dir, query_id, logger):
     """
     Fit model, run SHAP, and output summary.
@@ -215,6 +219,7 @@ def run_shap(features, n_top_features, output_dir, query_id, logger):
     plt.savefig(out_pdf, bbox_inches='tight')
     plt.close()
     logger.info(f"Wrote SHAP summary plot for {query_id} to {out_pdf}")
+
 
 def main():
     """
