@@ -6,6 +6,9 @@ SHAP-based Feature Attribution for Cell Painting Nearest Neighbour Similarity
 This script identifies which Cell Painting features drive the similarity
 between query compounds and their nearest neighbours in latent space.
 
+To explain which Cell Painting features distinguish a query compound from its nearest neighbours, 
+using SHAP (SHapley Additive exPlanations) and a machine learning model.
+
 Inputs:
     --features: Well-level feature file (TSV) or file-of-files with column 'path'.
     --nn_file: Tab-separated file with columns: 'query_id', 'neighbour_id'.
@@ -26,12 +29,31 @@ Example usage:
         --n_top_features 10
 
 --n_neighbors 5
-For each query compound, the script collects the feature data for that compound plus its 5 nearest neighbours (i.e. a total of 6 sets of well data: 1 query + 5 NNs, but if you have multiple wells per compound, all wells are included for each compound).
+For each query compound, the script collects the feature data for that compound plus its 5 
+nearest neighbours (i.e. a total of 6 sets of well data: 1 query + 5 NNs, but if you have multiple wells per compound, 
+all wells are included for each compound).
 
 --n_top_features 10
-It then uses a Random Forest model and SHAP to rank all features by their mean absolute SHAP value—i.e., how much each feature contributes to distinguishing the query compound from its NNs.
-The output is the top 10 features (with the highest mean absolute SHAP values) that most strongly separate the query from its neighbours.
+It then uses a Random Forest model and SHAP to rank all features by their mean absolute SHAP value—i.e., 
+how much each feature contributes to distinguishing the query compound from its NNs.
+The output is the top 10 features (with the highest mean absolute SHAP values) that most strongly 
+separate the query from its neighbours.
         
+
+Machine Learning Model Fitting & SHAP Value Computation
+(removes metadata from this): Chooses a model depending on sample size:
+If there are fewer than 30 wells, it uses logistic regression. Otherwise, it uses a random forest.
+Fits the model to distinguish the query wells (target=1) from neighbour wells (target=0).
+Computes SHAP values for every feature, for every well.
+These values quantify how much each feature pushes the prediction towards "query" or "NN" for each well.
+Why SHAP?
+a robust way to say: “for this sample, feature X contributed Y amount to it being class 1 vs class 0”.
+
+SHAP values assign to each feature, for each sample, a number showing how much that feature 
+contributed to the model’s prediction (compared to the “average” prediction if that feature was absent).
+
+Using SHAP to find feature dirivng similarity: by default SHAP find the features drving the difference
+indirect inference, not a direct test of similarity ... sort by the mean SHAP and lowest values first. 
 
 """
 
@@ -110,6 +132,39 @@ def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_
         logger.error(f"Could not generate SHAP plot: {e}")
 
 
+def plot_shap_waterfall(X, shap_values, feature_names, output_file, logger, sample_ind=0, max_display=10):
+    """
+    Generate a SHAP waterfall plot for a single sample (e.g., well) and save as PDF.
+    
+    Args:
+        X (pd.DataFrame): Feature data.
+        shap_values (np.ndarray): SHAP values array.
+        feature_names (list): Feature names.
+        output_file (str): Output PDF path.
+        logger (logging.Logger): Logger.
+        sample_ind (int): Index of the sample to plot.
+        max_display (int): Max number of features to show.
+    """
+    try:
+        plt.figure()
+        shap.plots.waterfall(
+            shap.Explanation(
+                values=shap_values[sample_ind],
+                base_values=0,  # base value can be taken from SHAP explainer if desired
+                data=X.iloc[sample_ind].values,
+                feature_names=feature_names
+            ),
+            max_display=max_display,
+            show=False
+        )
+        plt.tight_layout()
+        plt.savefig(output_file)
+        plt.close()
+        logger.info(f"Wrote SHAP waterfall plot: {output_file}")
+    except Exception as e:
+        logger.error(f"Could not generate SHAP waterfall plot: {e}")
+
+
 def plot_feature_importance_bar(features, importance, output_file, title, logger):
     """
     Plot a horizontal bar plot of feature importances and save as PDF.
@@ -174,6 +229,37 @@ def plot_shap_summary_all(X, shap_values, feature_names, output_prefix, logger, 
         logger.info(f"Wrote SHAP summary beeswarm plot: {beeswarm_path}")
     except Exception as e:
         logger.error(f"Could not generate SHAP summary plots: {e}")
+
+
+def plot_shap_heatmap(X, shap_values, feature_names, output_file, logger, max_display=20):
+    """
+    Generate a SHAP heatmap and save as PDF.
+
+    Args:
+        X (pd.DataFrame): Feature data (samples × features).
+        shap_values (np.ndarray): SHAP values (samples × features).
+        feature_names (list): List of feature names.
+        output_file (str): Path to save the PDF.
+        logger (logging.Logger): Logger object.
+        max_display (int): Maximum number of features to display in the heatmap.
+    """
+    try:
+        plt.figure(figsize=(max_display, min(X.shape[0], 40) / 2 + 4))
+        shap.plots.heatmap(
+            shap.Explanation(
+                values=shap_values,
+                data=X.values,
+                feature_names=feature_names
+            ),
+            max_display=max_display,
+            show=False
+        )
+        plt.tight_layout()
+        plt.savefig(output_file)
+        plt.close()
+        logger.info(f"Wrote SHAP heatmap plot: {output_file}")
+    except Exception as e:
+        logger.error(f"Could not generate SHAP heatmap plot: {e}")
 
 
 
@@ -319,6 +405,40 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
             os.path.join(output_dir, f"{query_id}_most_similar_features_bar.pdf"),
             title=f"{query_id}: Features Driving Most Similarity",
             logger=logger,)
+        
+        # After plot_shap_summary_all calls
+        try:
+            # Find the median query well (closest to the median feature vector)
+            query_X = X[features['target'] == 1]
+            if query_X.shape[0] > 1:
+                median_values = query_X.median(axis=0)
+                distances = np.linalg.norm(query_X.values - median_values.values, axis=1)
+                median_query_pos = distances.argmin()
+                median_query_idx = query_X.index[median_query_pos]
+            else:
+                median_query_idx = query_X.index[0]
+
+            waterfall_file = os.path.join(output_dir, f"{query_id}_shap_waterfall_query_median.pdf")
+            plot_shap_waterfall(
+                X, shap_arr, X.columns, waterfall_file, logger,
+                sample_ind=median_query_idx, max_display=n_top_features
+            )
+        except Exception as e:
+            logger.warning(f"Could not plot median waterfall plot for query {query_id}: {e}")
+
+        heatmap_file = os.path.join(output_dir, f"{query_id}_shap_heatmap.pdf")
+        try:
+            plot_shap_heatmap(
+                X,
+                shap_arr,
+                X.columns,
+                heatmap_file,
+                logger,
+                max_display=n_top_features
+            )
+        except Exception as e:
+            logger.warning(f"Could not plot SHAP heatmap for query {query_id}: {e}")
+
 
     except Exception as e:
         logger.error(f"Feature extraction, TSV writing, or plotting failed: {e}")
