@@ -115,6 +115,11 @@ def plot_shap_bar_clustered(X, shap_values, feature_names, output_file, logger, 
         clustering_cutoff (float): Correlation cutoff for clustering features.
     """
     try:
+        if isinstance(feature_names, str):
+            feature_names = [feature_names]
+        elif not isinstance(feature_names, list):
+            feature_names = list(feature_names)
+
         plt.figure(figsize=(10, 6))
         shap.plots.bar(
             shap.Explanation(
@@ -394,19 +399,22 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
 
         feature_importance = np.abs(shap_arr).mean(axis=0)
         top_idx = np.argsort(feature_importance)[::-1][:n_top_features]
-        top_features = X.columns[top_idx]
-        top_importance = feature_importance[top_idx]
-
+        # top_features = list(X.columns[top_idx]) if hasattr(X.columns[top_idx], '__iter__') and not isinstance(X.columns[top_idx], str) else [X.columns[top_idx]]
+        
         lowest_idx = np.argsort(feature_importance)[:n_top_features]
-        lowest_features = X.columns[lowest_idx]
+        # lowest_features = list(X.columns[lowest_idx]) if hasattr(X.columns[lowest_idx], '__iter__') and not isinstance(X.columns[lowest_idx], str) else [X.columns[lowest_idx]]
+
+        top_features = list(X.columns[top_idx])
+        lowest_features = list(X.columns[lowest_idx])
+
+
+        top_importance = feature_importance[top_idx]
         lowest_importance = feature_importance[lowest_idx]
 
         X_top = X.iloc[:, top_idx]
         X_lowest = X.iloc[:, lowest_idx]
         shap_top = shap_arr[:, top_idx]
         shap_lowest = shap_arr[:, lowest_idx]
-        top_features = X.columns[top_idx]
-        lowest_features = X.columns[lowest_idx]
 
         # Plot for top SHAP features (driving difference)
         output_prefix_top = os.path.join(output_dir, f"{query_id}_shap_summary_top")
@@ -457,7 +465,7 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
                 median_values = query_X.median(axis=0)
                 distances = np.linalg.norm(query_X.values - median_values.values, axis=1)
                 median_query_pos = distances.argmin()
-                median_query_idx = query_X.index[median_query_pos]
+                median_query_idx = query_X.index.get_loc(query_X.index[median_query_pos])
             else:
                 median_query_idx = query_X.index[0]
 
