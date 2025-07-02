@@ -58,6 +58,7 @@ indirect inference, not a direct test of similarity ... sort by the mean SHAP an
 """
 
 import os
+import sys
 import argparse
 import pandas as pd
 import numpy as np
@@ -561,6 +562,9 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.output_dir, args.log_file))
+    logger.info(sys.version_info)
+    logger.info("Command-line: %s", ' '.join(sys.argv))
+    logger.info("Starting testing: %s", time.asctime())
     logger.info(f"Arguments: {args}")
 
     query_ids = parse_query_ids(args.query_id)
