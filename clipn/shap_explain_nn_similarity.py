@@ -101,6 +101,42 @@ def setup_logger(log_file):
     return logger
 
 
+def plot_shap_bar_clustered(X, shap_values, feature_names, output_file, logger, max_display=20, clustering_cutoff=0.8):
+    """
+    Generate a SHAP bar plot with feature clustering and save as PDF.
+
+    Args:
+        X (pd.DataFrame): Feature data (samples × features).
+        shap_values (np.ndarray): SHAP values (samples × features).
+        feature_names (list): List of feature names.
+        output_file (str): Path to save the PDF.
+        logger (logging.Logger): Logger object.
+        max_display (int): Maximum number of features to display.
+        clustering_cutoff (float): Correlation cutoff for clustering features.
+    """
+    try:
+        plt.figure(figsize=(10, 6))
+        shap.plots.bar(
+            shap.Explanation(
+                values=shap_values,
+                data=X.values,
+                feature_names=feature_names
+            ),
+            max_display=max_display,
+            clustering="correlation",
+            clustering_cutoff=clustering_cutoff,
+            show=False
+        )
+        plt.tight_layout()
+        plt.savefig(output_file)
+        plt.close()
+        logger.info(f"Wrote clustered SHAP bar plot: {output_file}")
+    except Exception as e:
+        logger.error(f"Could not generate clustered SHAP bar plot: {e}")
+
+
+
+
 def plot_shap_summary(X, shap_values, feature_names, output_file, logger, n_top_features=10):
     """
     Generate a SHAP summary plot and save to output_file. Handles binary classification.
@@ -446,6 +482,37 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
             )
         except Exception as e:
             logger.warning(f"Could not plot SHAP heatmap for query {query_id}: {e}")
+        
+        # Clustered bar plot: Driving Difference
+        clustered_bar_file_diff = os.path.join(output_dir, f"{query_id}_shap_bar_clustered_difference.pdf")
+        try:
+            plot_shap_bar_clustered(
+                X_top,
+                shap_top,
+                top_features,
+                clustered_bar_file_diff,
+                logger,
+                max_display=n_top_features,
+                clustering_cutoff=0.8
+            )
+        except Exception as e:
+            logger.warning(f"Could not plot clustered SHAP bar plot for driving difference (query {query_id}): {e}")
+
+        # Clustered bar plot: Driving Similarity
+        clustered_bar_file_sim = os.path.join(output_dir, f"{query_id}_shap_bar_clustered_similarity.pdf")
+        try:
+            plot_shap_bar_clustered(
+                X_lowest,
+                shap_lowest,
+                lowest_features,
+                clustered_bar_file_sim,
+                logger,
+                max_display=n_top_features,
+                clustering_cutoff=0.8
+            )
+        except Exception as e:
+            logger.warning(f"Could not plot clustered SHAP bar plot for driving similarity (query {query_id}): {e}")
+
 
 
     except Exception as e:
