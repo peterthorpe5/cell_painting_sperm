@@ -228,7 +228,6 @@ def plot_feature_importance_bar(features, importance, output_file, title, logger
         logger (logging.Logger): Logger for messages.
     """
     try:
-        import matplotlib.pyplot as plt
         plt.figure(figsize=(8, 0.5 * len(features) + 2))
         y = np.arange(len(features))
         plt.barh(y, importance[::-1], align='center')
@@ -241,6 +240,54 @@ def plot_feature_importance_bar(features, importance, output_file, title, logger
         logger.info(f"Wrote feature importance bar plot: {output_file}")
     except Exception as e:
         logger.error(f"Could not generate bar plot: {e}")
+
+
+def plot_shap_dependence_plots(
+    X, shap_values, top_features, output_dir, query_id, logger, n_dependence=5
+):
+    """
+    Generate and save SHAP dependence plots for the top N features, one folder per compound.
+
+    Args:
+        X (pd.DataFrame): Feature data (samples × features).
+        shap_values (np.ndarray): SHAP values array (samples × features).
+        top_features (list): List of top feature names (str) to plot.
+        output_dir (str): Base directory for output (subfolder per query_id will be made).
+        query_id (str): Query compound identifier (used in output folder and filenames).
+        logger (logging.Logger): Logger for status and errors.
+        n_dependence (int, optional): Number of top features to plot. Defaults to 5.
+
+    Returns:
+        None
+
+    SHAP dependence plots show how the value of a given feature relates to its SHAP value 
+    (i.e., its influence on the model's prediction), across all wells for the query compound 
+    and its nearest neighbours.
+    In other words, they visualise the relationship between feature magnitude and its impact 
+    on distinguishing the query from its neighbours, helping to reveal possible non-linear 
+    effects or interactions.
+    """
+    # Make subfolder per compound
+    compound_dir = os.path.join(output_dir, f"{query_id}_dependence_plots")
+    os.makedirs(compound_dir, exist_ok=True)
+
+    try:
+        n_to_plot = min(n_dependence, len(top_features))
+        for i, feat in enumerate(top_features[:n_to_plot]):
+            shap.dependence_plot(
+                feat, shap_values, X, show=False
+            )
+            plt.tight_layout()
+            out_file = os.path.join(
+                compound_dir,
+                f"{i+1:02d}_{feat}_dependence.pdf"
+            )
+            plt.savefig(out_file)
+            plt.close()
+            logger.info(f"Wrote SHAP dependence plot for feature {feat}: {out_file}")
+    except Exception as e:
+        logger.warning(f"Could not plot SHAP dependence plots for query {query_id}: {e}")
+
 
 
 def plot_shap_summary_all(X, shap_values, feature_names, output_prefix, logger, n_top_features=10):
@@ -549,7 +596,11 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         except Exception as e:
             logger.warning(f"Could not plot clustered SHAP bar plot for driving similarity (query {query_id}): {e}")
 
+        try:
+            plot_shap_dependence_plots(X, shap_arr, top_features, output_dir, query_id, logger)
 
+        except Exception as e:
+            logger.warning(f"Could not plot plot_shap_dependence for  (query {query_id}): {e}")
 
     except Exception as e:
         logger.error(f"Feature extraction, TSV writing, or plotting failed: {e}")
