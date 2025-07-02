@@ -139,8 +139,6 @@ def plot_shap_bar_clustered(X, shap_values, feature_names, output_file, logger, 
                 feature_names=feature_names
             ),
             max_display=max_display,
-            clustering="correlation",
-            clustering_cutoff=clustering_cutoff,
             show=False
         )
         plt.tight_layout()
