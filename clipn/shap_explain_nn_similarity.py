@@ -232,9 +232,9 @@ def plot_shap_summary_all(X, shap_values, feature_names, output_prefix, logger, 
         logger.error(f"Could not generate SHAP summary plots: {e}")
 
 
-def plot_shap_heatmap(X, shap_values, feature_names, output_file, logger, max_display=20):
+def plot_shap_heatmap(X, shap_values, feature_names, output_file, logger, max_display=20, font_size=8):
     """
-    Generate a SHAP heatmap and save as PDF.
+    Generate a SHAP heatmap and save as PDF, with adjustable feature name font size.
 
     Args:
         X (pd.DataFrame): Feature data (samples × features).
@@ -243,6 +243,7 @@ def plot_shap_heatmap(X, shap_values, feature_names, output_file, logger, max_di
         output_file (str): Path to save the PDF.
         logger (logging.Logger): Logger object.
         max_display (int): Maximum number of features to display in the heatmap.
+        font_size (int): Font size for feature names.
     """
     try:
         plt.figure(figsize=(max_display, min(X.shape[0], 40) / 2 + 4))
@@ -256,6 +257,10 @@ def plot_shap_heatmap(X, shap_values, feature_names, output_file, logger, max_di
             show=False
         )
         plt.tight_layout()
+        # Reduce font size for y-axis (features)
+        ax = plt.gca()
+        for label in ax.get_yticklabels():
+            label.set_fontsize(font_size)
         plt.savefig(output_file)
         plt.close()
         logger.info(f"Wrote SHAP heatmap plot: {output_file}")
@@ -435,7 +440,8 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
                 X.columns,
                 heatmap_file,
                 logger,
-                max_display=n_top_features
+                max_display=n_top_features,
+                font_size=6
             )
         except Exception as e:
             logger.warning(f"Could not plot SHAP heatmap for query {query_id}: {e}")
