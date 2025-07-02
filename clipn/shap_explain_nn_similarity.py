@@ -115,11 +115,12 @@ def plot_shap_bar_clustered(X, shap_values, feature_names, output_file, logger, 
         clustering_cutoff (float): Correlation cutoff for clustering features.
     """
     try:
-        if isinstance(feature_names, str):
-            feature_names = [feature_names]
-        elif not isinstance(feature_names, list):
-            feature_names = list(feature_names)
-
+        feature_names = ensure_list(feature_names)
+        # Make sure X is 2D and shap_values is 2D
+        if isinstance(X, pd.Series):
+            X = X.to_frame().T if X.ndim == 1 else X.to_frame()
+        if shap_values.ndim == 1:
+            shap_values = shap_values.reshape(-1, 1)
         plt.figure(figsize=(10, 6))
         shap.plots.bar(
             shap.Explanation(
@@ -138,7 +139,6 @@ def plot_shap_bar_clustered(X, shap_values, feature_names, output_file, logger, 
         logger.info(f"Wrote clustered SHAP bar plot: {output_file}")
     except Exception as e:
         logger.error(f"Could not generate clustered SHAP bar plot: {e}")
-
 
 
 
@@ -272,6 +272,21 @@ def plot_shap_summary_all(X, shap_values, feature_names, output_prefix, logger, 
         logger.info(f"Wrote SHAP summary beeswarm plot: {beeswarm_path}")
     except Exception as e:
         logger.error(f"Could not generate SHAP summary plots: {e}")
+
+
+def ensure_list(val):
+    """
+    Ensure val is a list.
+    """
+    if isinstance(val, (pd.Index, np.ndarray)):
+        return list(val)
+    elif isinstance(val, str):
+        return [val]
+    elif isinstance(val, list):
+        return val
+    else:
+        return list(val)
+
 
 
 def plot_shap_heatmap(X, shap_values, feature_names, output_file, logger, max_display=20, font_size=8):
