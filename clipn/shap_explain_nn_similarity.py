@@ -485,11 +485,16 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
         
         # Clustered bar plot: Driving Difference
         clustered_bar_file_diff = os.path.join(output_dir, f"{query_id}_shap_bar_clustered_difference.pdf")
+        top_idx_list = np.argsort(feature_importance)[::-1][:n_top_features]
+        lowest_idx_list = np.argsort(feature_importance)[:n_top_features]
+        top_features_list = list(X.columns[top_idx_list])
+        lowest_features_list = list(X.columns[lowest_idx_list])
         try:
+
             plot_shap_bar_clustered(
                 X_top,
                 shap_top,
-                top_features,
+                top_features_list,
                 clustered_bar_file_diff,
                 logger,
                 max_display=n_top_features,
@@ -504,7 +509,7 @@ def run_shap(features, n_top_features, output_dir, query_id, logger, small_sampl
             plot_shap_bar_clustered(
                 X_lowest,
                 shap_lowest,
-                lowest_features,
+                lowest_features_list,
                 clustered_bar_file_sim,
                 logger,
                 max_display=n_top_features,
