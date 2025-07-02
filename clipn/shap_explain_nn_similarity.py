@@ -116,6 +116,16 @@ def plot_shap_bar_clustered(X, shap_values, feature_names, output_file, logger, 
     """
     try:
         feature_names = ensure_list(feature_names)
+        # Debug shapes/types just before plotting
+        logger.debug(f"DEBUG: X type: {type(X)}, shape: {getattr(X, 'shape', None)}")
+        logger.debug(f"DEBUG: shap_values type: {type(shap_values)}, shape: {getattr(shap_values, 'shape', None)}")
+        logger.debug(f"DEBUG: feature_names type: {type(feature_names)}, len: {len(feature_names)}")
+        logger.debug(f"DEBUG: First 5 feature_names: {feature_names[:5]}")
+        if hasattr(X, "columns"):
+            logger.debug(f"DEBUG: X.columns: {list(X.columns)}")
+        logger.debug(f"DEBUG: Output file: {output_file}")
+
+
         # Make sure X is 2D and shap_values is 2D
         if isinstance(X, pd.Series):
             X = X.to_frame().T if X.ndim == 1 else X.to_frame()
