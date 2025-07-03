@@ -156,6 +156,14 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
     if not numeric_cols:
         logger.warning("No numeric columns found for imputation.")
         return df
+    
+    # Drop columns that are all-NaN
+    nan_all = [col for col in numeric_cols if df[col].isnull().all()]
+    if nan_all:
+        logger.warning(f"Dropping {len(nan_all)} all-NaN columns before imputation: {nan_all}")
+        df = df.drop(columns=nan_all)
+        numeric_cols = [col for col in numeric_cols if col not in nan_all]
+
     before_na = df[numeric_cols].isna().sum().sum()
     logger.info(f"Imputing missing values in {len(numeric_cols)} numeric columns (nans before: {before_na})...")
     if method == "median":
@@ -282,11 +290,19 @@ def main():
     dataframes = [pd.read_csv(f) for f in csv_files]
     cp_df = pd.concat(dataframes, axis=0, ignore_index=True)
     logger.info(f"Concatenated DataFrame shape: {cp_df.shape}")
-
+    
     # Clean problematic values
     bad_strings = ['#NAME?', '#VALUE!', '#DIV/0!', 'N/A', 'NA', '', ' ']
     cp_df.replace(bad_strings, np.nan, inplace=True)
     logger.info("Replaced known bad strings with NaN.")
+
+    # Drop columns that are entirely NaN
+    na_cols = cp_df.columns[cp_df.isna().all()].tolist()
+    if na_cols:
+        logger.warning(f"Dropping {len(na_cols)} all-NaN columns: {na_cols}")
+        cp_df = cp_df.drop(columns=na_cols)
+    logger.info(f"DataFrame shape after dropping all-NaN columns: {cp_df.shape}")
+
 
     # 2. Harmonise plate/well columns
     merge_keys = [k.strip() for k in args.merge_keys.split(",")]
@@ -312,6 +328,13 @@ def main():
     # 4. Merge metadata
     merged_df = cp_df.merge(meta_df, how="left", left_on=[plate_col, well_col], right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
+    # Drop columns that are all NA after merging metadata
+    na_cols_postmerge = merged_df.columns[merged_df.isna().all()].tolist()
+    if na_cols_postmerge:
+        logger.warning(f"Dropping {len(na_cols_postmerge)} all-NaN columns after metadata merge: {na_cols_postmerge}")
+        merged_df = merged_df.drop(columns=na_cols_postmerge)
+    logger.info(f"Shape after dropping all-NaN columns post-merge: {merged_df.shape}")
+
     # Warn for missing metadata
     missing_meta = merged_df[[col for col in meta_df.columns if col not in [meta_plate_col, meta_well_col]]].isnull().all(axis=1).sum()
     if missing_meta > 0:
@@ -345,19 +368,38 @@ def main():
     metadata_df = merged_df[present_metadata].copy()
 
     # 10. Feature selection (correlation and variance filtering)
+    # Identify starting features
     feature_cols = [c for c in merged_df.columns if c not in present_metadata and pd.api.types.is_numeric_dtype(merged_df[c])]
-    logger.info(f"Feature selection on {len(feature_cols)} numeric columns.")
-    logger.info(f"Shape before correlation_filter: {filtered_df.shape}")
-    filtered_df = correlation_filter(merged_df[feature_cols], threshold=args.correlation_threshold)
-    logger.info(f"Shape after correlation_filter: {filtered_df.shape}")
-    filtered_df = variance_threshold_selector(filtered_df, threshold=args.variance_threshold)
-    logger.info(f"Shape after variance_threshold_selector: {filtered_df.shape}")
-    logger.info(f"Feature selection retained {filtered_df.shape[1]} features.")
+    n_start_features = len(feature_cols)
+    logger.info(f"Feature selection on {n_start_features} numeric columns.")
+    logger.info(f"Shape before correlation_filter: {merged_df[feature_cols].shape}")
+
+    # Correlation filter
+    filtered_corr = correlation_filter(merged_df[feature_cols], threshold=args.correlation_threshold)
+    n_after_corr = filtered_corr.shape[1]
+    logger.info(f"Shape after correlation_filter: {filtered_corr.shape}")
+    logger.info(f"Dropped {n_start_features - n_after_corr} features due to correlation threshold.")
+
+    # Variance threshold filter
+    filtered_final = variance_threshold_selector(filtered_corr, threshold=args.variance_threshold)
+    n_after_var = filtered_final.shape[1]
+    logger.info(f"Shape after variance_threshold_selector: {filtered_final.shape}")
+    logger.info(f"Dropped {n_after_corr - n_after_var} features due to low variance.")
+    logger.info(f"Feature selection retained {n_after_var} features.")
+
 
     # 11. Combine metadata and filtered features
-    final_df = pd.concat([metadata_df, filtered_df], axis=1)
+    final_df = pd.concat([metadata_df, filtered_final], axis=1)
+
 
     # 12. Output
+    # Drop duplicate columns if present (keep first occurrence)
+    dupe_cols = final_df.columns.duplicated()
+    if any(dupe_cols):
+        dup_names = final_df.columns[dupe_cols].tolist()
+        logger.warning(f"Found and dropping duplicate columns in output: {dup_names}")
+        final_df = final_df.loc[:, ~final_df.columns.duplicated()]
+
     final_df.to_csv(args.output_file, sep=args.sep, index=False)
     logger.info(f"Saved feature-selected data to {args.output_file} (shape: {final_df.shape})")
     logger.info("Merge complete.")
