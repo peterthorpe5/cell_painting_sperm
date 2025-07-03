@@ -344,6 +344,25 @@ def main():
     # merged_df.insert(0, "row_number", range(1, len(merged_df) + 1))
 
     # 6. Impute missing data (if requested)
+    # Replace inf, -inf, and very large values with NaN before imputation
+    numeric_cols = merged_df.select_dtypes(include=[np.number]).columns
+    n_inf = np.isinf(merged_df[numeric_cols]).sum().sum()
+    n_neg_inf = np.isneginf(merged_df[numeric_cols]).sum().sum()
+    n_large = (np.abs(merged_df[numeric_cols]) > 1e10).sum().sum()
+
+    if n_inf or n_neg_inf or n_large:
+        logger.warning(f"Replacing {n_inf} inf, {n_neg_inf} -inf, {n_large} very large values (>1e10) with NaN before imputation.")
+        merged_df[numeric_cols] = merged_df[numeric_cols].replace([np.inf, -np.inf], np.nan)
+        merged_df[numeric_cols] = merged_df[numeric_cols].applymap(lambda x: np.nan if isinstance(x, float) and abs(x) > 1e10 else x)
+
+    # Drop columns that are entirely NaN
+    na_cols = merged_df.columns[cp_df.isna().all()].tolist()
+    if na_cols:
+        logger.warning(f"Dropping {len(na_cols)} all-NaN columns: {na_cols}")
+        merged_df = merged_df.drop(columns=na_cols)
+    logger.info(f"DataFrame shape after dropping all-NaN columns: {cp_df.shape}")
+
+
     if args.impute != "none":
         merged_df = impute_missing(merged_df, method=args.impute, knn_neighbours=args.knn_neighbours, logger=logger)
     else:
