@@ -356,7 +356,8 @@ def main():
         merged_df[numeric_cols] = merged_df[numeric_cols].applymap(lambda x: np.nan if isinstance(x, float) and abs(x) > 1e10 else x)
 
     # Drop columns that are entirely NaN
-    na_cols = merged_df.columns[cp_df.isna().all()].tolist()
+    na_cols = merged_df.columns[merged_df.isna().all()].tolist()
+
     if na_cols:
         logger.warning(f"Dropping {len(na_cols)} all-NaN columns: {na_cols}")
         merged_df = merged_df.drop(columns=na_cols)
