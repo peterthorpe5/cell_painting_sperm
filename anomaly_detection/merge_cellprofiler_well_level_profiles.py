@@ -76,6 +76,8 @@ def main():
         sep = "\t" if ext in [".tsv", ".txt"] else ","
         try:
             df = pd.read_csv(file, sep=sep)
+            if "Unnamed: 0" in df.columns:
+                df = df.drop(columns=["Unnamed: 0"])
             logger.info(f"Loaded '{file}' shape: {df.shape}")
         except Exception as e:
             logger.error(f"Could not read file '{file}': {e}")
