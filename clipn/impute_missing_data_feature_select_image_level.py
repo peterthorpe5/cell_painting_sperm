@@ -282,7 +282,10 @@ def main():
 
     # 1. Load and concatenate CellProfiler CSVs
     input_dir = Path(args.input_dir)
-    csv_files = sorted(input_dir.glob("*.csv"))
+   
+    csv_files = [f for f in sorted(input_dir.glob("*.csv"))
+             if f.name.lower() != "normalised.csv"]
+
     if not csv_files:
         logger.error(f"No CSV files found in {args.input_dir}")
         sys.exit(1)
