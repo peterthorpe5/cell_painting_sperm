@@ -327,9 +327,9 @@ def main():
 
 
     if "Library" not in meta_df.columns:
-        if args.library_value is not None:
+        if args.library is not None:
             meta_df["Library"] = args.library_value
-            logger.info(f"'Library' column not found in metadata. Added with value: {args.library_value}")
+            logger.info(f"'Library' column not found in metadata. Added with value: {args.library}")
         else:
             logger.error(
                 "'Library' column missing from metadata and --library_value not provided. "
