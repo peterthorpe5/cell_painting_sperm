@@ -140,7 +140,8 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
 
 def harmonise_column_names(df, candidates, target, logger):
     """
-    Harmonise column names in a DataFrame, renaming any candidate to the target if needed.
+    Harmonise column names in a DataFrame, renaming a single unambiguous candidate to the target if needed.
+    Avoids renaming if multiple candidates are present, or if the target already exists alongside candidates.
 
     Parameters
     ----------
@@ -156,20 +157,34 @@ def harmonise_column_names(df, candidates, target, logger):
     Returns
     -------
     tuple
-        (pandas.DataFrame with harmonised column name, str name of the harmonised column)
+        (pandas.DataFrame with harmonised column name, str name of the harmonised column or None)
     """
     found = [c for c in candidates if c in df.columns]
-    if not found:
-        logger.warning(f"None of the candidate columns {candidates} found in DataFrame.")
+    if len(found) == 0:
+        logger.warning(f"No candidate columns for '{target}' found in DataFrame: {candidates}")
         return df, None
-    if target in df.columns and target not in found:
+    if len(found) > 1:
+        logger.warning(
+            f"Ambiguous candidates for '{target}' found: {found}. "
+            "No renaming performed to avoid column conflicts."
+        )
+        return df, None
+    # Only one candidate found
+    chosen = found[0]
+    if chosen == target:
         logger.info(f"Target column '{target}' already present.")
         return df, target
-    chosen = found[0]
-    if chosen != target:
-        logger.info(f"Renaming column '{chosen}' to '{target}'.")
-        df = df.rename(columns={chosen: target})
+    # Do not rename if target already exists
+    if target in df.columns:
+        logger.warning(
+            f"Target column '{target}' already exists alongside candidate '{chosen}'. "
+            "No renaming performed."
+        )
+        return df, target
+    logger.info(f"Renaming column '{chosen}' to '{target}'.")
+    df = df.rename(columns={chosen: target})
     return df, target
+
 
 
 def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
