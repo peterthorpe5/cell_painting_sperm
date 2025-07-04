@@ -100,6 +100,44 @@ def setup_logging(log_level="INFO"):
     return logging.getLogger("merge_logger")
 
 
+def robust_read_csv(path, logger=None, n_check_lines=2):
+    """
+    Robustly read a CSV/TSV file, auto-detecting comma or tab delimiter.
+    Tries comma first; if fails or tab detected in header, tries tab.
+    
+    Parameters
+    ----------
+    path : str
+        File path to read.
+    logger : logging.Logger, optional
+        Logger for status messages.
+    n_check_lines : int
+        Number of lines to check for tab presence.
+        
+    Returns
+    -------
+    pd.DataFrame
+        Loaded DataFrame.
+    """
+    logger = logger or logging.getLogger("robust_csv")
+    # Quick sniff of the first line(s)
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = [next(f) for _ in range(n_check_lines)]
+    if any('\t' in line for line in lines):
+        logger.info("Detected tab character in header; reading as TSV.")
+        return pd.read_csv(path, sep='\t')
+    # Try comma first
+    try:
+        df = pd.read_csv(path)
+        if df.shape[1] == 1 and '\t' in lines[0]:
+            raise ValueError("Likely TSV file, but read as CSV.")
+        logger.info("Read file as comma-separated.")
+        return df
+    except Exception as e:
+        logger.warning(f"Reading as CSV failed or looks like TSV: {e}")
+        return pd.read_csv(path, sep='\t')
+
+
 def harmonise_column_names(df, candidates, target, logger):
     """
     Harmonise column names in a DataFrame, renaming any candidate to the target if needed.
@@ -263,6 +301,7 @@ def auto_select_scaler(df, feature_cols, logger):
     return scaler
 
 
+
 def scale_per_plate(df, plate_col, method="auto", logger=None):
     """
     Scale numeric features per plate using the chosen method.
@@ -369,7 +408,7 @@ def main():
     logger.info(f"CellProfiler: using plate column '{plate_col}', well column '{well_col}'.")
 
     # 3. Load and harmonise metadata
-    meta_df = pd.read_csv(args.metadata_file)
+    meta_df = robust_read_csv(args.metadata_file, logger=logger)
     meta_df = harmonise_metadata_columns(meta_df, logger, is_metadata_file=True)
     logger.info(f"Shape meta_df: {meta_df.shape}")
 
