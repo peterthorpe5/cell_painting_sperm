@@ -66,6 +66,11 @@ def parse_args():
     parser.add_argument('--scale_per_plate', action='store_true', help='Apply scaling per plate (default: False).')
     parser.add_argument('--scale_method', choices=['standard', 'robust', 'auto', 'none'], default='robust',
                         help='Scaling method: "standard", "robust", "auto", or "none" (default: robust).')
+    parser.add_argument(
+    '--normalise_to_dmso',
+    action='store_true',
+    help='If set, normalise each feature to the median of DMSO wells (default: False).')
+
     parser.add_argument('--correlation_threshold', type=float, default=0.99,
                         help='Correlation threshold for filtering features (default: 0.99).')
     parser.add_argument('--variance_threshold', type=float, default=0.05,
@@ -136,6 +141,47 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
     except Exception as e:
         logger.warning(f"Reading as CSV failed or looks like TSV: {e}")
         return pd.read_csv(path, sep='\t')
+
+
+def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dmso', logger=None):
+    """
+    Normalise features by subtracting the DMSO median per plate.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame, including features and metadata.
+    feature_cols : list of str
+        Columns to normalise.
+    metadata_col : str
+        Column name indicating compound type.
+    dmso_label : str
+        Value in metadata_col indicating DMSO wells.
+    logger : logging.Logger, optional
+        Logger for progress messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with features normalised to DMSO per plate.
+    """
+    logger = logger or logging.getLogger("dmso_norm")
+    plate_col = 'Plate_Metadata'
+    if plate_col not in df.columns or metadata_col not in df.columns:
+        logger.error(f"Required columns '{plate_col}' or '{metadata_col}' missing.")
+        raise ValueError(f"Required columns '{plate_col}' or '{metadata_col}' missing.")
+    plates = df[plate_col].unique()
+    df_norm = df.copy()
+    for plate in plates:
+        idx_plate = df[plate_col] == plate
+        idx_dmso = idx_plate & (df[metadata_col].str.lower() == dmso_label)
+        if idx_dmso.sum() == 0:
+            logger.warning(f"No DMSO wells found for plate {plate}. Skipping DMSO normalisation for this plate.")
+            continue
+        dmso_median = df.loc[idx_dmso, feature_cols].median()
+        df_norm.loc[idx_plate, feature_cols] = df.loc[idx_plate, feature_cols] - dmso_median
+        logger.info(f"Normalised plate {plate} to DMSO median.")
+    return df_norm
 
 
 def harmonise_column_names(df, candidates, target, logger):
@@ -492,12 +538,29 @@ def main():
     else:
         logger.info("Imputation skipped (impute=none).")
 
+
+    # 7a. Optional DMSO normalisation (after scaling, before feature selection)
+    if args.normalise_to_dmso:
+        feature_cols = [c for c in merged_df.select_dtypes(include=[np.number]).columns if c != "row_number"]
+        merged_df = normalise_to_dmso(
+            merged_df,
+            feature_cols,
+            metadata_col="cpd_type",
+            dmso_label="dmso",
+            logger=logger
+        )
+        logger.info("DMSO normalisation complete.")
+    else:
+        logger.info("DMSO normalisation not requested.")
+
+
     # 7. Per-plate scaling (if requested)
     if args.scale_per_plate and args.scale_method != "none":
         feature_cols = [c for c in merged_df.select_dtypes(include=[np.number]).columns if c != "row_number"]
         merged_df = scale_per_plate(merged_df, plate_col=plate_col, method=args.scale_method, logger=logger)
     else:
         logger.info("Per-plate scaling not performed.")
+
 
     # 8. Standardise metadata columns for downstream compatibility
     merged_df = standardise_metadata_columns(merged_df, logger=logger, dataset_name="merged_raw")
@@ -542,6 +605,11 @@ def main():
         dup_names = final_df.columns[dupe_cols].tolist()
         logger.warning(f"Found and dropping duplicate columns in output: {dup_names}")
         final_df = final_df.loc[:, ~final_df.columns.duplicated()]
+    # List columns to drop
+    cols_to_drop = ['ImageNumber', 'ObjectNumber']
+
+    # Only drop if present to avoid errors
+    final_df = final_df.drop(columns=[col for col in cols_to_drop if col in final_df.columns])
 
     final_df.to_csv(args.output_file, sep=args.sep, index=False)
     logger.info(f"Saved feature-selected data to {args.output_file} (shape: {final_df.shape})")
