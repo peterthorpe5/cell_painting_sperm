@@ -34,6 +34,7 @@ Logs detailed info and debug-level outputs.
 import argparse
 import logging
 import sys
+import os
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -98,6 +99,37 @@ def detect_csv_delimiter(csv_path):
         else:
             # default to comma if both are found or none
             return ','
+
+
+def ensure_library_column(df, filepath, logger, value=None):
+    """
+    Add a 'Library' column to df using the filename if missing (or use a provided value).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Metadata dataframe.
+    filepath : str
+        File path for the source file.
+    logger : logging.Logger
+        Logger for status messages.
+    value : str, optional
+        Explicit value for the Library column. If not provided, uses filename.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 'Library' column ensured.
+    """
+    if "Library" not in df.columns:
+        if value is not None:
+            base_library = value
+        else:
+            base_library = os.path.splitext(os.path.basename(filepath))[0]
+        df["Library"] = base_library
+        logger.info(f"'Library' column not found. Set to: {base_library}")
+    return df
+
 
 
 def ensure_plate_well_metadata(decoded_df: pd.DataFrame, metadata_source: pd.DataFrame, logger) -> pd.DataFrame:
@@ -280,6 +312,9 @@ def load_single_dataset(name, path, logger, metadata_cols):
         df[promoted_col] = df.index
         df.index.name = None
         logger.warning(f"[{name}] Promoted index '{promoted_col}' to column to preserve metadata.")
+
+    # Ensure Library column is present before standardisation
+    df = ensure_library_column(df, path, logger, value=name)
 
     # Standardise column names (e.g., trimming whitespace)
     df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
