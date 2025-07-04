@@ -70,6 +70,9 @@ def parse_args():
                         help='Correlation threshold for filtering features (default: 0.99).')
     parser.add_argument('--variance_threshold', type=float, default=0.05,
                         help='Variance threshold for filtering features (default: 0.05).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
+    parser.add_argument('--library', type=str, default=None,
+                    help="Value to add as 'Library' column if not present in the metadata. "
+                         "If omitted and column missing, script will error.")
     parser.add_argument('--sep', default='\t', help='Delimiter for output file (default: tab).')
     parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Set logging level.')
     return parser.parse_args()
@@ -321,6 +324,21 @@ def main():
     # 3. Load and harmonise metadata
     meta_df = pd.read_csv(args.metadata_file)
     logger.info(f"Shape meta_df: {meta_df.shape}")
+
+
+    if "Library" not in meta_df.columns:
+        if args.library_value is not None:
+            meta_df["Library"] = args.library_value
+            logger.info(f"'Library' column not found in metadata. Added with value: {args.library_value}")
+        else:
+            logger.error(
+                "'Library' column missing from metadata and --library_value not provided. "
+                "Please specify --library_value if you want to add this column.")
+            sys.exit(1)
+    else:
+        logger.info("'Library' column found in metadata.")
+
+
     meta_df, meta_plate_col = harmonise_column_names(meta_df, plate_candidates, plate_col, logger)
     meta_df, meta_well_col = harmonise_column_names(meta_df, well_candidates, well_col, logger)
     if meta_plate_col is None or meta_well_col is None:
