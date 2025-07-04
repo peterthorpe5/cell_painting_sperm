@@ -197,6 +197,47 @@ def merge_annotations(latent_df_or_path, annotation_file: str, output_prefix: st
     except Exception as e:
         logger.warning(f"Annotation merging failed: {e}")
 
+def aggregate_latent_per_compound(
+    df,
+    group_col="cpd_id",
+    latent_cols=None,
+    method="median"
+):
+    """
+    Aggregate image-level latent vectors to a single vector per compound.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame containing image-level latent vectors and compound identifiers.
+    group_col : str
+        Name of the column identifying compounds (default: "cpd_id").
+    latent_cols : list of str or None
+        List of latent space column names. If None, uses all integer-named columns.
+    method : str
+        Aggregation method ("median", "mean", "min", "max"; default: "median").
+
+    Returns
+    -------
+    pandas.DataFrame
+        Aggregated DataFrame with one row per compound and collapsed latent features.
+    """
+    if group_col not in df.columns:
+        raise ValueError(f"Column '{group_col}' not found in DataFrame.")
+
+    # Auto-detect latent columns if not provided (pure integer column names)
+    if latent_cols is None:
+        latent_cols = [col for col in df.columns if col.isdigit()]
+        if not latent_cols:
+            raise ValueError("No integer-named latent columns found.")
+
+    # Ensure numeric and sorted order for columns
+    latent_cols = sorted(latent_cols, key=int)
+
+    # Group and aggregate
+    aggfunc = method if method in ["mean", "median", "min", "max"] else "median"
+    aggregated = df.groupby(group_col)[latent_cols].agg(aggfunc).reset_index()
+    return aggregated
 
 
 # this is the problem function when we loose cpd_id
@@ -823,6 +864,19 @@ def main(args):
         n_after = decoded_with_index.shape[0]
         if n_before != n_after:
             print(f"[WARNING] Dropped {n_before - n_after} rows containing NaNs from latent space output.")
+        
+
+        # --- Optional: Aggregate per compound, if requested ---
+        if getattr(args, "aggregate_method", None):  # Only if argument is provided
+            df_compound = aggregate_latent_per_compound(
+                decoded_with_index,
+                group_col="cpd_id",
+                latent_prefix=None,  # Or set your prefix, e.g. "latent_" or "Dim"
+                method=args.aggregate_method
+            )
+            aggregate_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_aggregated_{args.aggregate_method}.tsv"
+            df_compound.to_csv(aggregate_path, sep="\t", index=False)
+            print(f"Aggregated latent space saved to: {aggregate_path}")
 
         renamed_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
         decoded_with_index.to_csv(renamed_path, index=False)
@@ -933,6 +987,13 @@ if __name__ == "__main__":
    
     parser.add_argument("--reference_names", nargs='+', default=["reference1", "reference2"],
                     help="List of dataset names to use for training the CLIPn model.")
+    parser.add_argument(
+    '--aggregate_method',
+    choices=['median', 'mean', 'min', 'max'],
+    default='median',
+    help='How to aggregate image-level latent space to compound-level (default: median).'
+)
+
     parser.add_argument("--annotations",
                         type=str,
                         default=None,
