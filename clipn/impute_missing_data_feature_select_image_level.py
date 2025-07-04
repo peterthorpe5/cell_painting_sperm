@@ -332,8 +332,8 @@ def main():
             logger.info(f"'Library' column not found in metadata. Added with value: {args.library}")
         else:
             logger.error(
-                "'Library' column missing from metadata and --library_value not provided. "
-                "Please specify --library_value if you want to add this column.")
+                "'Library' column missing from metadata and --library not provided. "
+                "Please specify --library if you want to add this column.")
             sys.exit(1)
     else:
         logger.info("'Library' column found in metadata.")
