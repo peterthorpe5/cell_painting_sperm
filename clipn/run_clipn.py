@@ -508,7 +508,8 @@ def extend_model_encoders(model, new_keys, reference_key, logger):
 
 
 
-def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode, latent_dim, lr, epochs):
+def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode, 
+                          latent_dim, lr, epochs, skip_standardise=False):
     """
     Train CLIPn model on input data and return latent space.
 
@@ -542,7 +543,38 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
     """
     logger.info(f"Running CLIPn integration with param: {clipn_param}")
     meta_cols = ["cpd_id", "cpd_type", "Library"]
-    df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
+    
+    logger.info("==== DEBUG: Columns in combined_df ====")
+    logger.info(df.columns.tolist())
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    logger.info("==== DEBUG: Numeric columns in combined_df ====")
+    logger.info(numeric_cols)
+    logger.info(f"Combined DataFrame shape: {df.shape}")
+
+    logger.info("==== DEBUG: First few rows of combined_df ====")
+    logger.info("\n" + str(df.head()))
+
+    # If using 'common_cols' from harmonisation, log that too
+    try:
+        logger.info("==== DEBUG: Common numeric columns after harmonisation ====")
+        logger.info(common_cols)
+    except Exception:
+        pass
+
+    if not numeric_cols:
+        logger.error(
+            "No numeric feature columns found for scaling after harmonisation. "
+            "Check your input files and feature harmonisation step. "
+            "Possible causes: no overlap of features, all numeric columns are NaN, or wrong column dtypes."
+        )
+        raise ValueError("No numeric columns available for scaling in combined_df.")
+    # --- END DEBUG BLOCK --
+    if skip_standardise:
+        logger.info("Skipping standardisation of numeric columns (already scaled).")
+        df_scaled = df
+    else:
+        df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
 
     data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
 
@@ -695,7 +727,8 @@ def main(args):
                                                                                     args.mode,
                                                                                     args.latent_dim,
                                                                                     args.lr,
-                                                                                    args.epoch
+                                                                                    args.epoch,
+                                                                                    skip_standardise=args.skip_standardise
                                                                                     )
             
             if args.save_model:
@@ -1023,11 +1056,13 @@ if __name__ == "__main__":
     parser.add_argument("--reference_names", nargs='+', default=["reference1", "reference2"],
                     help="List of dataset names to use for training the CLIPn model.")
     parser.add_argument(
-    '--aggregate_method',
-    choices=['median', 'mean', 'min', 'max'],
-    default='median',
-    help='How to aggregate image-level latent space to compound-level (default: median).'
-)
+                        '--aggregate_method',
+                        choices=['median', 'mean', 'min', 'max'],
+                        default='median',
+                        help='How to aggregate image-level latent space to compound-level (default: median).'
+                    )
+    parser.add_argument("--skip_standardise", action="store_true", 
+                        help="Skip standardising numeric columns if already scaled.")
 
     parser.add_argument("--annotations",
                         type=str,
