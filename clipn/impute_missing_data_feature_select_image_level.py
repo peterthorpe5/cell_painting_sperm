@@ -182,6 +182,53 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
     return df
 
 
+def harmonise_metadata_columns(df, logger=None, is_metadata_file=False):
+    """
+    Harmonise plate and well column names in the provided DataFrame to 'Plate_Metadata' and 'Well_Metadata'.
+
+    Args:
+        df (pd.DataFrame): Input DataFrame (annotation or features).
+        logger (logging.Logger, optional): Logger for information and warnings.
+        is_metadata_file (bool): If True, use broader candidate set for annotation file.
+
+    Returns:
+        pd.DataFrame: DataFrame with harmonised column names.
+    """
+    plate_candidates = [
+        "Plate_Metadata", "Plate", "Barcode", "plate", "Metadata_Plate", "Image_Metadata_Plate"
+    ] if is_metadata_file else [
+        "Plate_Metadata", "Plate", "plate", "Metadata_Plate", "Image_Metadata_Plate"
+    ]
+    well_candidates = [
+        "Well_Metadata", "Well", "well", "Metadata_Well", "Image_Metadata_Well"
+    ]
+    # Plate harmonisation
+    plate_col = next((col for col in plate_candidates if col in df.columns), None)
+    if plate_col and plate_col != "Plate_Metadata":
+        df = df.rename(columns={plate_col: "Plate_Metadata"})
+        if logger:
+            logger.info(f"Renamed column '{plate_col}' to 'Plate_Metadata'.")
+    elif not plate_col:
+        if logger:
+            logger.warning(f"None of the candidate plate columns {plate_candidates} found in DataFrame.")
+    # Well harmonisation
+    well_col = next((col for col in well_candidates if col in df.columns), None)
+    if well_col and well_col != "Well_Metadata":
+        df = df.rename(columns={well_col: "Well_Metadata"})
+        if logger:
+            logger.info(f"Renamed column '{well_col}' to 'Well_Metadata'.")
+    elif not well_col:
+        if logger:
+            logger.warning(f"None of the candidate well columns {well_candidates} found in DataFrame.")
+    # Final check
+    if "Plate_Metadata" not in df.columns or "Well_Metadata" not in df.columns:
+        if logger:
+            logger.error("Could not harmonise plate/well column names in metadata.")
+        raise ValueError("Could not harmonise plate/well column names in metadata.")
+    return df
+
+
+
 def auto_select_scaler(df, feature_cols, logger):
     """
     Choose robust or standard scaler based on Shapiro normality test.
@@ -323,6 +370,7 @@ def main():
 
     # 3. Load and harmonise metadata
     meta_df = pd.read_csv(args.metadata_file)
+    meta_df = harmonise_metadata_columns(meta_df, logger, is_metadata_file=True)
     logger.info(f"Shape meta_df: {meta_df.shape}")
 
 
