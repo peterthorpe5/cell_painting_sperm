@@ -34,6 +34,7 @@ import argparse
 import logging
 from pathlib import Path
 import sys
+import re
 import pandas as pd
 import numpy as np
 from sklearn.impute import SimpleImputer, KNNImputer
@@ -109,7 +110,8 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
     """
     Robustly read a CSV/TSV file, auto-detecting comma or tab delimiter.
     Tries comma first; if fails or tab detected in header, tries tab.
-    
+    If both fail, raises the last error.
+
     Parameters
     ----------
     path : str
@@ -118,29 +120,66 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
         Logger for status messages.
     n_check_lines : int
         Number of lines to check for tab presence.
-        
+
     Returns
     -------
     pd.DataFrame
         Loaded DataFrame.
+
+    Raises
+    ------
+    Exception
+        If neither CSV nor TSV parsing succeeds.
     """
     logger = logger or logging.getLogger("robust_csv")
-    # Quick sniff of the first line(s)
     with open(path, 'r', encoding='utf-8') as f:
         lines = [next(f) for _ in range(n_check_lines)]
+    # Check for tab character in the first few lines
     if any('\t' in line for line in lines):
         logger.info("Detected tab character in header; reading as TSV.")
         return pd.read_csv(path, sep='\t')
-    # Try comma first
+    # Try comma first, fall back to tab if any failure
     try:
         df = pd.read_csv(path)
+        # Extra check: If only one column and there are tabs in header, treat as TSV
         if df.shape[1] == 1 and '\t' in lines[0]:
-            raise ValueError("Likely TSV file, but read as CSV.")
+            logger.info("File appears to be TSV but read as CSV; retrying as TSV.")
+            return pd.read_csv(path, sep='\t')
         logger.info("Read file as comma-separated.")
         return df
     except Exception as e:
-        logger.warning(f"Reading as CSV failed or looks like TSV: {e}")
-        return pd.read_csv(path, sep='\t')
+        logger.warning(f"Reading as CSV failed ({e}); retrying as TSV.")
+        try:
+            df = pd.read_csv(path, sep='\t')
+            logger.info("Successfully read file as tab-separated after CSV failed.")
+            return df
+        except Exception as e2:
+            logger.error(f"Reading as TSV also failed: {e2}")
+            raise e2  # Reraise the last exception
+
+
+def standardise_well_name(well):
+    """
+    Convert well names to zero-padded format (e.g., A1 -> A01, B9 -> B09, H12 -> H12).
+    
+    Parameters
+    ----------
+    well : str
+        Well name (e.g., 'A1', 'B09', 'H12').
+
+    Returns
+    -------
+    str
+        Zero-padded well name (e.g., 'A01', 'B09', 'H12'). 
+        If input does not match expected pattern, original value is returned.
+    """
+    if isinstance(well, str):
+        match = re.match(r"^([A-Ha-h])(\d{1,2})$", well.strip())
+        if match:
+            row = match.group(1).upper()
+            col = int(match.group(2))
+            return f"{row}{col:02d}"
+    return well
 
 
 def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dmso', logger=None):
@@ -187,7 +226,7 @@ def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dms
 def harmonise_column_names(df, candidates, target, logger):
     """
     Harmonise column names in a DataFrame, renaming a single unambiguous candidate to the target if needed.
-    Avoids renaming if multiple candidates are present, or if the target already exists alongside candidates.
+    If multiple candidates are found, abort and force user to fix input.
 
     Parameters
     ----------
@@ -204,29 +243,38 @@ def harmonise_column_names(df, candidates, target, logger):
     -------
     tuple
         (pandas.DataFrame with harmonised column name, str name of the harmonised column or None)
+
+    Raises
+    ------
+    ValueError
+        If multiple candidates for the column are found, or if a conflict exists with the target.
     """
     found = [c for c in candidates if c in df.columns]
     if len(found) == 0:
         logger.warning(f"No candidate columns for '{target}' found in DataFrame: {candidates}")
         return df, None
     if len(found) > 1:
-        logger.warning(
-            f"Ambiguous candidates for '{target}' found: {found}. "
-            "No renaming performed to avoid column conflicts."
+        logger.error(
+            f"Ambiguous candidates for '{target}' found: {found}. Please ensure only one exists and rerun."
         )
-        return df, None
-    # Only one candidate found
+        raise ValueError(
+            f"Ambiguous candidates for '{target}' found: {found}. "
+            "Please ensure only one exists in your input file and rerun the script."
+        )
     chosen = found[0]
     if chosen == target:
         logger.info(f"Target column '{target}' already present.")
         return df, target
     # Do not rename if target already exists
     if target in df.columns:
-        logger.warning(
+        logger.error(
             f"Target column '{target}' already exists alongside candidate '{chosen}'. "
-            "No renaming performed."
+            "No renaming performed. Please resolve this conflict."
         )
-        return df, target
+        raise ValueError(
+            f"Target column '{target}' already exists alongside candidate '{chosen}'. "
+            "Please resolve this conflict in your input file."
+        )
     logger.info(f"Renaming column '{chosen}' to '{target}'.")
     df = df.rename(columns={chosen: target})
     return df, target
@@ -494,6 +542,17 @@ def main():
         sys.exit(1)
     logger.info(f"Metadata: using plate column '{meta_plate_col}', well column '{meta_well_col}'.")
 
+
+    # Standardise Well_Metadata in CellProfiler data
+    cp_df['Well_Metadata'] = cp_df['Well_Metadata'].apply(standardise_well_name)
+
+    # Standardise Well_Metadata (or 'Well', if not renamed yet) in metadata
+    if 'Well_Metadata' in meta_df.columns:
+        meta_df['Well_Metadata'] = meta_df['Well_Metadata'].apply(standardise_well_name)
+    elif 'Well' in meta_df.columns:
+        meta_df['Well'] = meta_df['Well'].apply(standardise_well_name)
+
+
     # 4. Merge metadata
     merged_df = cp_df.merge(meta_df, how="left", left_on=[plate_col, well_col], right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
@@ -530,7 +589,8 @@ def main():
     if na_cols:
         logger.warning(f"Dropping {len(na_cols)} all-NaN columns: {na_cols}")
         merged_df = merged_df.drop(columns=na_cols)
-    logger.info(f"DataFrame shape after dropping all-NaN columns: {cp_df.shape}")
+    logger.info(f"DataFrame shape after dropping all-NaN columns: {merged_df.shape}")
+
 
 
     if args.impute != "none":
