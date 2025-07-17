@@ -259,7 +259,8 @@ def aggregate_latent_per_compound(
 
     # Auto-detect latent columns if not provided (pure integer column names)
     if latent_cols is None:
-        latent_cols = [col for col in df.columns if col.isdigit()]
+        latent_cols = [col for col in decoded_df.columns if (isinstance(col, int)) or (isinstance(col, str) and col.isdigit())]
+
         if not latent_cols:
             raise ValueError("No integer-named latent columns found.")
 
@@ -466,6 +467,11 @@ def decode_labels(df, encoders, logger):
 
         if df[col].isna().all():
             logger.warning(f"decode_labels: Column '{col}' is all-NaN. Skipping decode.")
+            continue
+
+        # Only attempt decoding if dtype is integer (not string/categorical)
+        if not np.issubdtype(df[col].dtype, np.integer):
+            logger.info(f"decode_labels: Column '{col}' is not integer-encoded. Skipping decode.")
             continue
 
         try:
@@ -969,7 +975,7 @@ def main(args):
 
     # AGGREGATE TO COMPOUND-LEVEL HERE
     if getattr(args, "aggregate_method", None):
-        latent_cols = [col for col in decoded_df.columns if col.isdigit()]
+        latent_cols = [col for col in decoded_df.columns if (isinstance(col, int)) or (isinstance(col, str) and col.isdigit())]
         if not latent_cols:
             logger.error("No latent feature columns found for aggregation. Check column names.")
             raise ValueError("No latent feature columns found for aggregation.")
