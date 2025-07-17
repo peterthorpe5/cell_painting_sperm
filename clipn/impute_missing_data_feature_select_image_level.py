@@ -564,9 +564,15 @@ def main():
     logger.info(f"Shape after dropping all-NaN columns post-merge: {merged_df.shape}")
 
     # Warn for missing metadata
-    missing_meta = merged_df[[col for col in meta_df.columns if col not in [meta_plate_col, meta_well_col]]].isnull().all(axis=1).sum()
-    if missing_meta > 0:
-        logger.warning(f"{missing_meta} rows have missing metadata after merge.")
+    meta_cols_to_check = [col for col in meta_df.columns if col not in [meta_plate_col, meta_well_col] and col in merged_df.columns]
+    if meta_cols_to_check:
+        missing_meta = merged_df[meta_cols_to_check].isnull().all(axis=1).sum()
+        if missing_meta > 0:
+            logger.warning(f"{missing_meta} rows have missing metadata after merge.")
+    else:
+        logger.warning("No additional metadata columns found in merged_df for missing metadata check.")
+
+
 
     # 5. Add row_number  - currently commented out. add if required, plus then alter the metadata_cols = [   ... too
     # merged_df.insert(0, "row_number", range(1, len(merged_df) + 1))
@@ -655,7 +661,14 @@ def main():
 
 
     # 11. Combine metadata and filtered features
-    final_df = pd.concat([metadata_df, filtered_final], axis=1)
+    # Only keep essential metadata columns and the final filtered features
+    metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+    present_metadata = [col for col in metadata_cols if col in merged_df.columns]
+
+    # After feature selection:
+    final_cols = present_metadata + list(filtered_final.columns)
+    final_df = merged_df[final_cols].copy()
+
 
 
     # 12. Output
@@ -674,6 +687,7 @@ def main():
     final_df.to_csv(args.output_file, sep=args.sep, index=False)
     logger.info(f"Saved feature-selected data to {args.output_file} (shape: {final_df.shape})")
     logger.info("Merge complete.")
+    logger.info("note to user: I do not keep all metadata. Re-attach later if you need it in the results")
 
 if __name__ == "__main__":
     main()

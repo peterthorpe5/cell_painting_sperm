@@ -441,18 +441,44 @@ def standardise_numeric_columns_preserving_metadata(df: pd.DataFrame, meta_colum
     return df_scaled_all
 
 
-
 def decode_labels(df, encoders, logger):
     """
-    Decode categorical columns to original labels.
-    Skips decoding if unseen labels are present.
+    Decode categorical columns in a DataFrame to original labels using LabelEncoders.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame whose columns may be label-encoded.
+    encoders : dict
+        Mapping of column names to fitted LabelEncoder objects.
+    logger : logging.Logger
+        Logger for progress and warnings.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with decoded columns where possible.
     """
     for col, le in encoders.items():
+        if col not in df.columns:
+            logger.warning(f"decode_labels: Column '{col}' not found in DataFrame. Skipping.")
+            continue
+
+        if df[col].isna().all():
+            logger.warning(f"decode_labels: Column '{col}' is all-NaN. Skipping decode.")
+            continue
+
         try:
-            df[col] = le.inverse_transform(df[col])
-            logger.debug(f"Decoded column {col}")
-        except ValueError as e:
-            logger.warning(f"Skipping decoding for column {col} due to unseen labels: {e}")
+            mask_notna = df[col].notna()
+            decoded_vals = df[col].copy()
+            decoded_vals.loc[mask_notna] = le.inverse_transform(df.loc[mask_notna, col].astype(int))
+            df[col] = decoded_vals
+            logger.info(f"decode_labels: Decoded column '{col}'.")
+        except Exception as e:
+            logger.warning(
+                f"decode_labels: Could not decode column '{col}': {e}. "
+                "May be due to unseen labels, type errors, or missing encoder classes."
+            )
     return df
 
 
@@ -910,12 +936,12 @@ def main(args):
     latent_df = latent_df.reset_index()
     latent_df = pd.merge(latent_df, metadata_df, on=["Dataset", "Sample"], how="left")
 
-    
+   
     decoded_df = decode_labels(latent_df.copy(), encoders, logger)
     decoded_path = Path(args.out) / f"{args.experiment}_decoded.csv"
     decoded_df.to_csv(decoded_path)
     logger.info(f"Decoded data saved to {decoded_path}")
-
+ 
     # Save renamed latent with original compound IDs (e.g., cpd_id)
     try:
         decoded_with_index = decoded_df.reset_index()
@@ -970,6 +996,7 @@ def main(args):
 
         # Load datasets again to extract Plate_Metadata and Well_Metadata
         metadata_cols_extended = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+
         plate_well_lookup = combined_df[metadata_cols_extended].reset_index()
 
         # Merge Plate_Metadata and Well_Metadata back into the decoded DataFrame
