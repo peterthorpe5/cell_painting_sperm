@@ -938,9 +938,32 @@ def main(args):
 
    
     decoded_df = decode_labels(latent_df.copy(), encoders, logger)
-    decoded_path = Path(args.out) / f"{args.experiment}_decoded.csv"
-    decoded_df.to_csv(decoded_path)
-    logger.info(f"Decoded data saved to {decoded_path}")
+
+
+    # Combine duplicate/suffixed cpd_id columns if they exist
+    if 'cpd_id_x' in decoded_df.columns or 'cpd_id_y' in decoded_df.columns:
+        decoded_df['cpd_id'] = (
+            decoded_df.get('cpd_id_x', pd.Series(dtype=object))
+            .combine_first(decoded_df.get('cpd_id_y', pd.Series(dtype=object)))
+            .combine_first(decoded_df.get('cpd_id', pd.Series(dtype=object)))
+        )
+        cols_to_drop = [col for col in ['cpd_id_x', 'cpd_id_y'] if col in decoded_df.columns]
+        decoded_df = decoded_df.drop(columns=cols_to_drop)
+
+
+    # Save in main output directory
+    main_decoded_path = Path(args.out) / f"{args.experiment}_decoded.csv"
+    decoded_df.to_csv(main_decoded_path, index=False)
+    logger.info(f"Decoded data saved to {main_decoded_path}")
+
+    # Save in post_clipn subfolder
+    post_clipn_dir = Path(args.out) / "post_clipn"
+    post_clipn_dir.mkdir(parents=True, exist_ok=True)
+    post_clipn_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.csv"
+    decoded_df.to_csv(post_clipn_decoded_path, index=False)
+    logger.info(f"Decoded data saved to {post_clipn_decoded_path}")
+
+
  
     # Save renamed latent with original compound IDs (e.g., cpd_id)
     try:
