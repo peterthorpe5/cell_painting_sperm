@@ -932,138 +932,108 @@ def main(args):
                 torch.save(model, model_path)
                 logger.info(f"Trained CLIPn model saved to: {model_path}")
 
-    
+    # Reset index and join metadata
     latent_df = latent_df.reset_index()
     latent_df = pd.merge(latent_df, metadata_df, on=["Dataset", "Sample"], how="left")
 
-   
+    # Decode labels
     decoded_df = decode_labels(latent_df.copy(), encoders, logger)
 
-
-    # Combine duplicate/suffixed cpd_id columns if they exist
-    if 'cpd_id_x' in decoded_df.columns or 'cpd_id_y' in decoded_df.columns:
-        decoded_df['cpd_id'] = (
-            decoded_df.get('cpd_id_x', pd.Series(dtype=object))
-            .combine_first(decoded_df.get('cpd_id_y', pd.Series(dtype=object)))
-            .combine_first(decoded_df.get('cpd_id', pd.Series(dtype=object)))
+    # Clean up any duplicate cpd_id columns (after merge)
+    if "cpd_id_x" in decoded_df.columns or "cpd_id_y" in decoded_df.columns:
+        decoded_df["cpd_id"] = (
+            decoded_df.get("cpd_id_x", pd.Series(dtype=object))
+            .combine_first(decoded_df.get("cpd_id_y", pd.Series(dtype=object)))
+            .combine_first(decoded_df.get("cpd_id", pd.Series(dtype=object)))
         )
-        cols_to_drop = [col for col in ['cpd_id_x', 'cpd_id_y'] if col in decoded_df.columns]
+        cols_to_drop = [col for col in ["cpd_id_x", "cpd_id_y"] if col in decoded_df.columns]
         decoded_df = decoded_df.drop(columns=cols_to_drop)
 
+    # Drop rows missing cpd_id (optional, but usually sensible!)
+    n_before = decoded_df.shape[0]
+    decoded_df = decoded_df[decoded_df["cpd_id"].notna()]
+    n_after = decoded_df.shape[0]
+    if n_before != n_after:
+        logger.warning(f"Dropped {n_before - n_after} rows with missing cpd_id after decoding/merge.")
 
-    # Save in main output directory
+    # Save decoded (image-level) file in both locations
     main_decoded_path = Path(args.out) / f"{args.experiment}_decoded.csv"
     decoded_df.to_csv(main_decoded_path, index=False)
     logger.info(f"Decoded data saved to {main_decoded_path}")
 
-    # Save in post_clipn subfolder
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
     post_clipn_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.csv"
     decoded_df.to_csv(post_clipn_decoded_path, index=False)
     logger.info(f"Decoded data saved to {post_clipn_decoded_path}")
 
+    # AGGREGATE TO COMPOUND-LEVEL HERE
+    if getattr(args, "aggregate_method", None):
+        latent_cols = [col for col in decoded_df.columns if col.isdigit()]
+        if not latent_cols:
+            logger.error("No latent feature columns found for aggregation. Check column names.")
+            raise ValueError("No latent feature columns found for aggregation.")
+        df_compound = (
+            decoded_df
+            .groupby("cpd_id")[latent_cols]
+            .agg(args.aggregate_method)
+            .reset_index()
+        )
+        # Add cpd_type/Library by first-observed value (if present)
+        for col in ["cpd_type", "Library"]:
+            if col in decoded_df.columns:
+                first_vals = decoded_df.groupby("cpd_id")[col].first().reset_index()
+                df_compound = pd.merge(df_compound, first_vals, on="cpd_id", how="left")
+        agg_path = post_clipn_dir / f"{args.experiment}_CLIPn_latent_aggregated_{args.aggregate_method}.tsv"
+        df_compound.to_csv(agg_path, sep="\t", index=False)
+        logger.info(f"Aggregated latent space saved to: {agg_path}")
 
- 
-    # Save renamed latent with original compound IDs (e.g., cpd_id)
+    # Save Plate/Well lookup if present
+    if "Plate_Metadata" in decoded_df.columns and "Well_Metadata" in decoded_df.columns:
+        plate_well_df = decoded_df[["Dataset", "Sample", "cpd_id", "Plate_Metadata", "Well_Metadata"]].copy()
+        plate_well_file = post_clipn_dir / f"{args.experiment}_latent_plate_well_lookup.tsv"
+        plate_well_df.to_csv(plate_well_file, sep="\t", index=False)
+        logger.info(f"Saved Plate/Well metadata to: {plate_well_file}")
+    else:
+        logger.warning("Plate_Metadata or Well_Metadata missing in decoded output — skipping plate/well export.")
+
+    # ---- Annotation merge (optional) ----
+    if args.annotations:
+        logger.info(f"Merging annotations from: {args.annotations}")
+        annot_merge_df = decoded_df.copy()
+        # If missing Plate_Metadata/Well_Metadata, reconstruct from combined_df
+        for col in ["Plate_Metadata", "Well_Metadata"]:
+            if col not in annot_merge_df.columns and col in combined_df.columns:
+                annot_merge_df = pd.merge(
+                    annot_merge_df,
+                    combined_df[["Dataset", "Sample", col]].drop_duplicates(),
+                    on=["Dataset", "Sample"],
+                    how="left"
+                )
+        merge_annotations(
+            latent_df_or_path=annot_merge_df,
+            annotation_file=args.annotations,
+            output_prefix=str(post_clipn_dir / args.experiment),
+            logger=logger
+        )
+
+    # ---- Generate combined label mapping from decoded data ----
     try:
-        decoded_with_index = decoded_df.reset_index()
-
-        # Add cpd_id from cpd_ids dict
-        decoded_with_index["cpd_id"] = decoded_with_index.apply(
-            lambda row: cpd_ids.get(row["Dataset"], [None])[row["Sample"]],
-            axis=1
+        label_mapping_combined = decoded_df[["Dataset", "Sample", "cpd_type"]].copy()
+        label_mapping_wide = (
+            label_mapping_combined
+            .pivot(index="Sample", columns="Dataset", values="cpd_type")
+            .T
         )
-
-        # Drop rows with NaN before output
-        n_before = decoded_with_index.shape[0]
-        decoded_with_index = decoded_with_index.dropna(axis=0)
-        n_after = decoded_with_index.shape[0]
-        if n_before != n_after:
-            print(f"[WARNING] Dropped {n_before - n_after} rows containing NaNs from latent space output.")
-        
-
-        # --- Optional: Aggregate per compound, if requested ---
-        if getattr(args, "aggregate_method", None):  # Only if argument is provided
-            df_compound = aggregate_latent_per_compound(
-                decoded_with_index,
-                group_col="cpd_id",
-                latent_prefix=None,  # Or set your prefix, e.g. "latent_" or "Dim"
-                method=args.aggregate_method
-            )
-            aggregate_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_aggregated_{args.aggregate_method}.tsv"
-            df_compound.to_csv(aggregate_path, sep="\t", index=False)
-            print(f"Aggregated latent space saved to: {aggregate_path}")
-
-        renamed_path = Path(args.out) / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.csv"
-        decoded_with_index.to_csv(renamed_path, index=False)
-
-        cpd_csv_file = post_clipn_dir / f"{args.experiment}_CLIPn_latent_representations_with_cpd_id.tsv"
-        decoded_with_index.to_csv(cpd_csv_file, sep="\t", index=False)
-
-
-        if "Plate_Metadata" in decoded_with_index.columns and "Well_Metadata" in decoded_with_index.columns:
-            plate_well_df = decoded_with_index[["Dataset", "Sample", "cpd_id", "Plate_Metadata", "Well_Metadata"]].copy()
-            plate_well_file = post_clipn_dir / f"{args.experiment}_latent_plate_well_lookup.tsv"
-            plate_well_df.to_csv(plate_well_file, sep="\t", index=False)
-            logger.info(f"Saved Plate/Well metadata to: {plate_well_file}")
-        else:
-            logger.warning("Plate_Metadata or Well_Metadata missing in decoded output — skipping plate/well export.")
-
-
-
-        # here we add annotation data. Note the excel file is messy
-        # Create a copy of decoded data to safely add annotation join fields
-        # Create a copy of decoded data to safely add annotation join fields
-        annot_merge_df = decoded_with_index.copy()
-
-        # Load datasets again to extract Plate_Metadata and Well_Metadata
-        metadata_cols_extended = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-
-        plate_well_lookup = combined_df[metadata_cols_extended].reset_index()
-
-        # Merge Plate_Metadata and Well_Metadata back into the decoded DataFrame
-        annot_merge_df = pd.merge(
-            annot_merge_df,
-            plate_well_lookup[["Dataset", "Sample", "Plate_Metadata", "Well_Metadata"]],
-            on=["Dataset", "Sample"],
-            how="left"
-        )
-
-        if args.annotations:
-            logger.info(f"Merging annotations from: {args.annotations}")
-            merge_annotations(
-                latent_file=annot_merge_df,
-                annotation_file=args.annotations,
-                output_prefix=str(cpd_csv_file).replace(".tsv", ""),
-                logger=logger
-            )
-
-
-        # Generate combined label mapping from decoded data
-        try:
-            label_mapping_combined = decoded_with_index.copy()
-            label_mapping_combined = label_mapping_combined[["Dataset", "Sample", "cpd_type"]]
-            label_mapping_wide = (
-                label_mapping_combined
-                .pivot(index="Sample", columns="Dataset", values="cpd_type")
-                .T
-            )
-            label_mapping_wide.to_csv(post_clipn_dir / "label_mappings.tsv", sep="\t")
-            logger.info("Saved label mappings to post_clipn/label_mappings.csv")
-        except Exception as e:
-            logger.warning(f"Failed to generate label mapping CSV: {e}")
-
-
+        label_mapping_wide.to_csv(post_clipn_dir / "label_mappings.tsv", sep="\t")
+        logger.info("Saved label mappings to post_clipn/label_mappings.tsv")
     except Exception as e:
-        logger.warning(f"Failed to save renamed latent file: {e}")
-    logger.info(f"Columns at this stage, encoded: {combined_df.columns.tolist()}")
+        logger.warning(f"Failed to generate label mapping CSV: {e}")
 
-    # Save label encoder mappings
+    # ---- Save label encoder mappings ----
     try:
         mapping_dir = Path(args.out)
         mapping_dir.mkdir(parents=True, exist_ok=True)
-
         for column, encoder in encoders.items():
             mapping_path = mapping_dir / f"label_mapping_{column}.csv"
             mapping_df = pd.DataFrame({
@@ -1072,9 +1042,11 @@ def main(args):
             })
             mapping_df.to_csv(mapping_path, index=False)
             logger.info(f"Saved label mapping for {column} to {mapping_path}")
-        logger.info(f"clipn intergration completed. If this ran .. there is a god")
+        logger.info("clipn integration completed. If this ran .. there is a god")
     except Exception as e:
         logger.warning(f"Failed to save label encoder mappings: {e}")
+
+    logger.info(f"Columns at this stage, encoded: {combined_df.columns.tolist()}")
 
 
 
