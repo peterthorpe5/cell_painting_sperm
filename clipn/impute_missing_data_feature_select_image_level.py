@@ -329,6 +329,59 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
     return df
 
 
+
+import pandas as pd
+
+def clean_metadata_columns(df, logger=None):
+    """
+    Standardise Cell Painting metadata columns (cpd_id, cpd_type, Library).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame.
+    logger : logging.Logger, optional
+        Logger for messages.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with cleaned metadata columns.
+    """
+    # Standardise cpd_type values
+    cpd_type_map = {
+        "positive controls (sperm painting)": "positive_control",
+        "negative control (DMSO)": "DMSO",
+    }
+
+    for col in ["cpd_id", "cpd_type", "Library"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+            df.loc[df[col].eq("") | df[col].isna(), col] = pd.NA
+
+    if "cpd_type" in df.columns:
+        df["cpd_type"] = df["cpd_type"].replace(cpd_type_map)
+        # Set all cpd_type that are not DMSO or positive_control (case insensitive) to 'compound'
+        mask_not_control = ~df["cpd_type"].isin(["DMSO", "positive_control"])
+        mask_has_cpd_id = df["cpd_id"].notna() & (df["cpd_id"] != "DMSO")
+        df.loc[mask_not_control & mask_has_cpd_id, "cpd_type"] = "compound"
+        if logger:
+            logger.info("Standardised cpd_type values.")
+
+    # Set Library column
+    if "Library" in df.columns and "cpd_id" in df.columns:
+        mask_dmso = (df["cpd_id"] == "DMSO") | (df["cpd_type"] == "DMSO")
+        mask_has_cpd_id = df["cpd_id"].notna() & (df["cpd_id"] != "DMSO")
+        df.loc[mask_dmso, "Library"] = "control"
+        df.loc[mask_has_cpd_id & ~mask_dmso, "Library"] = "compound"
+        if logger:
+            n_dmso = mask_dmso.sum()
+            n_compound = (mask_has_cpd_id & ~mask_dmso).sum()
+            logger.info(f"Set Library='control' for {n_dmso} rows and 'compound' for {n_compound} rows.")
+
+    return df
+
+
 def harmonise_metadata_columns(df, logger=None, is_metadata_file=False):
     """
     Harmonise plate and well column names in the provided DataFrame to 'Plate_Metadata' and 'Well_Metadata'.
@@ -519,7 +572,10 @@ def main():
     # 3. Load and harmonise metadata
     meta_df = robust_read_csv(args.metadata_file, logger=logger)
     meta_df = harmonise_metadata_columns(meta_df, logger, is_metadata_file=True)
+    meta_df = clean_metadata_columns(meta_df, logger)
     logger.info(f"Shape meta_df: {meta_df.shape}")
+
+
 
 
     if "Library" not in meta_df.columns:
