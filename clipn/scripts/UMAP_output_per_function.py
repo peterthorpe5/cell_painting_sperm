@@ -47,7 +47,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colormaps
 import umap.umap_ as umap
 import plotly.express as px
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, AgglomerativeClustering
 import numpy as np
 
 def summarise_clusters(df, outdir, compound_columns):
@@ -132,11 +132,17 @@ def run_umap_analysis(input_path, output_dir, args):
     df["UMAP1"] = latent_umap[:, 0]
     df["UMAP2"] = latent_umap[:, 1]
 
+
     if args.num_clusters:
-        kmeans = KMeans(n_clusters=args.num_clusters, random_state=42)
-        df["Cluster"] = kmeans.fit_predict(latent_umap)
+        if getattr(args, "clustering_method", "kmeans") == "hierarchical":
+            clustering = AgglomerativeClustering(n_clusters=args.num_clusters, linkage="ward")
+            df["Cluster"] = clustering.fit_predict(latent_umap)
+        else:
+            kmeans = KMeans(n_clusters=args.num_clusters, random_state=42)
+            df["Cluster"] = kmeans.fit_predict(latent_umap)
     else:
-        df["Cluster"] = "NA"
+        df["Cluster"] = np.nan
+
 
     if args.highlight_list:
         highlight_set = set(c.upper() for c in args.highlight_list)
@@ -241,18 +247,18 @@ def parse_args():
     parser.add_argument("--umap_min_dist", type=float, default=0.1, help="UMAP: minimum distance")
     parser.add_argument("--umap_metric", type=str, default="cosine", help="UMAP: distance metric")
     parser.add_argument("--num_clusters", type=int, default=None, help="Optional: number of KMeans clusters")
+    parser.add_argument("--clustering_method", default="hierarchical", choices=["kmeans", "hierarchical"], help="Clustering method for UMAP ('kmeans' or 'hierarchical').")
     parser.add_argument("--colour_by", nargs="*", default=None, help="List of metadata columns to colour UMAP by")
     parser.add_argument("--add_labels", action="store_true", help="Add `cpd_id` text labels to interactive UMAP")
     parser.add_argument("--highlight_prefix", type=str, default="MCP", help="Highlight compounds with this prefix")
     parser.add_argument("--highlight_list",
                         nargs="+",
                         default=["MCP09", "MCP05",
-                                                        'DDD02387619', 'DDD02443214', 'DDD02454019', 'DDD02454403', 
-                                                        'DDD02459457', 'DDD02487111', 'DDD02487311', 'DDD02589868', 
+                                                        'DDD02387619', 'DDD02454019',  
                                                         'DDD02591200', 'DDD02591362', 'DDD02941115', 
                                                         'DDD02941193', 'DDD02947912', 'DDD02947919', 'DDD02948915', 
                                                         'DDD02948916', 'DDD02948926', 'DDD02952619', 'DDD02952620', 
-                                                        'DDD02955130', 'DDD02958365'],
+                                                        'DDD02955130'],
                         help="List of specific compound IDs to highlight regardless of prefix"
                     )
 

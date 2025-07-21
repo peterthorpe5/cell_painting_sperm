@@ -171,10 +171,9 @@ def plot_distance_heatmap(dist_df, output_path):
     plt.close()
 
 
-
-def assign_clusters(df, logger=None, num_clusters=15):
+def assign_clusters(df, logger=None, num_clusters=15, method="hierarchical"):
     """
-    Assign KMeans and HDBSCAN clusters to the DataFrame.
+    Assign clusters using KMeans, Hierarchical, or HDBSCAN clustering.
 
     Parameters
     ----------
@@ -183,35 +182,47 @@ def assign_clusters(df, logger=None, num_clusters=15):
     logger : logging.Logger, optional
         Logger for debug information.
     num_clusters : int, optional
-        Number of clusters for KMeans (default: 15).
+        Number of clusters for KMeans/Hierarchical (default: 15).
+    method : str, optional
+        Clustering method: 'kmeans', 'hierarchical', or 'hdbscan'.
 
     Returns
     -------
     pd.DataFrame
-        Updated DataFrame with 'Cluster_KMeans' and 'Cluster_HDBSCAN' columns.
+        Updated DataFrame with 'Cluster' column.
     """
-    from sklearn.cluster import KMeans
-    from hdbscan import HDBSCAN
-
     numeric_df = df.select_dtypes(include=[float, int])
 
-    # KMeans
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-    df["Cluster_KMeans"] = kmeans.fit_predict(numeric_df)
-    if logger:
-        logger.info("Assigned clusters using KMeans")
-
-    # HDBSCAN
-    if HDBSCAN is not None:
-        hdb = HDBSCAN(min_cluster_size=5, prediction_data=True)
-        df["Cluster_HDBSCAN"] = hdb.fit_predict(numeric_df)
+    if method == "kmeans":
+        kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+        df["Cluster"] = kmeans.fit_predict(numeric_df)
         if logger:
-            logger.info("Assigned clusters using HDBSCAN")
+            logger.info("Assigned clusters using KMeans")
+    elif method == "hierarchical":
+        from sklearn.cluster import AgglomerativeClustering
+        clusterer = AgglomerativeClustering(n_clusters=num_clusters, linkage="ward")
+        df["Cluster"] = clusterer.fit_predict(numeric_df)
+        if logger:
+            logger.info("Assigned clusters using Hierarchical clustering")
+    elif method == "hdbscan":
+        if hdbscan is not None:
+            hdb = hdbscan.HDBSCAN(min_cluster_size=5, prediction_data=True)
+            df["Cluster"] = hdb.fit_predict(numeric_df)
+            if logger:
+                logger.info("Assigned clusters using HDBSCAN")
+        else:
+            if logger:
+                logger.warning("HDBSCAN not available. Skipping clustering.")
+            df["Cluster"] = np.nan
     else:
         if logger:
-            logger.warning("HDBSCAN not available. Skipping HDBSCAN clustering.")
+            logger.warning(f"Unknown clustering method '{method}'. No clusters assigned.")
+        df["Cluster"] = np.nan
 
     return df
+
+
+
 
 
 def generate_umap_OLD(df, output_dir, output_file, args=None, add_labels=False, 
@@ -526,7 +537,8 @@ def standardise_cpd_id_column(df: pd.DataFrame, column: str = "cpd_id") -> pd.Da
 
 
 def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
-                  colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None):
+                  colour_by="cpd_type", highlight_prefix="MCP", highlight_list=None,
+                  clustering_method="hierarchical"):
     """
     Generate and save UMAP plots (static matplotlib and interactive Plotly).
 
@@ -614,6 +626,22 @@ def generate_umap(df, output_dir, output_file, args=None, add_labels=False,
     embedding = reducer.fit_transform(df[feature_cols])
     df["UMAP1"] = embedding[:, 0]
     df["UMAP2"] = embedding[:, 1]
+
+    # ===== Cluster assignment =====
+    if num_clusters is not None:
+        if clustering_method == "hierarchical":
+            from sklearn.cluster import AgglomerativeClustering
+            clusterer = AgglomerativeClustering(n_clusters=num_clusters, linkage="ward")
+            df["Cluster"] = clusterer.fit_predict(df[["UMAP1", "UMAP2"]])
+        elif clustering_method == "hdbscan":
+            import hdbscan
+            clusterer = hdbscan.HDBSCAN(min_cluster_size=max(5, int(len(df)/num_clusters)))
+            df["Cluster"] = clusterer.fit_predict(df[["UMAP1", "UMAP2"]])
+        else:
+            kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+            df["Cluster"] = kmeans.fit_predict(df[["UMAP1", "UMAP2"]])
+    else:
+        df["Cluster"] = np.nan  
 
     # ==== Highlighting ====
     df["is_highlighted"] = df["cpd_id"].isin(highlight_list) if highlight_list else df["cpd_id"].str.upper().str.startswith(highlight_prefix.upper())

@@ -38,7 +38,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import umap.umap_ as umap
 import plotly.express as px
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, AgglomerativeClustering
+
 
 
 def run_umap_analysis(input_path, output_dir, args):
@@ -78,11 +79,17 @@ def run_umap_analysis(input_path, output_dir, args):
     df["UMAP1"] = latent_umap[:, 0]
     df["UMAP2"] = latent_umap[:, 1]
 
+    
     if args.num_clusters:
-        kmeans = KMeans(n_clusters=args.num_clusters, random_state=42)
-        df["Cluster"] = kmeans.fit_predict(latent_umap)
+        if getattr(args, "clustering_method", "kmeans") == "hierarchical":
+            clustering = AgglomerativeClustering(n_clusters=args.num_clusters, linkage="ward")
+            df["Cluster"] = clustering.fit_predict(latent_umap)
+        else:
+            kmeans = KMeans(n_clusters=args.num_clusters, random_state=42)
+            df["Cluster"] = kmeans.fit_predict(latent_umap)
     else:
-        df["Cluster"] = "NA"
+        df["Cluster"] = np.nan
+
 
     coord_filename = f"clipn_umap_coordinates_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
     coords_file = os.path.join(output_dir, coord_filename)
@@ -150,6 +157,8 @@ def parse_args():
     parser.add_argument("--num_clusters", type=int, default=None, help="Optional: number of KMeans clusters")
     parser.add_argument("--colour_by", nargs="*", default=None, help="List of metadata columns to colour UMAP by")
     parser.add_argument("--add_labels", action="store_true", help="Add `cpd_id` text labels to interactive UMAP")
+    parser.add_argument("--clustering_method", default="hierarchical", choices=["kmeans", "hierarchical"], help="Clustering method for UMAP ('kmeans' or 'hierarchical').")
+
     parser.add_argument("--compound_metadata", type=str, default=None, help="Optional file with compound annotations to merge on `cpd_id`")
     return parser.parse_args()
 

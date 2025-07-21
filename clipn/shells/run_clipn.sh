@@ -13,8 +13,8 @@ conda activate clipn
 BASE_DIR=~/scratch/2025_STB/2025_cell_painting_sperm
 DATASET_CSV=dataset.txt
 MODES=("reference_only" "integrate_all")
-EPOCHS=(100 250 300 500 1000)
-LATENT_DIMS=(10 20 50 100)
+EPOCHS=(250 300 500)
+LATENT_DIMS=(20 50 100)
 REFERENCE_DATASET="STBV1"
 
 # Full paths to your scripts
@@ -44,9 +44,9 @@ for MODE in "${MODES[@]}"; do
         --annotations STBV1_and_2_10uM_10032024.csv
 
       echo "--- Running UMAP output ---"
-      MIN_DISTS=(0.1 0.2 0.3 0.4 0.5 0.6)
+      MIN_DISTS=(0.1 0.2)
       COLOUR_BY=("Library" "Dataset" "cpd_type")
-      CLUSTERS=("None" 15 20 25 30)
+      CLUSTERS=("None" 15 20)
 
       for DIST in "${MIN_DISTS[@]}"; do
         for CLUSTER_COUNT in "${CLUSTERS[@]}"; do
