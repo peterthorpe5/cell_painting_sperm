@@ -25,10 +25,27 @@ Command-line arguments:
     --epoch             : Number of training epochs (default: 300).
     --save_model        : If set, save the trained CLIPn model after training.
     --load_model        : Path to a previously saved CLIPn model to load and reuse.
+    --scaling_mode      : Scaling mode for features ('all', 'per_plate', 'none'; default: 'all').
+    --scaling_method    : Scaling method ('robust' or 'standard'; default: 'robust').
+    --skip_standardise  : If set, skip feature standardisation (default: False).
+    --reference_names   : Comma-separated list of dataset names to use as references (only in 'reference_only' mode).
+    --annotation_file   : Path to a CSV file with compound annotations (optional).
+    --output_prefix     : Prefix for output files (default: 'clipn_output').
+    --debug             : If set, enable debug-level logging.
+
 
 Logging:
 --------
 Logs detailed info and debug-level outputs.
+Logging is configured to output to both console and file.
+Logging is set up to capture:
+- Python version and command-line arguments.
+- Experiment name.
+- Dataset loading and harmonisation steps.
+- Feature scaling and encoding steps.
+- CLIPn training and integration steps.
+Logging is done using the `logging` module, with separate handlers for console and file output.
+
 """
 
 import argparse
