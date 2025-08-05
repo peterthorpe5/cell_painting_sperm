@@ -184,29 +184,34 @@ def standardise_well_name(well):
 
 def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dmso', logger=None):
     """
-    Normalise features by subtracting the DMSO median per plate.
+    Robust Z-score normalisation using DMSO controls.
 
     --no_dmso_normalisation : bool, optional  
     If set, do not normalise features to the median of DMSO wells per plate (default: False, normalisation ON).
 
 
+    For each plate and feature:
+        - Subtract the median of DMSO wells (per plate, per feature).
+        - Divide by the median absolute deviation (MAD) of DMSO wells.
+        - If MAD is zero, skip scaling for that feature/plate.
+
     Parameters
     ----------
     df : pandas.DataFrame
-        Input DataFrame, including features and metadata.
+        DataFrame containing features and metadata.
     feature_cols : list of str
-        Columns to normalise.
-    metadata_col : str
-        Column name indicating compound type.
-    dmso_label : str
-        Value in metadata_col indicating DMSO wells.
+        Names of feature columns to normalise.
+    metadata_col : str, optional
+        Metadata column indicating compound type (default: 'cpd_type').
+    dmso_label : str, optional
+        Value indicating DMSO wells (default: 'dmso', case-insensitive).
     logger : logging.Logger, optional
-        Logger for progress messages.
+        Logger for messages.
 
     Returns
     -------
     pandas.DataFrame
-        DataFrame with features normalised to DMSO per plate.
+        DataFrame with features robustly normalised to DMSO (per plate).
     """
     logger = logger or logging.getLogger("dmso_norm")
     plate_col = 'Plate_Metadata'
@@ -217,14 +222,30 @@ def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dms
     df_norm = df.copy()
     for plate in plates:
         idx_plate = df[plate_col] == plate
-        idx_dmso = idx_plate & (df[metadata_col].str.lower() == dmso_label)
+        idx_dmso = idx_plate & (df[metadata_col].str.lower() == dmso_label.lower())
         if idx_dmso.sum() == 0:
             logger.warning(f"No DMSO wells found for plate {plate}. Skipping DMSO normalisation for this plate.")
             continue
         dmso_median = df.loc[idx_dmso, feature_cols].median()
-        df_norm.loc[idx_plate, feature_cols] = df.loc[idx_plate, feature_cols] - dmso_median
-        logger.info(f"Normalised plate {plate} to DMSO median.")
+        dmso_mad = df.loc[idx_dmso, feature_cols].mad()
+        # Avoid division by zero or near-zero MAD: only scale if MAD > 0
+        mad_zero = dmso_mad == 0
+        if mad_zero.any():
+            zero_cols = dmso_mad.index[mad_zero].tolist()
+            logger.warning(f"MAD=0 for plate {plate}, features: {zero_cols}. Skipping scaling for these features (will only centre).")
+        # Robust z-score: (value - DMSO_median) / DMSO_mad
+        for feature in feature_cols:
+            vals = df.loc[idx_plate, feature]
+            # Subtract median
+            vals = vals - dmso_median[feature]
+            # Divide by MAD (if not zero)
+            if dmso_mad[feature] > 0:
+                vals = vals / dmso_mad[feature]
+            # Assign back
+            df_norm.loc[idx_plate, feature] = vals
+        logger.info(f"Robust DMSO normalisation complete for plate {plate}.")
     return df_norm
+
 
 
 def harmonise_column_names(df, candidates, target, logger):
