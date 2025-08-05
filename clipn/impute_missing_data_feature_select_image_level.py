@@ -186,6 +186,10 @@ def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dms
     """
     Normalise features by subtracting the DMSO median per plate.
 
+    --no_dmso_normalisation : bool, optional  
+    If set, do not normalise features to the median of DMSO wells per plate (default: False, normalisation ON).
+
+
     Parameters
     ----------
     df : pandas.DataFrame
@@ -661,8 +665,9 @@ def main():
         logger.info("Imputation skipped (impute=none).")
 
 
-    # 7a. Optional DMSO normalisation (after scaling, before feature selection)
-    if args.normalise_to_dmso:
+    # 7a. default DMSO normalisation (after scaling, before feature selection)
+
+    if not args.no_dmso_normalisation:
         feature_cols = [c for c in merged_df.select_dtypes(include=[np.number]).columns if c != "row_number"]
         merged_df = normalise_to_dmso(
             merged_df,
@@ -673,7 +678,7 @@ def main():
         )
         logger.info("DMSO normalisation complete.")
     else:
-        logger.info("DMSO normalisation not requested.")
+        logger.info("DMSO normalisation disabled by user (--no_dmso_normalisation set).")
 
 
     # 7. Per-plate scaling (if requested)
