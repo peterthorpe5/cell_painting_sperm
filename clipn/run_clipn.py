@@ -51,6 +51,7 @@ import argparse
 import logging
 import sys
 import os
+import psutil
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -146,6 +147,24 @@ def ensure_library_column(df, filepath, logger, value=None):
         df["Library"] = base_library
         logger.info(f"'Library' column not found. Set to: {base_library}")
     return df
+
+
+
+def log_memory_usage(logger, prefix=""):
+    """
+    Log the current memory usage (RAM) of the running process.
+
+    Parameters
+    ----------
+    logger : logging.Logger
+        Logger instance.
+    prefix : str
+        Optional prefix for the log message.
+    """
+    process = psutil.Process(os.getpid())
+    mem_bytes = process.memory_info().rss
+    mem_gb = mem_bytes / (1024 ** 3)
+    logger.info(f"{prefix} Memory usage: {mem_gb:.2f} GB (resident set size)")
 
 
 def scale_features(df, feature_cols, plate_col=None, mode='all', method='robust', logger=None):
@@ -734,6 +753,8 @@ def main(args):
 
 
         logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
+        log_memory_usage(logger, prefix="[After loading datasets] ")
+
     
     # -------------------------------------------------------------
     # After merging and harmonising all DataFrames into combined_df:
@@ -771,6 +792,8 @@ def main(args):
             )
             logger.info(f"Scaled columns: {feature_cols}")
             logger.info(f"Scaled combined DataFrame shape: {combined_df.shape}")
+            log_memory_usage(logger, prefix="[After scaling] ")
+
         else:
             logger.info("No scaling applied to numeric features (--scaling_mode=none)")
 
@@ -782,6 +805,8 @@ def main(args):
 
     combined_df, encoders = encode_labels(combined_df, logger)
     metadata_df = decode_labels(combined_df.copy(), encoders, logger)[["cpd_id", "cpd_type", "Library"]]
+    log_memory_usage(logger, prefix="[After encoding] ")
+
     metadata_df = metadata_df.reset_index()
 
 
