@@ -68,9 +68,9 @@ def parse_args():
     parser.add_argument('--scale_method', choices=['standard', 'robust', 'auto', 'none'], default='robust',
                         help='Scaling method: "standard", "robust", "auto", or "none" (default: robust).')
     parser.add_argument(
-    '--normalise_to_dmso',
+    '--no_dmso_normalisation',
     action='store_true',
-    help='If set, normalise each feature to the median of DMSO wells (default: False).')
+    help='If set, do not normalise each feature to the median of DMSO wells (default: normalisation ON).')
 
     parser.add_argument('--correlation_threshold', type=float, default=0.99,
                         help='Correlation threshold for filtering features (default: 0.99).')
