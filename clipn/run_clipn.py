@@ -30,7 +30,6 @@ Command-line arguments:
     --skip_standardise  : If set, skip feature standardisation (default: False).
     --reference_names   : Comma-separated list of dataset names to use as references (only in 'reference_only' mode).
     --annotation_file   : Path to a CSV file with compound annotations (optional).
-    --output_prefix     : Prefix for output files (default: 'clipn_output').
     --debug             : If set, enable debug-level logging.
 
 
