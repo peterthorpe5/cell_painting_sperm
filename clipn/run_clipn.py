@@ -41,7 +41,8 @@ import numpy as np
 import glob
 from clipn.model import CLIPn
 from sklearn.preprocessing import LabelEncoder
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
+
 from sklearn import set_config
 import csv
 import torch
@@ -130,6 +131,45 @@ def ensure_library_column(df, filepath, logger, value=None):
         logger.info(f"'Library' column not found. Set to: {base_library}")
     return df
 
+
+def scale_features(df, feature_cols, plate_col=None, mode='all', method='robust', logger=None):
+    """
+    Scale features globally or per plate, using the specified method.
+
+    Args:
+        df (pd.DataFrame): DataFrame with features and metadata.
+        feature_cols (list): Names of feature columns to scale.
+        plate_col (str or None): Plate column name (required if mode='per_plate').
+        mode (str): 'all', 'per_plate', or 'none'.
+        method (str): 'robust' or 'standard'.
+        logger (logging.Logger): Logger for status messages.
+
+    Returns:
+        pd.DataFrame: DataFrame with scaled features.
+    """
+    logger = logger or logging.getLogger("scaling")
+    scaler_cls = RobustScaler if method == 'robust' else StandardScaler
+
+    if mode == 'none':
+        logger.info("No scaling applied.")
+        return df
+
+    df_scaled = df.copy()
+    if mode == 'all':
+        scaler = scaler_cls()
+        df_scaled[feature_cols] = scaler.fit_transform(df[feature_cols])
+        logger.info(f"Scaled all features together using {method} scaler.")
+    elif mode == 'per_plate':
+        if plate_col is None or plate_col not in df.columns:
+            raise ValueError("plate_col must be provided for per_plate scaling.")
+        for plate, group_idx in df.groupby(plate_col).groups.items():
+            scaler = scaler_cls()
+            idx = list(group_idx)
+            df_scaled.loc[idx, feature_cols] = scaler.fit_transform(df.loc[idx, feature_cols])
+        logger.info(f"Scaled features per plate using {method} scaler.")
+    else:
+        logger.warning(f"Unknown scaling mode: {mode}. No scaling applied.")
+    return df_scaled
 
 
 def ensure_plate_well_metadata(decoded_df: pd.DataFrame, metadata_source: pd.DataFrame, logger) -> pd.DataFrame:
@@ -399,8 +439,6 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     return harmonise_numeric_columns(dataframes, logger)
 
 
-from sklearn.preprocessing import StandardScaler
-
 def standardise_numeric_columns_preserving_metadata(df: pd.DataFrame, meta_columns: list[str]) -> pd.DataFrame:
     """
     Standardise numeric columns in a MultiIndex DataFrame per dataset,
@@ -602,11 +640,7 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
         )
         raise ValueError("No numeric columns available for scaling in combined_df.")
     # --- END DEBUG BLOCK --
-    if skip_standardise:
-        logger.info("Skipping standardisation of numeric columns (already scaled).")
-        df_scaled = df
-    else:
-        df_scaled = standardise_numeric_columns_preserving_metadata(df, meta_columns=meta_cols)
+
 
     data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
 
@@ -659,16 +693,15 @@ def main(args):
     """Main function to execute CLIPn integration pipeline."""
     logger = setup_logging(args.out, args.experiment)
 
-
-
+    logger.info("Starting CLIPn integration pipeline")
     mapping_dir = Path(args.out) / "post_clipn"
     mapping_dir.mkdir(parents=True, exist_ok=True)
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
 
-
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
+    logger.info("NOTE this script does not perfom any DMSO normalisation, you must do this before running this script. if you want it..")
 
     # Sanity check here:
     for name, df in dataframes.items():
@@ -685,7 +718,51 @@ def main(args):
 
 
         logger.debug(f"Columns at this stage, combined: {combined_df.columns.tolist()}")
-        
+    
+    # -------------------------------------------------------------
+    # After merging and harmonising all DataFrames into combined_df:
+    # -------------------------------------------------------------
+
+    # Define your metadata columns (do not scale these!)
+    meta_columns = ["cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library"]
+    # Ensure metadata columns are present in combined_df
+    for col in meta_columns:
+        if col not in combined_df.columns:
+            raise ValueError(f"Metadata column '{col}' not found in combined DataFrame after harmonisation.")
+    logger.info(f"Metadata columns present in combined DataFrame: {meta_columns}")
+    logger.info(f"Combined DataFrame shape after harmonisation: {combined_df.shape}")
+
+    # Determine numeric feature columns to scale
+    feature_cols = [
+        col for col in combined_df.columns
+        if col not in meta_columns and pd.api.types.is_numeric_dtype(combined_df[col])
+    ]
+
+    # Perform scaling if requested (default: robust scaling of all data together)
+    # Perform scaling unless skip_standardise is set
+    if args.skip_standardise:
+        logger.info("Skipping feature scaling (--skip_standardise set).")
+    else:
+        if args.scaling_mode != 'none':
+            logger.info(f"Scaling numeric features using mode='{args.scaling_mode}', method='{args.scaling_method}'")
+            combined_df = scale_features(
+                combined_df,
+                feature_cols=feature_cols,
+                plate_col="Plate_Metadata",
+                mode=args.scaling_mode,
+                method=args.scaling_method,
+                logger=logger
+            )
+            logger.info(f"Scaled columns: {feature_cols}")
+            logger.info(f"Scaled combined DataFrame shape: {combined_df.shape}")
+        else:
+            logger.info("No scaling applied to numeric features (--scaling_mode=none)")
+
+
+    # -------------------------------------------------------------
+    #  Proceed to label encoding
+    # -------------------------------------------------------------
+    logger.info("Encoding categorical labels for CLIPn compatibility")
 
     combined_df, encoders = encode_labels(combined_df, logger)
     metadata_df = decode_labels(combined_df.copy(), encoders, logger)[["cpd_id", "cpd_type", "Library"]]
@@ -718,6 +795,15 @@ def main(args):
 
         logger.info(f"Training CLIPn on references: {reference_names}")
 
+        # -------------------------------------------------------------
+        #  loading pre-trained model or training new one
+        # -------------------------------------------------------------
+        # Check if we are loading a pre-trained model
+        if args.load_model and args.mode != "integrate_all":
+            logger.warning("Loading pre-trained model is only supported in 'integrate_all' mode. "
+                           "Switching to 'integrate_all' mode for loading.")
+            args.mode = "integrate_all"
+
         # Check for model loading
         if args.load_model:
             model_files = glob.glob(args.load_model)
@@ -729,10 +815,42 @@ def main(args):
             model = torch.load(model_path, weights_only=False)
 
             # Still need to prepare data (e.g. scaling and projection input)
-            df_scaled = standardise_numeric_columns_preserving_metadata(
+            meta_columns = ["cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library"]
+            feature_cols = [col for col in reference_df.columns if col not in meta_columns and pd.api.types.is_numeric_dtype(reference_df[col])]
+            
+            if args.skip_standardise:
+                logger.info("Skipping feature scaling (--skip_standardise set).")
+            else:
+                if args.scaling_mode != 'none':
+                    logger.info(f"Scaling numeric features using mode='{args.scaling_mode}', method='{args.scaling_method}'")
+                    combined_df = scale_features(
+                        combined_df,
+                        feature_cols=feature_cols,
+                        plate_col="Plate_Metadata",
+                        mode=args.scaling_mode,
+                        method=args.scaling_method,
+                        logger=logger
+                    )
+                    logger.info(f"Scaled columns: {feature_cols}")
+                    logger.info(f"Scaled combined DataFrame shape: {combined_df.shape}")
+                else:
+                    logger.info("No scaling applied to numeric features (--scaling_mode=none)")
+
+                
+            df_scaled = scale_features(
                 reference_df,
-                meta_columns=["cpd_id", "cpd_type", "Library"]
-            )
+                feature_cols=feature_cols,
+                plate_col="Plate_Metadata",
+                mode=args.scaling_mode,
+                method=args.scaling_method,
+                logger=logger)
+            logger.info(f"Scaled columns: {feature_cols}")
+
+            logger.info(f"Scaled reference data shape: {df_scaled.shape}")
+            
+            # Prepare data for CLIPn
+            logger.info("Preparing data for CLIPn integration from scaled DataFrame")
+            # Prepare data for CLIPn
             data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
 
 
@@ -751,6 +869,8 @@ def main(args):
 
         else:
             # Train as before
+            logger.info("Training new CLIPn model on reference datasets")
+            logger.debug(f"Reference DataFrame shape: {reference_df.shape}")
             latent_df, cpd_ids, model, dataset_key_mapping = run_clipn_integration(reference_df,
                                                                                     logger,
                                                                                     args.clipn_param,
@@ -1061,6 +1181,11 @@ if __name__ == "__main__":
     parser.add_argument("--datasets_csv", required=True, help="CSV listing dataset names and paths.")
     parser.add_argument("--out", required=True, help="Output directory.")
     parser.add_argument("--experiment", required=True, help="Experiment name.")
+    
+    parser.add_argument('--scaling_mode', choices=['all', 'per_plate', 'none'], default='all',
+            help="How to scale features: 'all' (default, scale all data together), 'per_plate' (scale within each plate), or 'none' (no scaling).")
+    parser.add_argument('--scaling_method', choices=['robust', 'standard'], default='robust',
+            help="Scaler to use: 'robust' (default) or 'standard'.")
     parser.add_argument("--mode", choices=['reference_only', 'integrate_all'], required=True,
                         help="Mode of CLIPn operation.")
     parser.add_argument("--clipn_param", type=str, default="default",

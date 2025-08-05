@@ -184,7 +184,13 @@ def standardise_well_name(well):
 
 def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dmso', logger=None):
     """
-    Robust Z-score normalisation using DMSO controls.
+    Robust Z-score normalisation using DMSO controls:
+
+    
+    robust-z =  (feature value - DMSO median) / DMSO MAD
+
+    where MAD is:  abs(x - median_DMSO), then the median of all of these. 
+    
 
     --no_dmso_normalisation : bool, optional  
     If set, do not normalise features to the median of DMSO wells per plate (default: False, normalisation ON).
