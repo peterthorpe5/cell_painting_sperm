@@ -118,10 +118,9 @@ def parse_args():
     parser.add_argument('--scale_per_plate', action='store_true', help='Apply scaling per plate (default: False).')
     parser.add_argument('--scale_method', choices=['standard', 'robust', 'auto', 'none'], default='robust',
                         help='Scaling method: "standard", "robust", "auto", or "none" (default: robust).')
-    parser.add_argument(
-    '--no_dmso_normalisation',
-    action='store_true',
-    help='If set, do not normalise each feature to the median of DMSO wells (default: normalisation ON).')
+    parser.add_argument('--no_dmso_normalisation',
+                        action='store_true',
+                        help='If set, do not normalise each feature to the median of DMSO wells (default: normalisation ON).')
 
     parser.add_argument('--correlation_threshold', type=float, default=0.99,
                         help='Correlation threshold for filtering features (default: 0.99).')
@@ -135,6 +134,9 @@ def parse_args():
                         action='store_true',
                         help='If set, output one row per well (median of all objects in the well). Default: off (per-object output).'
                         )
+    parser.add_argument('--no_compress_output',
+                        action='store_true',
+                        help='If set, do NOT compress the output file. Default: output will be compressed (.gz if filename ends with .gz).')
 
     parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Set logging level.')
     return parser.parse_args()
@@ -993,11 +995,30 @@ def main():
         final_output = final_df
 
 
-    final_output.to_csv(args.output_file, sep=args.sep, index=False)
-    logger.info(f"Saved {'per-well aggregated' if args.aggregate_per_well else 'per-object'} data to {args.output_file} (shape: {final_output.shape})")
+    # Decide compression based on output filename and command-line flag
+    if not args.no_compress_output and args.output_file.endswith(".gz"):
+        compression = "gzip"
+        logger.info("Output will be gzip-compressed (.gz).")
+    else:
+        compression = None
+        if args.no_compress_output:
+            logger.info("Output compression disabled by user (--no_compress_output set).")
+        elif not args.output_file.endswith(".gz"):
+            logger.info("Output file does not end with .gz; writing uncompressed output.")
+
+    # Write output
+    final_output.to_csv(args.output_file,
+                        sep=args.sep,
+                        index=False,
+                        compression=compression)
+
+    logger.info(f"Saved {'per-well aggregated' if args.aggregate_per_well else 'per-object'} data "
+                f"to {args.output_file} (shape: {final_output.shape})"
+                f"{' (gzip compressed)' if compression == 'gzip' else ''}")
 
     logger.info("Merge complete.")
     logger.info("note to user: I do not keep all metadata. Re-attach later if you need it in the results")
+    log_memory_usage(logger, prefix=" END ")    
 
 if __name__ == "__main__":
     main()
