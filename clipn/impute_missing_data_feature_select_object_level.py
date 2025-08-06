@@ -827,8 +827,11 @@ def main():
     logger.info(f"Metadata: using plate column '{meta_plate_col}', well column '{meta_well_col}'.")
 
 
-    # Standardise Well_Metadata in CellProfiler data
+
+    # Standardise Well_Metadata in both main and metadata DataFrames
     cp_df['Well_Metadata'] = cp_df['Well_Metadata'].apply(standardise_well_name)
+    meta_df['Well_Metadata'] = meta_df['Well_Metadata'].apply(standardise_well_name)
+    logger.info("Standardised Well_Metadata in both CellProfiler and metadata DataFrames.")
 
     # Standardise Well_Metadata (or 'Well', if not renamed yet) in metadata
     if 'Well_Metadata' in meta_df.columns:
