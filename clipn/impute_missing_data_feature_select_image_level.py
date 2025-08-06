@@ -32,6 +32,9 @@ python impute...py \
 
 import argparse
 import logging
+import os
+import psutil
+import time
 from pathlib import Path
 import sys
 import re
@@ -45,6 +48,8 @@ from cell_painting.process_data import (
     variance_threshold_selector,
     correlation_filter
 )
+
+_script_start_time = time.time()
 
 def parse_args():
     """
@@ -156,6 +161,48 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
         except Exception as e2:
             logger.error(f"Reading as TSV also failed: {e2}")
             raise e2  # Reraise the last exception
+
+
+
+def log_memory_usage(logger, prefix="", extra_msg=None):
+    """
+    Log the current and peak memory usage (RAM) of the running process.
+
+    Parameters
+    ----------
+    logger : logging.Logger
+        Logger instance.
+    prefix : str
+        Optional prefix for the log message.
+    extra_msg : str or None
+        Optional extra string to log.
+    """
+    process = psutil.Process(os.getpid())
+    mem_bytes = process.memory_info().rss
+    mem_gb = mem_bytes / (1024 ** 3)
+    peak_gb = None
+    # Try to get max RSS if possible (platform-dependent)
+    try:
+        # On Linux, 'peak_wset' or 'peak_rss' in memory_info(). Not always available.
+        if hasattr(process, "memory_info"):
+            # peak is not available via psutil directly, only via resource module
+            import resource
+            peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if os.uname().sysname == "Linux":
+                peak_gb = peak_rss / (1024 ** 2)  # kilobytes -> GB
+            else:
+                peak_gb = peak_rss / (1024 ** 3)  # bytes -> GB (Mac/others)
+    except Exception:
+        pass
+    elapsed = time.time() - _script_start_time
+    msg = f"{prefix} Memory usage: {mem_gb:.2f} GB (resident set size)"
+    if peak_gb:
+        msg += f", Peak: {peak_gb:.2f} GB"
+    msg += f", Elapsed: {elapsed/60:.1f} min"
+    if extra_msg:
+        msg += " | " + extra_msg
+    logger.info(msg)
+
 
 
 def standardise_well_name(well):
@@ -561,21 +608,48 @@ def main():
     logger = setup_logging(args.log_level)
     logger.info(f"Python Version: {sys.version_info}")
     logger.info(f"Arguments: {' '.join(sys.argv)}")
+    log_memory_usage(logger, prefix=" START ")
 
     # 1. Load and concatenate CellProfiler CSVs
     input_dir = Path(args.input_dir)
-   
-    csv_files = [f for f in sorted(input_dir.glob("*.csv"))
-             if f.name.lower() != "normalised.csv"]
+
+   # 1. Load and concatenate CellProfiler CSVs (.csv and .csv.gz), exclude "image" and "normalised" files
+    all_files = sorted(list(input_dir.glob("*.csv")) + list(input_dir.glob("*.csv.gz")))
+
+    # Exclude files with 'image' or 'normalised' in filename (case-insensitive)
+    csv_files = [
+        f for f in all_files
+        if "image" not in f.name.lower() and "normalised" not in f.name.lower()
+    ]
+    excluded_files = [f.name for f in all_files if f not in csv_files]
+    logger.info(f"Looking for CellProfiler CSV files in {input_dir}...")
+    logger.info("Excluding files with 'image' or 'normalised' in their names.")
+
+    
 
     if not csv_files:
-        logger.error(f"No CSV files found in {args.input_dir}")
+        logger.error(f"No CellProfiler CSV files found in {args.input_dir} after exclusions.")
         sys.exit(1)
-    logger.info(f"Found {len(csv_files)} CellProfiler CSV files: {[f.name for f in csv_files]}")
-    dataframes = [pd.read_csv(f) for f in csv_files]
+    if excluded_files:
+        logger.info(f"Excluded files (contain 'image' or 'normalised'): {excluded_files}")
+    logger.info(f"Files to load: {[f.name for f in csv_files]}")
+
+    # Read each file (compressed or not)
+    dataframes = []
+    for f in csv_files:
+        if f.suffix == ".gz":
+            logger.info(f"Reading compressed file: {f.name}")
+        else:
+            logger.info(f"Reading file: {f.name}")
+        df = pd.read_csv(f)
+        dataframes.append(df)
+
     cp_df = pd.concat(dataframes, axis=0, ignore_index=True)
+    log_memory_usage(logger, prefix=" [After datasets loaded ]")
     logger.info(f"Concatenated DataFrame shape: {cp_df.shape}")
-    
+
+
+
     # Clean problematic values
     bad_strings = ['#NAME?', '#VALUE!', '#DIV/0!', 'N/A', 'NA', '', ' ']
     cp_df.replace(bad_strings, np.nan, inplace=True)
@@ -704,6 +778,7 @@ def main():
             logger=logger
         )
         logger.info("DMSO normalisation complete.")
+        log_memory_usage(logger, prefix=" [After DMSO normalisation ]")
     else:
         logger.info("DMSO normalisation disabled by user (--no_dmso_normalisation set).")
 
@@ -737,12 +812,14 @@ def main():
     # Correlation filter
     filtered_corr = correlation_filter(merged_df[feature_cols], threshold=args.correlation_threshold)
     n_after_corr = filtered_corr.shape[1]
+    log_memory_usage(logger, prefix="[After correlation filtering] ")
     logger.info(f"Shape after correlation_filter: {filtered_corr.shape}")
     logger.info(f"Dropped {n_start_features - n_after_corr} features due to correlation threshold.")
 
     # Variance threshold filter
     filtered_final = variance_threshold_selector(filtered_corr, threshold=args.variance_threshold)
     n_after_var = filtered_final.shape[1]
+    log_memory_usage(logger, prefix="[After variance filtering] ")
     logger.info(f"Shape after variance_threshold_selector: {filtered_final.shape}")
     logger.info(f"Dropped {n_after_corr - n_after_var} features due to low variance.")
     logger.info(f"Feature selection retained {n_after_var} features.")

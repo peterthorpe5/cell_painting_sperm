@@ -52,6 +52,7 @@ import logging
 import sys
 import os
 import psutil
+import time
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -72,6 +73,8 @@ from cell_painting.process_data import (
         project_query_to_latent
 )
 
+
+_script_start_time = time.time()  # Place this line near the top of your script (global)
 
 set_config(transform_output="pandas")
 torch.serialization.add_safe_globals([CLIPn])
@@ -149,10 +152,9 @@ def ensure_library_column(df, filepath, logger, value=None):
     return df
 
 
-
-def log_memory_usage(logger, prefix=""):
+def log_memory_usage(logger, prefix="", extra_msg=None):
     """
-    Log the current memory usage (RAM) of the running process.
+    Log the current and peak memory usage (RAM) of the running process.
 
     Parameters
     ----------
@@ -160,11 +162,34 @@ def log_memory_usage(logger, prefix=""):
         Logger instance.
     prefix : str
         Optional prefix for the log message.
+    extra_msg : str or None
+        Optional extra string to log.
     """
     process = psutil.Process(os.getpid())
     mem_bytes = process.memory_info().rss
     mem_gb = mem_bytes / (1024 ** 3)
-    logger.info(f"{prefix} Memory usage: {mem_gb:.2f} GB (resident set size)")
+    peak_gb = None
+    # Try to get max RSS if possible (platform-dependent)
+    try:
+        # On Linux, 'peak_wset' or 'peak_rss' in memory_info(). Not always available.
+        if hasattr(process, "memory_info"):
+            # peak is not available via psutil directly, only via resource module
+            import resource
+            peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if os.uname().sysname == "Linux":
+                peak_gb = peak_rss / (1024 ** 2)  # kilobytes -> GB
+            else:
+                peak_gb = peak_rss / (1024 ** 3)  # bytes -> GB (Mac/others)
+    except Exception:
+        pass
+    elapsed = time.time() - _script_start_time
+    msg = f"{prefix} Memory usage: {mem_gb:.2f} GB (resident set size)"
+    if peak_gb:
+        msg += f", Peak: {peak_gb:.2f} GB"
+    msg += f", Elapsed: {elapsed/60:.1f} min"
+    if extra_msg:
+        msg += " | " + extra_msg
+    logger.info(msg)
 
 
 def scale_features(df, feature_cols, plate_col=None, mode='all', method='robust', logger=None):
@@ -736,7 +761,7 @@ def main(args):
 
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
-    logger.info("NOTE this script does not perfom any DMSO normalisation, you must do this before running this script. if you want it..")
+    logger.info("NOTE this script does not perform any DMSO normalisation, you must do this before running this script. if you want it..")
 
     # Sanity check here:
     for name, df in dataframes.items():
@@ -835,6 +860,7 @@ def main(args):
 
 
         logger.info(f"Training CLIPn on references: {reference_names}")
+        log_memory_usage(logger, prefix="[After training] ")
 
         # -------------------------------------------------------------
         #  loading pre-trained model or training new one
@@ -888,6 +914,7 @@ def main(args):
             logger.info(f"Scaled columns: {feature_cols}")
 
             logger.info(f"Scaled reference data shape: {df_scaled.shape}")
+            log_memory_usage(logger, prefix="[After scaling] ")
             
             # Prepare data for CLIPn
             logger.info("Preparing data for CLIPn integration from scaled DataFrame")
@@ -930,7 +957,7 @@ def main(args):
                 logger.info(f"Trained CLIPn model saved to: {model_path}")
 
 
-
+        log_memory_usage(logger, prefix="[After clipn] ")
         latent_training_df = latent_df.reset_index()
         latent_training_df = latent_training_df[latent_training_df['Dataset'].isin(reference_names)]
 
@@ -1209,7 +1236,8 @@ def main(args):
             })
             mapping_df.to_csv(mapping_path, index=False)
             logger.info(f"Saved label mapping for {column} to {mapping_path}")
-        logger.info("clipn integration completed. If this ran .. there is a god")
+        logger.info("clipn integration completed.")
+        log_memory_usage(logger, prefix="[mostly finished] ")
     except Exception as e:
         logger.warning(f"Failed to save label encoder mappings: {e}")
 
