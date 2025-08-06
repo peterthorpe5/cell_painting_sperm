@@ -690,6 +690,7 @@ def main():
         else:
             logger.info(f"Reading file: {f.name}")
         df = pd.read_csv(f)
+        log_memory_usage(logger, prefix=f" [After {f.name} ] ")
         dataframes.append(df)
 
     cp_df = pd.concat(dataframes, axis=0, ignore_index=True)
