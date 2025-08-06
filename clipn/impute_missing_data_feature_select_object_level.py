@@ -255,6 +255,77 @@ def log_memory_usage(logger, prefix="", extra_msg=None):
     logger.info(msg)
 
 
+def add_plate_well_metadata_if_missing(obj_df, input_dir, obj_filename, logger):
+    """
+    Add plate/well metadata to object-level DataFrame by merging with matching image-level file if needed.
+    
+    Parameters
+    ----------
+    obj_df : pd.DataFrame
+        The loaded object-level DataFrame.
+    input_dir : pathlib.Path
+        Path object of the directory containing the files.
+    obj_filename : str
+        Name of the object-level file (e.g., HepG2CP_Cell.csv).
+    logger : logging.Logger
+        Logger object.
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with plate/well columns if possible.
+    """
+    plate_candidates = ["Plate", "Plate_Metadata", "Metadata_Plate", "Image_Metadata_Plate"]
+    well_candidates = ["Well", "Well_Metadata", "Metadata_Well", "Image_Metadata_Well"]
+
+    # Check if plate/well present
+    has_plate = any(col in obj_df.columns for col in plate_candidates)
+    has_well = any(col in obj_df.columns for col in well_candidates)
+    if has_plate and has_well:
+        logger.info(f"Plate/Well metadata already present in {obj_filename}")
+        return obj_df
+
+    # Try to find image-level file
+    base = obj_filename
+    for suffix in ["_Cell", "_Cytoplasm", "_Nuclei"]:
+        base = base.replace(suffix, "")
+    for suffix in [".csv", ".csv.gz"]:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    image_file_candidates = [f"{base}_Image.csv", f"{base}_Image.csv.gz"]
+    image_file = None
+    for candidate in image_file_candidates:
+        path = input_dir / candidate
+        if path.exists():
+            image_file = path
+            break
+    if image_file is None:
+        logger.error(
+            f"Plate/Well metadata missing and no matching image-level file found for {obj_filename}. "
+            f"Tried: {image_file_candidates}"
+        )
+        return obj_df  # Let downstream checks error out, or you can choose to sys.exit(1)
+
+    logger.info(f"Merging {obj_filename} with {image_file.name} to add plate/well metadata.")
+    img_df = pd.read_csv(image_file)
+    # Defensive: Check for ImageNumber in both
+    if "ImageNumber" not in obj_df.columns or "ImageNumber" not in img_df.columns:
+        logger.error(f"Cannot merge {obj_filename} and {image_file.name}: 'ImageNumber' not present in both files.")
+        return obj_df
+
+    # Merge on ImageNumber
+    merged = obj_df.merge(img_df, on="ImageNumber", suffixes=("", "_img"), how="left")
+    logger.info(f"Merged {obj_filename} with {image_file.name}; resulting shape: {merged.shape}")
+
+    # Check again for plate/well
+    has_plate = any(col in merged.columns for col in plate_candidates)
+    has_well = any(col in merged.columns for col in well_candidates)
+    if not (has_plate and has_well):
+        logger.error(
+            f"Even after merging with image-level file, could not find both plate and well columns in {obj_filename}."
+        )
+    return merged
+
 
 def standardise_well_name(well):
     """
@@ -682,7 +753,7 @@ def main():
         logger.info(f"Excluded files (contain 'image' or 'normalised'): {excluded_files}")
     logger.info(f"Files to load: {[f.name for f in csv_files]}")
 
-    # Read each file (compressed or not)
+    # Read each file (compressed or not), and add plate/well metadata if missing
     dataframes = []
     for f in csv_files:
         if f.suffix == ".gz":
@@ -690,6 +761,7 @@ def main():
         else:
             logger.info(f"Reading file: {f.name}")
         df = pd.read_csv(f)
+        df = add_plate_well_metadata_if_missing(df, input_dir, f.name, logger)
         log_memory_usage(logger, prefix=f" [After {f.name} ] ")
         dataframes.append(df)
 

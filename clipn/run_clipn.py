@@ -1244,7 +1244,6 @@ def main(args):
     logger.info(f"Columns at this stage, encoded: {combined_df.columns.tolist()}")
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run CLIPn Integration.")
     parser.add_argument("--datasets_csv", required=True, help="CSV listing dataset names and paths.")
