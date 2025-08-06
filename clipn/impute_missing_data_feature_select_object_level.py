@@ -4,19 +4,54 @@
 """
 merge_cellprofiler_with_metadata_featureselect.py
 
-Merge raw CellProfiler per-object output with metadata (no aggregation), (no average per well!!)
-impute missing data, apply optional per-plate scaling, and perform feature selection
-(variance/correlation filter) using process_data.py functions.
+Prepare CellProfiler per-object data for analysis with optional well-level aggregation.
 
-Each object/cell is a row. All metadata is preserved, and a unique 'row_number' column can be added.
+This script merges raw CellProfiler per-object (single cell) output files with metadata (e.g., plate map),
+imputes missing data, applies optional per-plate feature scaling, and performs feature selection using
+variance and correlation filters. Optionally, it can aggregate features to the well level by taking the median
+of all objects within each well.
 
-Requires:
-    pandas, numpy, scikit-learn, scipy
-    process_data.py in the same directory or PYTHONPATH
+Workflow:
+---------
+1. Load all CellProfiler per-object CSV or CSV.GZ files from a specified directory,
+   excluding files with 'image' or 'normalised' in the filename.
+2. Merge with metadata (e.g., plate map) using harmonised plate and well columns.
+3. Clean and standardise metadata columns (cpd_id, cpd_type, Library).
+4. Impute missing data using KNN or median (or skip, as specified).
+5. Optionally normalise features to the DMSO control (robust z-score).
+6. Optionally scale features per plate.
+7. Perform feature selection by correlation and variance thresholding.
+8. Output the final table:
+   - By default, one row per object (cell).
+   - If --aggregate_per_well is set, aggregate features to the median per well.
+
+Inputs:
+-------
+- --input_dir:        Directory containing CellProfiler per-object CSV or CSV.GZ files.
+- --metadata_file:    CSV/TSV file with plate and well metadata (e.g., plate map).
+- --output_file:      Path to output file (tab- or comma-separated).
+- --merge_keys:       Comma-separated list of plate and well column names for merging (default: Plate,Well).
+- --impute:           Missing value imputation method: none, median, or knn.
+- --knn_neighbours:   Number of neighbours for KNN imputation (default: 5).
+- --scale_per_plate:  Flag to apply scaling per plate (default: off).
+- --scale_method:     Scaling method: standard, robust, auto, or none.
+- --no_dmso_normalisation:  Flag to skip DMSO normalisation (default: ON).
+- --correlation_threshold:  Correlation threshold for feature filtering (default: 0.99).
+- --variance_threshold:     Variance threshold for feature filtering (default: 0.05).
+- --aggregate_per_well:     If set, output one row per well (median of all objects in the well).
+- --sep:              Output file delimiter (default: tab).
+- --log_level:        Logging level.
+
+Requirements:
+-------------
+- Python 3.7+
+- pandas, numpy, scikit-learn, scipy, psutil
+- cell_painting.process_data.py with required helper functions (in PYTHONPATH)
 
 Example usage:
 --------------
-python impute...py \
+# Per-object output (default)
+python merge_cellprofiler_with_metadata_featureselect.py \
     --input_dir ./raw_cp/ \
     --output_file combined_raw_profiles.tsv \
     --metadata_file plate_map.csv \
@@ -28,6 +63,17 @@ python impute...py \
     --correlation_threshold 0.99 \
     --variance_threshold 0.05 \
     --sep '\t'
+
+# Median-aggregated per-well output
+python merge_cellprofiler_with_metadata_featureselect.py \
+    --input_dir ./raw_cp/ \
+    --output_file median_per_well.tsv \
+    --metadata_file plate_map.csv \
+    --aggregate_per_well \
+    --sep '\t'
+
+Author: Pete Thorpe, 2025
+
 """
 
 import argparse
@@ -85,6 +131,11 @@ def parse_args():
                     help="Value to add as 'Library' column if not present in the metadata. "
                          "If omitted and column missing, script will error.")
     parser.add_argument('--sep', default='\t', help='Delimiter for output file (default: tab).')
+    parser.add_argument('--aggregate_per_well',
+                        action='store_true',
+                        help='If set, output one row per well (median of all objects in the well). Default: off (per-object output).'
+                        )
+
     parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Set logging level.')
     return parser.parse_args()
 
@@ -406,9 +457,6 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
     logger.info(f"Imputation complete (nans after: {after_na}).")
     return df
 
-
-
-import pandas as pd
 
 def clean_metadata_columns(df, logger=None):
     """
@@ -849,8 +897,32 @@ def main():
     # Only drop if present to avoid errors
     final_df = final_df.drop(columns=[col for col in cols_to_drop if col in final_df.columns])
 
-    final_df.to_csv(args.output_file, sep=args.sep, index=False)
-    logger.info(f"Saved feature-selected data to {args.output_file} (shape: {final_df.shape})")
+    if args.aggregate_per_well:
+        logger.info("Aggregating to per-well median. Each row will represent a single well (median of all objects per well).")
+        group_cols = ["Plate_Metadata", "Well_Metadata"]
+        # Only keep metadata columns for grouping and median features
+        # Drop any duplicate columns for grouping
+        output_df = final_df.copy()
+        median_features = [c for c in output_df.columns if c not in group_cols]
+        # Perform aggregation: median per well, then merge unique metadata
+        per_well = output_df.groupby(group_cols, as_index=False)[median_features].median()
+        # Optionally, you can merge back unique metadata (e.g., cpd_id, cpd_type, Library) if those are constant per well
+        meta_cols = ["cpd_id", "cpd_type", "Library"]
+        for col in meta_cols:
+            if col in output_df.columns:
+                meta_unique = output_df.groupby(group_cols)[col].agg(lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA).reset_index()
+                per_well = per_well.merge(meta_unique, on=group_cols, how="left")
+        # Reorder columns for output
+        cols_order = meta_cols + group_cols + [c for c in per_well.columns if c not in meta_cols + group_cols]
+        per_well = per_well.loc[:, [c for c in cols_order if c in per_well.columns]]
+        final_output = per_well
+    else:
+        final_output = final_df
+
+
+    final_output.to_csv(args.output_file, sep=args.sep, index=False)
+    logger.info(f"Saved {'per-well aggregated' if args.aggregate_per_well else 'per-object'} data to {args.output_file} (shape: {final_output.shape})")
+
     logger.info("Merge complete.")
     logger.info("note to user: I do not keep all metadata. Re-attach later if you need it in the results")
 
