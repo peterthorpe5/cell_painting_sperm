@@ -89,6 +89,7 @@ import numpy as np
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from scipy.stats import shapiro
+import gc
 from cell_painting.process_data import (
     standardise_metadata_columns,
     variance_threshold_selector,
@@ -730,6 +731,31 @@ def auto_select_scaler(df, feature_cols, logger):
     logger.info(f"Normality fraction={normal_fraction:.2f}. Using scaler: {scaler}.")
     return scaler
 
+def infer_dtypes(filename, nrows=1000):
+    """
+    Infer optimal dtypes for reading a CellProfiler CSV.
+    Floats become float32, metadata to 'category'.
+
+    Parameters
+    ----------
+    filename : str or Path
+        CSV file path.
+    nrows : int
+        Number of rows to peek for type guessing.
+
+    Returns
+    -------
+    dict
+        Dictionary of column:dtype for use with pd.read_csv(dtype=...).
+    """
+    tmp = pd.read_csv(filename, nrows=nrows)
+    dtypes = {}
+    for col in tmp.columns:
+        if tmp[col].dtype == float:
+            dtypes[col] = 'float32'
+        elif any(x in col.lower() for x in ['plate', 'well', 'cpd', 'type', 'library']):
+            dtypes[col] = 'category'
+    return dtypes
 
 
 def scale_per_plate(df, plate_col, method="auto", logger=None):
@@ -826,20 +852,45 @@ def main():
 
     # Read each file (compressed or not), and add plate/well metadata if missing
     dataframes = []
+
     for f in csv_files:
-        if f.suffix == ".gz":
-            logger.info(f"Reading compressed file: {f.name}")
-        else:
-            logger.info(f"Reading file: {f.name}")
-        df = pd.read_csv(f)
+        logger.info(f"Reading file: {f.name}")
+        dtype_map = infer_dtypes(f)
+        df = pd.read_csv(f, dtype=dtype_map)
         df = add_plate_well_metadata_if_missing(df, input_dir, f.name, logger)
-        log_memory_usage(logger, prefix=f" [After {f.name} ] ")
+        log_memory_usage(logger, prefix=f" [After {f.name} loaded] ")
         dataframes.append(df)
+        # Free temp DataFrame -  too much RAM being used
+        del df
+        gc.collect()
+        log_memory_usage(logger, prefix=f" [After {f.name} loaded garbage cleaned] ")
+
+
 
     cp_df = pd.concat(dataframes, axis=0, ignore_index=True)
     log_memory_usage(logger, prefix=" [After datasets loaded ]")
     logger.info(f"Concatenated DataFrame shape: {cp_df.shape}")
+    # Free up memory from the per-file DataFrames list
+    del dataframes
+    gc.collect()
+    log_memory_usage(logger, prefix=" [After datasets loaded garbage cleaned]")
 
+    # Downcast floats to float32 after concat to ensure no upcasting
+    float_cols = cp_df.select_dtypes(include=['float64']).columns
+    if len(float_cols) > 0:
+        cp_df[float_cols] = cp_df[float_cols].astype('float32')
+        logger.info(f"Downcast {len(float_cols)} float64 columns to float32 after concat.")
+    gc.collect()
+
+
+    # Convert suitable object columns to category
+    object_cols = cp_df.select_dtypes(include=['object']).columns
+    cat_candidates = [col for col in object_cols if any(x in col.lower() for x in ['plate', 'well', 'cpd', 'type', 'library'])]
+    for col in cat_candidates:
+        cp_df[col] = cp_df[col].astype('category')
+    logger.info(f"Converted {len(cat_candidates)} object columns to category.")
+
+    gc.collect()
 
 
     # Clean problematic values
@@ -873,6 +924,21 @@ def main():
     meta_df = harmonise_metadata_columns(meta_df, logger, is_metadata_file=True)
     meta_df = clean_metadata_columns(meta_df, logger)
     logger.info(f"Shape meta_df: {meta_df.shape}")
+
+    # Downcast float columns to float32 in meta_df
+    meta_float_cols = meta_df.select_dtypes(include=['float64']).columns
+    if len(meta_float_cols) > 0:
+        meta_df[meta_float_cols] = meta_df[meta_float_cols].astype('float32')
+        logger.info(f"Downcast {len(meta_float_cols)} float64 columns to float32 in meta_df.")
+
+    # Convert suitable object columns to category in meta_df
+    meta_object_cols = meta_df.select_dtypes(include=['object']).columns
+    meta_cat_candidates = [col for col in meta_object_cols if any(x in col.lower() for x in ['plate', 'well', 'cpd', 'type', 'library'])]
+    for col in meta_cat_candidates:
+        meta_df[col] = meta_df[col].astype('category')
+    logger.info(f"Converted {len(meta_cat_candidates)} object columns to category in meta_df.")
+
+    gc.collect()
 
 
 
@@ -926,6 +992,12 @@ def main():
                             left_on=[plate_col, well_col], 
                             right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
+
+    # Free memory from cp_df and meta_df
+    del cp_df
+    del meta_df
+    gc.collect()
+    log_memory_usage(logger, prefix=" After merge ")
     # Drop columns that are all NA after merging metadata
     na_cols_postmerge = merged_df.columns[merged_df.isna().all()].tolist()
     if na_cols_postmerge:
