@@ -1005,11 +1005,7 @@ def main():
                             right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
 
-    # Free memory from cp_df and meta_df
-    del cp_df
-    del meta_df
-    gc.collect()
-    log_memory_usage(logger, prefix=" After merge ")
+
     # Drop columns that are all NA after merging metadata
     na_cols_postmerge = merged_df.columns[merged_df.isna().all()].tolist()
     if na_cols_postmerge:
@@ -1026,7 +1022,11 @@ def main():
     else:
         logger.warning("No additional metadata columns found in merged_df for missing metadata check.")
 
-
+    # Free memory from cp_df and meta_df
+    del cp_df
+    del meta_df
+    gc.collect()
+    log_memory_usage(logger, prefix=" After merge ")
 
     # 5. Add row_number  - currently commented out. add if required, plus then alter the metadata_cols = [   ... too
     # merged_df.insert(0, "row_number", range(1, len(merged_df) + 1))
