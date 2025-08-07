@@ -122,10 +122,10 @@ def parse_args():
                         action='store_true',
                         help='If set, do not normalise each feature to the median of DMSO wells (default: normalisation ON).')
 
-    parser.add_argument('--correlation_threshold', type=float, default=0.95,
-                        help='Correlation threshold for filtering features (default: 0.95).')
-    parser.add_argument('--variance_threshold', type=float, default=0.05,
-                        help='Variance threshold for filtering features (default: 0.05).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
+    parser.add_argument('--correlation_threshold', type=float, default=0.9,
+                        help='Correlation threshold for filtering features (default: 0.9).')
+    parser.add_argument('--variance_threshold', type=float, default=0.1,
+                        help='Variance threshold for filtering features (default: 0.1).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
     parser.add_argument('--library', type=str, default=None,
                     help="Value to add as 'Library' column if not present in the metadata. "
                          "If omitted and column missing, script will error.")
@@ -134,6 +134,9 @@ def parse_args():
                         action='store_true',
                         help='If set, output one row per well (median of all objects in the well). Default: off (per-object output).'
                         )
+    parser.add_argument('--per_well_output_file', type=str, default=None,
+                        help="Optional output file for per-well aggregated data (default: auto-named from --output_file)")
+
     parser.add_argument('--no_compress_output',
                         action='store_true',
                         help='If set, do NOT compress the output file. Default: output will be compressed (.gz if filename ends with .gz).')
@@ -1112,20 +1115,33 @@ def main():
     logger.info(f"Features cast to float32. Shape: {merged_df[feature_cols].shape}")
 
     # Variance threshold filtering (first for RAM efficiency)
-    filtered_var = variance_threshold_selector(merged_df[feature_cols], threshold=args.variance_threshold)
-    n_after_var = filtered_var.shape[1]
-    logger.info(f"After variance filtering: {n_after_var} features remain (removed {n_start_features - n_after_var}).")
-    log_memory_usage(logger, prefix="[After variance filtering] ")
-    gc.collect()
+    logger.info(f"variance threshold: {args.variance_threshold}")
+    if args.variance_threshold and args.variance_threshold > 0.0:
+        logger.info(f"Applying variance threshold: {args.variance_threshold}")
+        filtered_var = variance_threshold_selector(merged_df[feature_cols], threshold=args.variance_threshold)
+        n_after_var = filtered_var.shape[1]
+        logger.info(f"After variance filtering: {n_after_var} features remain (removed {n_start_features - n_after_var}).")
+        log_memory_usage(logger, prefix="[After variance filtering] ")
+        gc.collect()
+    else:
+        logger.info("Variance threshold filter disabled (None or zero). Skipping variance filtering.")
+        filtered_var = merged_df[feature_cols]
 
     # Correlation filter (greedy/efficient if possible)
-    filtered_corr = correlation_filter(filtered_var, threshold=args.correlation_threshold)
-    n_after_corr = filtered_corr.shape[1]
-    logger.info(f"After correlation filtering: {n_after_corr} features remain (removed {n_after_var - n_after_corr}).")
+    logger.info(f"correlation threshold: {args.correlation_threshold}")
+    if args.correlation_threshold and args.correlation_threshold > 0.0:
+        logger.info(f"Applying correlation threshold: {args.correlation_threshold}")
+        filtered_corr = correlation_filter(filtered_var, threshold=args.correlation_threshold)
+        n_after_corr = filtered_corr.shape[1]
+        logger.info(f"After correlation filtering: {n_after_corr} features remain (removed {n_after_var - n_after_corr}).")
+    else:
+        logger.info("Correlation threshold filter disabled (None or zero). Skipping correlation filtering.")
+        filtered_corr = filtered_var
+        logger.info("No correlation filtering applied, using all variance-filtered features.")
+
 
     log_memory_usage(logger, prefix="[After correlation filtering] ")
     gc.collect()
-
     logger.info(f"Feature selection retained {n_after_corr} features.")
 
 
@@ -1140,77 +1156,78 @@ def main():
 
 
 
-    # 12. Output
-    # Drop duplicate columns if present (keep first occurrence)
+    # 12. OUTPUT SECTION: always write both per-object and per-well median output
+
+    # Drop duplicate columns (keep first occurrence)
     dupe_cols = final_df.columns.duplicated()
     if any(dupe_cols):
         dup_names = final_df.columns[dupe_cols].tolist()
         logger.warning(f"Found and dropping duplicate columns in output: {dup_names}")
         final_df = final_df.loc[:, ~final_df.columns.duplicated()]
-    # List columns to drop
-    cols_to_drop = ['ImageNumber', 'ObjectNumber']
 
-    # Only drop if present to avoid errors
+    # Remove columns not needed in output
+    cols_to_drop = ['ImageNumber', 'ObjectNumber']
     final_df = final_df.drop(columns=[col for col in cols_to_drop if col in final_df.columns])
 
-    if args.aggregate_per_well:
-        logger.info("Aggregating to per-well median. Each row will represent a single well (median of all objects per well).")
-        group_cols = ["Plate_Metadata", "Well_Metadata"]
-        # Only keep needed columns
-        meta_cols = ["cpd_id", "cpd_type", "Library"]
-        keep_cols = group_cols + meta_cols + [c for c in final_df.columns if c not in group_cols + meta_cols]
-        output_df = final_df.loc[:, [c for c in keep_cols if c in final_df.columns]].copy()
-        # Explicitly drop and collect memory from final_df
-        del final_df
-        gc.collect()
-        # Median aggregation for features (excluding meta/group)
-        feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols]
-        agg_df = output_df.groupby(group_cols, as_index=False)[feature_cols].median()
-        gc.collect()
-        # Merge constant metadata back per well
-        for col in meta_cols:
-            if col in output_df.columns:
-                unique_meta = output_df.groupby(group_cols, as_index=False)[col].agg(
-                    lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA
-                )
-                agg_df = agg_df.merge(unique_meta, on=group_cols, how="left")
-        gc.collect()
-        # Reorder columns: meta, group, features
-        ordered_cols = [c for c in meta_cols if c in agg_df.columns] + group_cols + [c for c in agg_df.columns if c not in meta_cols + group_cols]
-        agg_df = agg_df.loc[:, ordered_cols]
+    # --- PER-OBJECT OUTPUT ---
+    per_object_output_file = args.output_file
+    per_object_output = final_df
 
-        final_output = agg_df
-        # Memory cleanup
-        del output_df, agg_df
-        gc.collect()
-    else:
-        final_output = final_df
-
-
-    # Decide compression based on output filename and command-line flag
-    if not args.no_compress_output and args.output_file.endswith(".gz"):
+    # Write per-object output
+    if not args.no_compress_output and per_object_output_file.endswith(".gz"):
         compression = "gzip"
-        logger.info("Output will be gzip-compressed (.gz).")
+        logger.info("Per-object output will be gzip-compressed (.gz).")
     else:
         compression = None
         if args.no_compress_output:
-            logger.info("Output compression disabled by user (--no_compress_output set).")
-        elif not args.output_file.endswith(".gz"):
-            logger.info("Output file does not end with .gz; writing uncompressed output.")
+            logger.info("Per-object output compression disabled by user (--no_compress_output set).")
+        elif not per_object_output_file.endswith(".gz"):
+            logger.info("Per-object output file does not end with .gz; writing uncompressed.")
 
-    # Write output
-    final_output.to_csv(args.output_file,
-                        sep=args.sep,
-                        index=False,
-                        compression=compression)
+    per_object_output.to_csv(per_object_output_file, sep=args.sep, index=False, compression=compression)
+    logger.info(f"Saved per-object data to {per_object_output_file} (shape: {per_object_output.shape})")
 
-    logger.info(f"Saved {'per-well aggregated' if args.aggregate_per_well else 'per-object'} data "
-                f"to {args.output_file} (shape: {final_output.shape})"
-                f"{' (gzip compressed)' if compression == 'gzip' else ''}")
+    # --- PER-WELL AGGREGATION ---
+    logger.info("Aggregating to per-well median. Each row will represent a single well (median of all objects per well).")
+    group_cols = ["Plate_Metadata", "Well_Metadata"]
+    meta_cols = ["cpd_id", "cpd_type", "Library"]
+    keep_cols = group_cols + meta_cols + [c for c in final_df.columns if c not in group_cols + meta_cols]
+    output_df = final_df.loc[:, [c for c in keep_cols if c in final_df.columns]].copy()
+    # Median aggregation for features (excluding meta/group)
+    feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols]
+    agg_df = output_df.groupby(group_cols, as_index=False)[feature_cols].median()
+    # Merge constant metadata back per well
+    for col in meta_cols:
+        if col in output_df.columns:
+            unique_meta = output_df.groupby(group_cols, as_index=False)[col].agg(
+                lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA
+            )
+            agg_df = agg_df.merge(unique_meta, on=group_cols, how="left")
+    # Reorder columns: meta, group, features
+    ordered_cols = [c for c in meta_cols if c in agg_df.columns] + group_cols + [c for c in agg_df.columns if c not in meta_cols + group_cols]
+    agg_df = agg_df.loc[:, ordered_cols]
 
-    logger.info("Merge complete.")
-    logger.info("note to user: I do not keep all metadata. Re-attach later if you need it in the results")
-    log_memory_usage(logger, prefix=" END ")    
+    # Name per-well output file: default to same as output_file, but with '_per_well' before extension
+    if hasattr(args, 'per_well_output_file') and args.per_well_output_file is not None:
+        per_well_output_file = args.per_well_output_file
+    else:
+        # Insert '_per_well' before extension
+        file_parts = os.path.splitext(per_object_output_file)
+        if file_parts[1] == ".gz":
+            file_base, ext2 = os.path.splitext(file_parts[0])
+            per_well_output_file = f"{file_base}_per_well{ext2}.gz"
+        else:
+            per_well_output_file = f"{file_parts[0]}_per_well{file_parts[1]}"
+    # Write per-well output
+    agg_df.to_csv(per_well_output_file, sep=args.sep, index=False, compression=compression)
+    logger.info(f"Saved per-well aggregated data to {per_well_output_file} (shape: {agg_df.shape})")
+
+    logger.info("Merge complete. Note: not all metadata is preserved. Re-attach later if required.")
+    log_memory_usage(logger, prefix=" END ")
+
+
+
+
 
 if __name__ == "__main__":
     main()
