@@ -812,7 +812,8 @@ def scale_per_plate(df, plate_col, method="auto", logger=None):
             scaler_type = method
         scaler = StandardScaler() if scaler_type == "standard" else RobustScaler()
         try:
-            df_scaled.loc[idx, numeric_cols] = scaler.fit_transform(plate_data)
+            df_scaled.loc[idx, numeric_cols] = scaler.fit_transform(plate_data).astype(np.float32)
+
         except Exception as e:
             logger.warning(f"Scaling failed for plate {plate}: {e}")
     logger.info("Scaling complete.")
