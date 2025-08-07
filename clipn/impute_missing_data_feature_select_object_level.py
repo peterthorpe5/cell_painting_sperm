@@ -404,7 +404,9 @@ def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dms
             logger.warning(f"No DMSO wells found for plate {plate}. Skipping DMSO normalisation for this plate.")
             continue
         dmso_median = df.loc[idx_dmso, feature_cols].median()
-        dmso_mad = df.loc[idx_dmso, feature_cols].mad()
+        # dmso_mad = df.loc[idx_dmso, feature_cols].mad() -  not in this version of pandas
+        dmso_mad = df.loc[idx_dmso, feature_cols].apply(lambda x: np.median(np.abs(x - np.median(x))), axis=0)
+
         # Avoid division by zero or near-zero MAD: only scale if MAD > 0
         mad_zero = dmso_mad == 0
         if mad_zero.any():
