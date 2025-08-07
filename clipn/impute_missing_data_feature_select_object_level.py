@@ -580,6 +580,75 @@ def clean_metadata_columns(df, logger=None):
 
     return df
 
+import logging
+
+def find_merge_columns(feature_cols, meta_cols, candidates=None):
+    """
+    Auto-detects common merge columns (flexible to case/underscore variations).
+
+    Args:
+        feature_cols (list): Columns from CellProfiler features file.
+        meta_cols (list): Columns from metadata file.
+        candidates (list): List of preferred merge column names (case/underscore insensitive).
+
+    Returns:
+        dict: Mapping of {standard_name: (feature_col, meta_col)} for merging.
+    """
+    # Standard candidates
+    if candidates is None:
+        candidates = ['ImageNumber', 'Plate', 'Well', 'Field', 'Image_Metadata_Well', 'Image_Metadata_Plate']
+
+    found = {}
+    for cand in candidates:
+        for fcol in feature_cols:
+            if cand.replace('_','').lower() == fcol.replace('_','').lower():
+                for mcol in meta_cols:
+                    if cand.replace('_','').lower() == mcol.replace('_','').lower():
+                        found[cand] = (fcol, mcol)
+    return found
+
+def robust_merge_features_and_metadata(features_df, meta_df, logger=None):
+    """
+    Merge CellProfiler features with metadata, logging all steps and mismatches.
+
+    Args:
+        features_df (pd.DataFrame): CellProfiler per-object or per-image data.
+        meta_df (pd.DataFrame): Metadata DataFrame.
+        logger (logging.Logger): Optional logger.
+
+    Returns:
+        pd.DataFrame: Merged DataFrame.
+    """
+    fcols = list(features_df.columns)
+    mcols = list(meta_df.columns)
+    colmap = find_merge_columns(fcols, mcols)
+
+    if logger:
+        logger.info(f"Candidate merge columns: {colmap}")
+
+    if not colmap:
+        msg = ("No matching merge columns found! "
+               f"Features cols: {fcols[:10]}..., Metadata cols: {mcols[:10]}...")
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        # Return unmerged, but user can debug further
+        return features_df
+
+    # Pick the *first* matching merge column for now
+    merge_on = list(colmap.values())[0]
+    fcol, mcol = merge_on
+
+    if logger:
+        logger.info(f"Merging on: Feature col '{fcol}', Metadata col '{mcol}'")
+
+    merged = features_df.merge(meta_df, left_on=fcol, right_on=mcol, how='left')
+
+    if logger:
+        logger.info(f"Merged shape: {merged.shape}, Unmatched rows: {(merged[mcol].isna()).sum()}")
+    return merged
+
 
 def harmonise_metadata_columns(df, logger=None, is_metadata_file=False):
     """
@@ -787,6 +856,12 @@ def main():
 
 
     # 2. Harmonise plate/well columns
+
+    logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
+    logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
+    logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
+    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
+
     merge_keys = [k.strip() for k in args.merge_keys.split(",")]
     plate_candidates = [merge_keys[0], "Plate", "plate", "Plate_Metadata", "Metadata_Plate", "Image_Metadata_Plate"]
     well_candidates = [merge_keys[1], "Well", "well", "Well_Metadata", "Metadata_Well", "Image_Metadata_Well"]
@@ -839,9 +914,17 @@ def main():
     elif 'Well' in meta_df.columns:
         meta_df['Well'] = meta_df['Well'].apply(standardise_well_name)
 
+    logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
+    logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
+    logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
+    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
 
     # 4. Merge metadata
-    merged_df = cp_df.merge(meta_df, how="left", left_on=[plate_col, well_col], right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
+    logger.info(f"Shape after robust metadata merge: {merged_df.shape}")
+
+    merged_df = cp_df.merge(meta_df, how="left", 
+                            left_on=[plate_col, well_col], 
+                            right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
     # Drop columns that are all NA after merging metadata
     na_cols_postmerge = merged_df.columns[merged_df.isna().all()].tolist()
