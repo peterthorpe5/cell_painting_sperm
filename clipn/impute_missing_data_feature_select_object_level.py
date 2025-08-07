@@ -857,10 +857,6 @@ def main():
 
     # 2. Harmonise plate/well columns
 
-    logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
-    logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
-    logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
-    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
 
     merge_keys = [k.strip() for k in args.merge_keys.split(",")]
     plate_candidates = [merge_keys[0], "Plate", "plate", "Plate_Metadata", "Metadata_Plate", "Image_Metadata_Plate"]
@@ -871,6 +867,11 @@ def main():
         logger.error("Could not harmonise plate/well column names in CellProfiler data.")
         sys.exit(1)
     logger.info(f"CellProfiler: using plate column '{plate_col}', well column '{well_col}'.")
+
+    logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
+    logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
+    logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
+    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
 
     # 3. Load and harmonise metadata
     meta_df = robust_read_csv(args.metadata_file, logger=logger)
