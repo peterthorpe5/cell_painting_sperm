@@ -1131,7 +1131,7 @@ def main():
     present_metadata = [col for col in metadata_cols if col in merged_df.columns]
 
     # After feature selection:
-    final_cols = present_metadata + list(filtered_final.columns)
+    final_cols = present_metadata + list(filtered_corr.columns)
     final_df = merged_df[final_cols].copy()
 
 
