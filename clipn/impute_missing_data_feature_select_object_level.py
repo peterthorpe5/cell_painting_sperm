@@ -484,7 +484,8 @@ def harmonise_column_names(df, candidates, target, logger):
 
 
 
-def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
+def impute_missing(df, method="knn", knn_neighbours=5, logger=None,
+                   max_cells=1000000, max_features=3000):
     """
     Impute missing values for all numeric columns.
 
@@ -496,6 +497,10 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
         Imputation method: 'median' or 'knn'.
     knn_neighbours : int
         Number of neighbours for KNN imputation.
+    max_cells : int, optional
+        Maximum number of rows for which to attempt imputation.
+    max_features : int, optional
+        Maximum number of columns for which to attempt imputation.
     logger : logging.Logger or None
         Logger for status messages.
 
@@ -505,7 +510,17 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
         DataFrame with imputed numeric columns.
     """
     logger = logger or logging.getLogger("impute_logger")
+    n_cells, n_cols = df.shape
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    if n_cells > max_cells or len(numeric_cols) > max_features:
+        logger.warning(
+            f"Imputation skipped: dataset too large for safe in-memory imputation "
+            f"({n_cells:,} rows, {len(numeric_cols)} numeric columns; "
+            f"thresholds: {max_cells:,} rows, {max_features} columns)."
+        )
+        return df
+
     if not numeric_cols:
         logger.warning("No numeric columns found for imputation.")
         return df
@@ -520,14 +535,16 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None):
     before_na = df[numeric_cols].isna().sum().sum()
     logger.info(f"Imputing missing values in {len(numeric_cols)} numeric columns (nans before: {before_na})...")
     if method == "median":
-        imp = SimpleImputer(strategy="median")
+        imputer = SimpleImputer(strategy="median")
     elif method == "knn":
-        imp = KNNImputer(n_neighbors=knn_neighbours)
+        logger.info("Running KNN imputation (may be memory-intensive).")
+        imputer = KNNImputer(n_neighbors=knn_neighbours)
     else:
         logger.info("Imputation skipped.")
         return df
-    df[numeric_cols] = imp.fit_transform(df[numeric_cols])
+    df[numeric_cols] = imputer.fit_transform(df[numeric_cols].astype(np.float32))
     after_na = df[numeric_cols].isna().sum().sum()
+    gc.collect()
     logger.info(f"Imputation complete (nans after: {after_na}).")
     return df
 
@@ -941,8 +958,6 @@ def main():
     gc.collect()
 
 
-
-
     if "Library" not in meta_df.columns:
         if args.library is not None:
             meta_df["Library"] = args.library
@@ -986,8 +1001,6 @@ def main():
     logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
 
     # 4. Merge metadata
-    logger.info(f"Shape after robust metadata merge: {merged_df.shape}")
-
     merged_df = cp_df.merge(meta_df, how="left", 
                             left_on=[plate_col, well_col], 
                             right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
