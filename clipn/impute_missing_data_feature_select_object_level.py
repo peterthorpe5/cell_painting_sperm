@@ -1049,7 +1049,11 @@ def main():
     if n_inf or n_neg_inf or n_large:
         logger.warning(f"Replacing {n_inf} inf, {n_neg_inf} -inf, {n_large} very large values (>1e10) with NaN before imputation.")
         merged_df[numeric_cols] = merged_df[numeric_cols].replace([np.inf, -np.inf], np.nan)
-        merged_df[numeric_cols] = merged_df[numeric_cols].applymap(lambda x: np.nan if isinstance(x, float) and abs(x) > 1e10 else x)
+        # Convert to float first to ensure .abs() works as expected (if needed)
+        merged_df[numeric_cols] = merged_df[numeric_cols].astype(np.float32)
+        mask = merged_df[numeric_cols].abs() > 1e10
+        merged_df[numeric_cols] = merged_df[numeric_cols].where(~mask, np.nan)
+
 
     # Drop columns that are entirely NaN
     na_cols = merged_df.columns[merged_df.isna().all()].tolist()
