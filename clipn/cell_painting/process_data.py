@@ -164,19 +164,63 @@ def optimise_clipn(X, y, n_trials=40):
     return study.best_trial.params
 
 
-def variance_threshold_selector(data, threshold=0.05):
-    """Select features based on variance threshold."""
+
+def variance_threshold_selector(data: pd.DataFrame, threshold: float = 0.05) -> pd.DataFrame:
+    """
+    Select features based on a variance threshold.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Input feature matrix (numeric).
+    threshold : float, optional
+        Features with variance below this value are dropped. Default is 0.05.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame containing only features with variance above the threshold.
+    """
+    # Defensive: Convert to float32 (if not already)
+    data = data.astype(np.float32, copy=False)
     selector = VarianceThreshold(threshold)
-    selector.fit(data)
-    return data.iloc[:, selector.get_support(indices=True)]
+    mask = selector.fit(data).get_support()
+    # Defensive: keep column names (iloc preserves order)
+    return data.loc[:, mask]
 
 
-def correlation_filter(data, threshold=0.99):
-    """Remove highly correlated features based on threshold."""
-    corr_matrix = data.corr().abs()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    drop_cols = [column for column in upper.columns if any(upper[column] > threshold)]
-    return data.drop(columns=drop_cols)
+def correlation_filter(data: pd.DataFrame, threshold: float = 0.99) -> pd.DataFrame:
+    """
+    Remove highly correlated features from a DataFrame.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Input feature matrix (numeric).
+    threshold : float, optional
+        Correlation threshold above which a feature will be removed (default: 0.99).
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with highly correlated features removed.
+    """
+    # Defensive: Convert to float32
+    data = data.astype(np.float32, copy=False)
+
+    # Compute absolute correlation matrix (float32 if possible)
+    corr_matrix = data.corr().abs().astype(np.float32)
+    # Only look at upper triangle, skip self-correlations
+    upper = np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+    # Get columns to drop (first in pair is always kept)
+    drop_cols = set()
+    columns = data.columns
+    for i in range(corr_matrix.shape[0]):
+        for j in range(i+1, corr_matrix.shape[1]):
+            if corr_matrix.iat[i, j] > threshold:
+                drop_cols.add(columns[j])
+    # Drop all identified columns
+    return data.drop(columns=list(drop_cols))
 
 
 def load_annotation(annotation_path):

@@ -1096,27 +1096,32 @@ def main():
     present_metadata = [col for col in metadata_cols if col in merged_df.columns]
     metadata_df = merged_df[present_metadata].copy()
 
-    # 10. Feature selection (correlation and variance filtering)
-    # Identify starting features
+
+    # 10. Feature selection (variance, then correlation filtering for efficiency)
     feature_cols = [c for c in merged_df.columns if c not in present_metadata and pd.api.types.is_numeric_dtype(merged_df[c])]
     n_start_features = len(feature_cols)
     logger.info(f"Feature selection on {n_start_features} numeric columns.")
-    logger.info(f"Shape before correlation_filter: {merged_df[feature_cols].shape}")
 
-    # Correlation filter
-    filtered_corr = correlation_filter(merged_df[feature_cols], threshold=args.correlation_threshold)
-    n_after_corr = filtered_corr.shape[1]
-    log_memory_usage(logger, prefix="[After correlation filtering] ")
-    logger.info(f"Shape after correlation_filter: {filtered_corr.shape}")
-    logger.info(f"Dropped {n_start_features - n_after_corr} features due to correlation threshold.")
+    # Convert features to float32 to save memory
+    merged_df[feature_cols] = merged_df[feature_cols].astype(np.float32)
+    gc.collect()
+    logger.info(f"Features cast to float32. Shape: {merged_df[feature_cols].shape}")
 
-    # Variance threshold filter
-    filtered_final = variance_threshold_selector(filtered_corr, threshold=args.variance_threshold)
-    n_after_var = filtered_final.shape[1]
+    # Variance threshold filtering (first for RAM efficiency)
+    filtered_var = variance_threshold_selector(merged_df[feature_cols], threshold=args.variance_threshold)
+    n_after_var = filtered_var.shape[1]
+    logger.info(f"After variance filtering: {n_after_var} features remain (removed {n_start_features - n_after_var}).")
     log_memory_usage(logger, prefix="[After variance filtering] ")
-    logger.info(f"Shape after variance_threshold_selector: {filtered_final.shape}")
-    logger.info(f"Dropped {n_after_corr - n_after_var} features due to low variance.")
-    logger.info(f"Feature selection retained {n_after_var} features.")
+    gc.collect()
+
+    # Correlation filter (greedy/efficient if possible)
+    filtered_corr = correlation_filter(filtered_var, threshold=args.correlation_threshold)
+    n_after_corr = filtered_corr.shape[1]
+    logger.info(f"After correlation filtering: {n_after_corr} features remain (removed {n_after_var - n_after_corr}).")
+    log_memory_usage(logger, prefix="[After correlation filtering] ")
+    gc.collect()
+
+    logger.info(f"Feature selection retained {n_after_corr} features.")
 
 
     # 11. Combine metadata and filtered features
@@ -1146,22 +1151,33 @@ def main():
     if args.aggregate_per_well:
         logger.info("Aggregating to per-well median. Each row will represent a single well (median of all objects per well).")
         group_cols = ["Plate_Metadata", "Well_Metadata"]
-        # Only keep metadata columns for grouping and median features
-        # Drop any duplicate columns for grouping
-        output_df = final_df.copy()
-        median_features = [c for c in output_df.columns if c not in group_cols]
-        # Perform aggregation: median per well, then merge unique metadata
-        per_well = output_df.groupby(group_cols, as_index=False)[median_features].median()
-        # Optionally, you can merge back unique metadata (e.g., cpd_id, cpd_type, Library) if those are constant per well
+        # Only keep needed columns
         meta_cols = ["cpd_id", "cpd_type", "Library"]
+        keep_cols = group_cols + meta_cols + [c for c in final_df.columns if c not in group_cols + meta_cols]
+        output_df = final_df.loc[:, [c for c in keep_cols if c in final_df.columns]].copy()
+        # Explicitly drop and collect memory from final_df
+        del final_df
+        gc.collect()
+        # Median aggregation for features (excluding meta/group)
+        feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols]
+        agg_df = output_df.groupby(group_cols, as_index=False)[feature_cols].median()
+        gc.collect()
+        # Merge constant metadata back per well
         for col in meta_cols:
             if col in output_df.columns:
-                meta_unique = output_df.groupby(group_cols)[col].agg(lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA).reset_index()
-                per_well = per_well.merge(meta_unique, on=group_cols, how="left")
-        # Reorder columns for output
-        cols_order = meta_cols + group_cols + [c for c in per_well.columns if c not in meta_cols + group_cols]
-        per_well = per_well.loc[:, [c for c in cols_order if c in per_well.columns]]
-        final_output = per_well
+                unique_meta = output_df.groupby(group_cols, as_index=False)[col].agg(
+                    lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA
+                )
+                agg_df = agg_df.merge(unique_meta, on=group_cols, how="left")
+        gc.collect()
+        # Reorder columns: meta, group, features
+        ordered_cols = [c for c in meta_cols if c in agg_df.columns] + group_cols + [c for c in agg_df.columns if c not in meta_cols + group_cols]
+        agg_df = agg_df.loc[:, ordered_cols]
+
+        final_output = agg_df
+        # Memory cleanup
+        del output_df, agg_df
+        gc.collect()
     else:
         final_output = final_df
 
