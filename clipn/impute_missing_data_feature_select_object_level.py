@@ -420,8 +420,10 @@ def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dms
             # Divide by MAD (if not zero)
             if dmso_mad[feature] > 0:
                 vals = vals / dmso_mad[feature]
+            if not np.issubdtype(df_norm[feature].dtype, np.floating):
+                df_norm[feature] = df_norm[feature].astype(np.float32)
             # Assign back
-            df_norm.loc[idx_plate, feature] = vals
+            df_norm.loc[idx_plate, feature] = vals.astype(np.float32)
         logger.info(f"Robust DMSO normalisation complete for plate {plate}.")
     return df_norm
 
@@ -1119,6 +1121,7 @@ def main():
     filtered_corr = correlation_filter(filtered_var, threshold=args.correlation_threshold)
     n_after_corr = filtered_corr.shape[1]
     logger.info(f"After correlation filtering: {n_after_corr} features remain (removed {n_after_var - n_after_corr}).")
+
     log_memory_usage(logger, prefix="[After correlation filtering] ")
     gc.collect()
 
