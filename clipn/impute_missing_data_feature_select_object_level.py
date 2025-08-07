@@ -93,8 +93,7 @@ import gc
 from cell_painting.process_data import (
     standardise_metadata_columns,
     variance_threshold_selector,
-    correlation_filter
-)
+    correlation_filter)
 
 _script_start_time = time.time()
 
@@ -123,8 +122,8 @@ def parse_args():
                         action='store_true',
                         help='If set, do not normalise each feature to the median of DMSO wells (default: normalisation ON).')
 
-    parser.add_argument('--correlation_threshold', type=float, default=0.99,
-                        help='Correlation threshold for filtering features (default: 0.99).')
+    parser.add_argument('--correlation_threshold', type=float, default=0.95,
+                        help='Correlation threshold for filtering features (default: 0.95).')
     parser.add_argument('--variance_threshold', type=float, default=0.05,
                         help='Variance threshold for filtering features (default: 0.05).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
     parser.add_argument('--library', type=str, default=None,
