@@ -1088,7 +1088,7 @@ def main():
     else:
         logger.info("Per-plate scaling not performed.")
 
-
+    log_memory_usage(logger, prefix=" [After scaling ]")
     # 8. Standardise metadata columns for downstream compatibility
     merged_df = standardise_metadata_columns(merged_df, logger=logger, dataset_name="merged_raw")
 
