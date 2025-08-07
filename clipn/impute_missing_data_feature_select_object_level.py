@@ -868,11 +868,6 @@ def main():
         sys.exit(1)
     logger.info(f"CellProfiler: using plate column '{plate_col}', well column '{well_col}'.")
 
-    logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
-    logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
-    logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
-    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
-
     # 3. Load and harmonise metadata
     meta_df = robust_read_csv(args.metadata_file, logger=logger)
     meta_df = harmonise_metadata_columns(meta_df, logger, is_metadata_file=True)
@@ -902,6 +897,10 @@ def main():
         sys.exit(1)
     logger.info(f"Metadata: using plate column '{meta_plate_col}', well column '{meta_well_col}'.")
 
+    logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
+    logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
+    logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
+    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
 
 
     # Standardise Well_Metadata in both main and metadata DataFrames
