@@ -1074,7 +1074,7 @@ def main():
         logger.info("Imputation skipped (impute=none).")
 
 
-    # 7a. default DMSO normalisation (after scaling, before feature selection)
+    # 7a. default DMSO normalisation (then scaling, before feature selection)
 
     if not args.no_dmso_normalisation:
         feature_cols = [c for c in merged_df.select_dtypes(include=[np.number]).columns if c != "row_number"]
@@ -1122,10 +1122,19 @@ def main():
     meta_cols = ["cpd_id", "cpd_type", "Library"]
     keep_cols = group_cols + meta_cols + [c for c in merged_df.columns if c not in group_cols + meta_cols]
     output_df = merged_df.loc[:, [c for c in keep_cols if c in merged_df.columns]].copy()
-    feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols]
 
-    # Median aggregation for features (excluding meta/group)
+    feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols and pd.api.types.is_numeric_dtype(output_df[c])]
+
+
+    non_numeric = [
+        c for c in output_df.columns
+        if c not in group_cols + meta_cols and not pd.api.types.is_numeric_dtype(output_df[c])
+    ]
+    if non_numeric:
+        logger.warning(f"Skipped non-numeric columns from aggregation: {non_numeric}")
+
     agg_df = output_df.groupby(group_cols, as_index=False)[feature_cols].median()
+    # Median aggregation for features (excluding meta/group)
     # Merge constant metadata back per well
     for col in meta_cols:
         if col in output_df.columns:
