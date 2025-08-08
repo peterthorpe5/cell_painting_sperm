@@ -122,10 +122,10 @@ def parse_args():
                         action='store_true',
                         help='If set, do not normalise each feature to the median of DMSO wells (default: normalisation ON).')
 
-    parser.add_argument('--correlation_threshold', type=float, default=0.9,
-                        help='Correlation threshold for filtering features (default: 0.9).')
+    parser.add_argument('--correlation_threshold', type=float, default=0.95,
+                        help='Correlation threshold for filtering features (default: 0.95).')
     parser.add_argument('--variance_threshold', type=float, default=0.1,
-                        help='Variance threshold for filtering features (default: 0.1).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
+                        help='Variance threshold for filtering features (default: 0.05).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
     parser.add_argument('--library', type=str, default=None,
                     help="Value to add as 'Library' column if not present in the metadata. "
                          "If omitted and column missing, script will error.")
