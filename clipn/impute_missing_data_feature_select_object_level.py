@@ -1133,7 +1133,8 @@ def main():
     if non_numeric:
         logger.warning(f"Skipped non-numeric columns from aggregation: {non_numeric}")
 
-    agg_df = output_df.groupby(group_cols, as_index=False)[feature_cols].median()
+    agg_df = output_df.groupby(group_cols, as_index=False, observed=False)[feature_cols].median()
+
     # Median aggregation for features (excluding meta/group)
     # Merge constant metadata back per well
     for col in meta_cols:
