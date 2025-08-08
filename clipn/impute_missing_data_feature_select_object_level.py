@@ -136,6 +136,9 @@ def parse_args():
                         )
     parser.add_argument('--per_well_output_file', type=str, default=None,
                         help="Optional output file for per-well aggregated data (default: auto-named from --output_file)")
+    parser.add_argument('--per_object_output',
+                        action='store_true',
+                        help='If set, output per-object (single cell) data as well as per-well aggregated. Default: False (only per-well output).')
 
     parser.add_argument('--no_compress_output',
                         action='store_true',
@@ -1108,7 +1111,42 @@ def main():
     metadata_df = merged_df[present_metadata].copy()
 
 
+    # -------------------------
+    # Aggregate to per-well before feature selection
+    # -------------------------
+    # This is a shame, but too much RAM is used if we dont do this
+
+    # Aggregate per-object data to median per well
+    logger.info("Aggregating per-object data to per-well median BEFORE feature selection.")
+    group_cols = ["Plate_Metadata", "Well_Metadata"]
+    meta_cols = ["cpd_id", "cpd_type", "Library"]
+    keep_cols = group_cols + meta_cols + [c for c in merged_df.columns if c not in group_cols + meta_cols]
+    output_df = merged_df.loc[:, [c for c in keep_cols if c in merged_df.columns]].copy()
+    feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols]
+
+    # Median aggregation for features (excluding meta/group)
+    agg_df = output_df.groupby(group_cols, as_index=False)[feature_cols].median()
+    # Merge constant metadata back per well
+    for col in meta_cols:
+        if col in output_df.columns:
+            unique_meta = output_df.groupby(group_cols, as_index=False)[col].agg(
+                lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA
+            )
+            agg_df = agg_df.merge(unique_meta, on=group_cols, how="left")
+    # Reorder columns: meta, group, features
+    ordered_cols = [c for c in meta_cols if c in agg_df.columns] + group_cols + [c for c in agg_df.columns if c not in meta_cols + group_cols]
+    agg_df = agg_df.loc[:, ordered_cols]
+    logger.info(f"Aggregated DataFrame shape (per-well): {agg_df.shape}")
+
+    # Release memory: we do NOT need merged_df any more
+    del merged_df
+    gc.collect()
+
+
+
     # 10. Feature selection (variance, then correlation filtering for efficiency)
+    merged_df = agg_df
+    log_memory_usage(logger, prefix=" [After per-well aggregation ]")
     feature_cols = [c for c in merged_df.columns if c not in present_metadata and pd.api.types.is_numeric_dtype(merged_df[c])]
     n_start_features = len(feature_cols)
     logger.info(f"Feature selection on {n_start_features} numeric columns.")
@@ -1159,77 +1197,58 @@ def main():
     final_df = merged_df[final_cols].copy()
 
 
-
-    # 12. OUTPUT SECTION: always write both per-object and per-well median output
-
-    # Drop duplicate columns (keep first occurrence)
-    dupe_cols = final_df.columns.duplicated()
-    if any(dupe_cols):
-        dup_names = final_df.columns[dupe_cols].tolist()
-        logger.warning(f"Found and dropping duplicate columns in output: {dup_names}")
-        final_df = final_df.loc[:, ~final_df.columns.duplicated()]
+    # 12) OUTPUT SECTION 
 
     # Remove columns not needed in output
     cols_to_drop = ['ImageNumber', 'ObjectNumber']
-    final_df = final_df.drop(columns=[col for col in cols_to_drop if col in final_df.columns])
+    for col in cols_to_drop:
+        if col in merged_df.columns:
+            merged_df = merged_df.drop(columns=col)
 
-    # --- PER-OBJECT OUTPUT ---
-    per_object_output_file = args.output_file
-    per_object_output = final_df
+    # Drop duplicate columns (keep first occurrence)
+    dupe_cols = merged_df.columns.duplicated()
+    if any(dupe_cols):
+        dup_names = merged_df.columns[dupe_cols].tolist()
+        logger.warning(f"Found and dropping duplicate columns in output: {dup_names}")
+        merged_df = merged_df.loc[:, ~merged_df.columns.duplicated()]
 
-    # Write per-object output
-    if not args.no_compress_output and per_object_output_file.endswith(".gz"):
+    # Per-well output (feature-selected, median-aggregated)
+    per_well_output_file = args.output_file  # You may want to auto-name if preferred
+    if not args.no_compress_output and per_well_output_file.endswith(".gz"):
         compression = "gzip"
-        logger.info("Per-object output will be gzip-compressed (.gz).")
+        logger.info("Per-well output will be gzip-compressed (.gz).")
     else:
         compression = None
         if args.no_compress_output:
-            logger.info("Per-object output compression disabled by user (--no_compress_output set).")
-        elif not per_object_output_file.endswith(".gz"):
-            logger.info("Per-object output file does not end with .gz; writing uncompressed.")
+            logger.info("Per-well output compression disabled by user (--no_compress_output set).")
+        elif not per_well_output_file.endswith(".gz"):
+            logger.info("Per-well output file does not end with .gz; writing uncompressed.")
 
-    per_object_output.to_csv(per_object_output_file, sep=args.sep, index=False, compression=compression)
-    logger.info(f"Saved per-object data to {per_object_output_file} (shape: {per_object_output.shape})")
+    merged_df.to_csv(per_well_output_file, sep=args.sep, index=False, compression=compression)
+    logger.info(f"Saved per-well aggregated, feature-selected data to {per_well_output_file} (shape: {merged_df.shape})")
 
-    # --- PER-WELL AGGREGATION ---
-    logger.info("Aggregating to per-well median. Each row will represent a single well (median of all objects per well).")
-    group_cols = ["Plate_Metadata", "Well_Metadata"]
-    meta_cols = ["cpd_id", "cpd_type", "Library"]
-    keep_cols = group_cols + meta_cols + [c for c in final_df.columns if c not in group_cols + meta_cols]
-    output_df = final_df.loc[:, [c for c in keep_cols if c in final_df.columns]].copy()
-    # Median aggregation for features (excluding meta/group)
-    feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols]
-    agg_df = output_df.groupby(group_cols, as_index=False)[feature_cols].median()
-    # Merge constant metadata back per well
-    for col in meta_cols:
-        if col in output_df.columns:
-            unique_meta = output_df.groupby(group_cols, as_index=False)[col].agg(
-                lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA
-            )
-            agg_df = agg_df.merge(unique_meta, on=group_cols, how="left")
-    # Reorder columns: meta, group, features
-    ordered_cols = [c for c in meta_cols if c in agg_df.columns] + group_cols + [c for c in agg_df.columns if c not in meta_cols + group_cols]
-    agg_df = agg_df.loc[:, ordered_cols]
-
-    # Name per-well output file: default to same as output_file, but with '_per_well' before extension
-    if hasattr(args, 'per_well_output_file') and args.per_well_output_file is not None:
-        per_well_output_file = args.per_well_output_file
-    else:
-        # Insert '_per_well' before extension
-        file_parts = os.path.splitext(per_object_output_file)
-        if file_parts[1] == ".gz":
-            file_base, ext2 = os.path.splitext(file_parts[0])
-            per_well_output_file = f"{file_base}_per_well{ext2}.gz"
+    # --- OPTIONAL: Per-object output (if --per_object_output set) ---
+    if getattr(args, "per_object_output", False):
+        if 'per_object_df' not in locals():
+            logger.warning("Per-object DataFrame not found. Skipping per-object output.")
         else:
-            per_well_output_file = f"{file_parts[0]}_per_well{file_parts[1]}"
-    # Write per-well output
-    agg_df.to_csv(per_well_output_file, sep=args.sep, index=False, compression=compression)
-    logger.info(f"Saved per-well aggregated data to {per_well_output_file} (shape: {agg_df.shape})")
+            per_object_output_file = per_well_output_file.replace('.tsv', '_per_object.tsv').replace('.gz', '_per_object.tsv.gz')
+            # Remove unnecessary columns from per-object output as well
+            for col in cols_to_drop:
+                if col in per_object_df.columns:
+                    per_object_df = per_object_df.drop(columns=col)
+            dupe_cols = per_object_df.columns.duplicated()
+            if any(dupe_cols):
+                dup_names = per_object_df.columns[dupe_cols].tolist()
+                logger.warning(f"Found and dropping duplicate columns in per-object output: {dup_names}")
+                per_object_df = per_object_df.loc[:, ~per_object_df.columns.duplicated()]
+            per_object_df.to_csv(per_object_output_file, sep=args.sep, index=False, compression=compression)
+            logger.info(f"Saved per-object (non-aggregated) data to {per_object_output_file} (shape: {per_object_df.shape})")
+    else:
+        logger.info("Per-object output skipped (--per_object_output not set).")
 
-    logger.info("Merge complete. Note: not all metadata is preserved. Re-attach later if required.")
+    logger.info("Output complete.")
     log_memory_usage(logger, prefix=" END ")
-
-
 
 
 
