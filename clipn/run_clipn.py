@@ -449,7 +449,8 @@ def harmonise_numeric_columns(dataframes, logger):
     common_cols = sorted(set.intersection(*numeric_cols_sets))
     logger.info(f"Harmonised numeric columns across datasets: {len(common_cols)}")
 
-    metadata_cols = ["cpd_id", "cpd_type", "Library"]
+    metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+
     for name, df in dataframes.items():
         numeric_df = df[common_cols]
         metadata_df = df[metadata_cols]
@@ -485,7 +486,8 @@ def load_and_harmonise_datasets(datasets_csv, logger, mode=None):
     datasets_df = pd.read_csv(datasets_csv, delimiter=delimiter)
     dataset_paths = datasets_df.set_index('dataset')['path'].to_dict()
 
-    metadata_cols = ["cpd_id", "cpd_type", "Library"]
+    metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+
     dataframes = {}
 
     logger.info("Loading datasets individually")
@@ -761,6 +763,8 @@ def main(args):
 
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
+    logger.debug(f"[Harmonised] Columns for '{name}': {df_harmonised.columns.tolist()}")
+    logger.info(f"Loaded and harmonised {len(dataframes)} datasets from {args.datasets_csv}")
     logger.info("NOTE this script does not perform any DMSO normalisation, you must do this before running this script. if you want it..")
 
     # Sanity check here:
@@ -829,7 +833,10 @@ def main(args):
     logger.info("Encoding categorical labels for CLIPn compatibility")
 
     combined_df, encoders = encode_labels(combined_df, logger)
-    metadata_df = decode_labels(combined_df.copy(), encoders, logger)[["cpd_id", "cpd_type", "Library"]]
+    metadata_df = decode_labels(combined_df.copy(), encectors, logger)[
+                                ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+                            ]
+
     log_memory_usage(logger, prefix="[After encoding] ")
 
     metadata_df = metadata_df.reset_index()
