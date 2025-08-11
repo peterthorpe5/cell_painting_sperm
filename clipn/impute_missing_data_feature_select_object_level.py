@@ -1143,8 +1143,6 @@ def main():
     cp_df[well_col]  = _norm_well(cp_df[well_col])
 
 
-    logger.info(f"Shape after metadata merge: {merged_df.shape}")
-
     # --- 0) Make sure keys are normalized ---
     meta_df[meta_plate_col] = _norm_plate(meta_df[meta_plate_col])
     meta_df[meta_well_col]  = _norm_well(meta_df[meta_well_col])
@@ -1429,7 +1427,10 @@ def main():
 
     log_memory_usage(logger, prefix="[After correlation filtering] ")
     gc.collect()
+    # after you set filtered_corr (in both branches)
+    n_after_corr = filtered_corr.shape[1]
     logger.info(f"Feature selection retained {n_after_corr} features.")
+
 
 
     # 11. Combine metadata and filtered features
