@@ -1152,8 +1152,8 @@ def main():
                     f"{meta_df[meta_df.duplicated([meta_plate_col, meta_well_col], keep=False)].head()}")
         # If desired: meta_df = meta_df.drop_duplicates([meta_plate_col, meta_well_col], keep='first')
 
-    logger.info(f"cp_df unique Plate×Well: {left_keys.shape[0]:,}")
-    logger.info(f"meta_df unique Plate×Well: {right_keys.shape[0]:,}")
+    logger.info(f"cp_df unique PlatexWell: {left_keys.shape[0]:,}")
+    logger.info(f"meta_df unique PlatexWell: {right_keys.shape[0]:,}")
     logger.info(f"Intersection size: {left_keys.merge(right_keys, left_on=[plate_col, well_col], right_on=[meta_plate_col, meta_well_col]).shape[0]:,}")
 
 
