@@ -86,6 +86,7 @@ import sys
 import re
 import pandas as pd
 import numpy as np
+from typing import Optional
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from scipy.stats import shapiro
@@ -120,10 +121,9 @@ def parse_args():
                         help='Scaling method: "standard", "robust", "auto", or "none" (default: robust).')
     parser.add_argument('--no_dmso_normalisation',
                         action='store_true',
-                        help='If set, do not normalise each feature to the median of DMSO wells (default: normalisation ON).')
-
-    parser.add_argument('--correlation_threshold', type=float, default=0.95,
-                        help='Correlation threshold for filtering features (default: 0.95).')
+                        help='If set, skip DMSO normalisation. Default: OFF (normalisation ON).')
+    parser.add_argument('--correlation_threshold', type=float, default=0.99,
+                        help='Correlation threshold for filtering features (default: 0.99).')
     parser.add_argument('--variance_threshold', type=float, default=0.05,
                         help='Variance threshold for filtering features (default: 0.05).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
     parser.add_argument('--library', type=str, default=None,
@@ -743,7 +743,8 @@ def harmonise_metadata_columns(df, logger=None, is_metadata_file=False):
     return df
 
 
-def select_single_plate_well(df: pd.DataFrame, logger: logging.Logger | None = None) -> pd.DataFrame:
+
+def select_single_plate_well(df: pd.DataFrame, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
     """
     Ensure exactly one pair of plate/well metadata columns exists with canonical names.
 
@@ -979,8 +980,11 @@ def main():
     excluded_files = [f.name for f in all_files if f not in csv_files]
     logger.info(f"Looking for CellProfiler CSV files in {input_dir}...")
     logger.info("Excluding files with 'image' or 'normalised' in their names.")
+    mode_msg = "per-well aggregated" if args.aggregate_per_well else "per-object"
+    logger.info(f"Saved {mode_msg}, feature-selected data to {per_well_output_file} (shape: {merged_df.shape})")
 
-    
+
+
 
     if not csv_files:
         logger.error(f"No CellProfiler CSV files found in {args.input_dir} after exclusions.")
@@ -988,9 +992,6 @@ def main():
     if excluded_files:
         logger.info(f"Excluded files (contain 'image' or 'normalised'): {excluded_files}")
     logger.info(f"Files to load: {[f.name for f in csv_files]}")
-
-    # Read each file (compressed or not), and add plate/well metadata if missing
-    dataframes = []
 
     # Read each file (compressed or not), and add plate/well metadata if missing
     dataframes = []
@@ -1124,8 +1125,6 @@ def main():
     # Standardise Well_Metadata (or 'Well', if not renamed yet) in metadata
     if 'Well_Metadata' in meta_df.columns:
         meta_df['Well_Metadata'] = meta_df['Well_Metadata'].apply(standardise_well_name)
-    elif 'Well' in meta_df.columns:
-        meta_df['Well'] = meta_df['Well'].apply(standardise_well_name)
 
     logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
     logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
@@ -1344,85 +1343,96 @@ def main():
     metadata_df = merged_df[present_metadata].copy()
 
 
+    # ---- SNAPSHOT FOR PER-OBJECT SAVE (if requested) ----
+    # Keep a lightweight copy only when user asked for it to avoid RAM blow-up.
+    per_object_df = None
+    if getattr(args, "per_object_output", False):
+        # Keep just meta + numeric features (we will align feature set later)
+        meta_keep = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+        meta_keep = [c for c in meta_keep if c in merged_df.columns]
+        feat_keep = [c for c in merged_df.columns
+                    if c not in meta_keep and pd.api.types.is_numeric_dtype(merged_df[c])]
+        per_object_df = merged_df[meta_keep + feat_keep].copy()
+
+
+
     # -------------------------
     # Aggregate to per-well before feature selection
     # -------------------------
     # This is a shame, but too much RAM is used if we dont do this
 
     # Aggregate per-object data to median per well
-    logger.info("Aggregating per-object data to per-well median BEFORE feature selection.")
-    group_cols = ["Plate_Metadata", "Well_Metadata"]
-    meta_cols = ["cpd_id", "cpd_type", "Library"]
-    keep_cols = group_cols + meta_cols + [c for c in merged_df.columns if c not in group_cols + meta_cols]
-    output_df = merged_df.loc[:, [c for c in keep_cols if c in merged_df.columns]].copy()
+    # -------------------------
+    # Optional aggregation to per-well BEFORE feature selection
+    # -------------------------
+    agg_df = None
+    if args.aggregate_per_well:
+        logger.info("Aggregating per-object data to per-well median (because --aggregate_per_well is set).")
+        group_cols = ["Plate_Metadata", "Well_Metadata"]
+        meta_cols = ["cpd_id", "cpd_type", "Library"]
+        keep_cols = group_cols + meta_cols + [c for c in merged_df.columns if c not in group_cols + meta_cols]
+        output_df = merged_df.loc[:, [c for c in keep_cols if c in merged_df.columns]].copy()
 
-    feature_cols = [c for c in output_df.columns if c not in group_cols + meta_cols and pd.api.types.is_numeric_dtype(output_df[c])]
+        feature_cols = [c for c in output_df.columns
+                        if c not in group_cols + meta_cols and pd.api.types.is_numeric_dtype(output_df[c])]
+
+        non_numeric = [c for c in output_df.columns
+                    if c not in group_cols + meta_cols and not pd.api.types.is_numeric_dtype(output_df[c])]
+        if non_numeric:
+            logger.warning(f"Skipped non-numeric columns from aggregation: {non_numeric}")
+
+        agg_df = output_df.groupby(group_cols, as_index=False, observed=False)[feature_cols].median()
+
+        # bring back invariant metadata per well
+        for col in meta_cols:
+            if col in output_df.columns:
+                unique_meta = output_df.groupby(group_cols, as_index=False)[col].agg(
+                    lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA
+                )
+                agg_df = agg_df.merge(unique_meta, on=group_cols, how="left")
+
+        # order columns
+        ordered_cols = [c for c in meta_cols if c in agg_df.columns] + group_cols + \
+                    [c for c in agg_df.columns if c not in meta_cols + group_cols]
+        agg_df = agg_df.loc[:, ordered_cols]
+        logger.info(f"Aggregated DataFrame shape (per-well): {agg_df.shape}")
+
+    # -------------------------
+    # Choose the frame to run feature selection on
+    # -------------------------
+    fs_df = agg_df if args.aggregate_per_well else merged_df
+
+    log_memory_usage(logger, prefix=" [Before feature selection ]")
+    present_metadata = [c for c in ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"] if c in fs_df.columns]
+    feature_cols = [c for c in fs_df.columns if c not in present_metadata and pd.api.types.is_numeric_dtype(fs_df[c])]
+
+    logger.info(f"Feature selection on {len(feature_cols)} numeric columns.")
+    # fs_df[feature_cols] = fs_df[feature_cols].astype(np.float32)
+    fs_df.loc[:, feature_cols] = fs_df[feature_cols].astype(np.float32)
 
 
-    non_numeric = [
-        c for c in output_df.columns
-        if c not in group_cols + meta_cols and not pd.api.types.is_numeric_dtype(output_df[c])
-    ]
-    if non_numeric:
-        logger.warning(f"Skipped non-numeric columns from aggregation: {non_numeric}")
-
-    agg_df = output_df.groupby(group_cols, as_index=False, observed=False)[feature_cols].median()
-
-    # Median aggregation for features (excluding meta/group)
-    # Merge constant metadata back per well
-    for col in meta_cols:
-        if col in output_df.columns:
-            unique_meta = output_df.groupby(group_cols, as_index=False)[col].agg(
-                lambda x: x.dropna().unique()[0] if len(x.dropna().unique()) == 1 else pd.NA
-            )
-            agg_df = agg_df.merge(unique_meta, on=group_cols, how="left")
-    # Reorder columns: meta, group, features
-    ordered_cols = [c for c in meta_cols if c in agg_df.columns] + group_cols + [c for c in agg_df.columns if c not in meta_cols + group_cols]
-    agg_df = agg_df.loc[:, ordered_cols]
-    logger.info(f"Aggregated DataFrame shape (per-well): {agg_df.shape}")
-
-    # Release memory: we do NOT need merged_df any more
-    del merged_df
-    gc.collect()
-
-
-
-    # 10. Feature selection (variance, then correlation filtering for efficiency)
-    merged_df = agg_df
-    log_memory_usage(logger, prefix=" [After per-well aggregation ]")
-    feature_cols = [c for c in merged_df.columns if c not in present_metadata and pd.api.types.is_numeric_dtype(merged_df[c])]
-    n_start_features = len(feature_cols)
-    logger.info(f"Feature selection on {n_start_features} numeric columns.")
-
-    # Convert features to float32 to save memory
-    merged_df[feature_cols] = merged_df[feature_cols].astype(np.float32)
-    gc.collect()
-    logger.info(f"Features cast to float32. Shape: {merged_df[feature_cols].shape}")
-
-    # Variance threshold filtering (first for RAM efficiency)
-    logger.info(f"variance threshold: {args.variance_threshold}")
+    # 10) Variance filter
     if args.variance_threshold and args.variance_threshold > 0.0:
         logger.info(f"Applying variance threshold: {args.variance_threshold}")
-        filtered_var = variance_threshold_selector(merged_df[feature_cols], threshold=args.variance_threshold)
-        n_after_var = filtered_var.shape[1]
-        logger.info(f"After variance filtering: {n_after_var} features remain (removed {n_start_features - n_after_var}).")
-        log_memory_usage(logger, prefix="[After variance filtering] ")
-        gc.collect()
+        filtered_var = variance_threshold_selector(fs_df[feature_cols], threshold=args.variance_threshold)
     else:
-        logger.info("Variance threshold filter disabled (None or zero). Skipping variance filtering.")
-        filtered_var = merged_df[feature_cols]
+        logger.info("Variance threshold filter disabled.")
+        filtered_var = fs_df[feature_cols]
 
-    # Correlation filter (greedy/efficient if possible)
-    logger.info(f"correlation threshold: {args.correlation_threshold}")
+    # Correlation filter
     if args.correlation_threshold and args.correlation_threshold > 0.0:
         logger.info(f"Applying correlation threshold: {args.correlation_threshold}")
         filtered_corr = correlation_filter(filtered_var, threshold=args.correlation_threshold)
-        n_after_corr = filtered_corr.shape[1]
-        logger.info(f"After correlation filtering: {n_after_corr} features remain (removed {n_after_var - n_after_corr}).")
     else:
-        logger.info("Correlation threshold filter disabled (None or zero). Skipping correlation filtering.")
+        logger.info("Correlation threshold filter disabled.")
         filtered_corr = filtered_var
-        logger.info("No correlation filtering applied, using all variance-filtered features.")
+
+    selected_features = list(filtered_corr.columns)
+    logger.info(f"Feature selection retained {len(selected_features)} features.")
+    # Build the final per-well/per-object output frame for main write
+    final_cols = present_metadata + selected_features
+    merged_df = fs_df[final_cols].copy()
+
 
 
     log_memory_usage(logger, prefix="[After correlation filtering] ")
@@ -1431,17 +1441,6 @@ def main():
     n_after_corr = filtered_corr.shape[1]
     logger.info(f"Feature selection retained {n_after_corr} features.")
 
-
-
-    # 11. Combine metadata and filtered features
-    # Only keep essential metadata columns and the final filtered features
-    metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-    present_metadata = [col for col in metadata_cols if col in merged_df.columns]
-
-    # After feature selection:
-    final_cols = present_metadata + list(filtered_corr.columns)
-    merged_df = merged_df[final_cols].copy()
-    logger.info(f"Final DataFrame shape (after feature selection): {merged_df.shape}")
 
     # 12) OUTPUT SECTION 
 
@@ -1459,7 +1458,7 @@ def main():
         merged_df = merged_df.loc[:, ~merged_df.columns.duplicated()]
 
     # Per-well output (feature-selected, median-aggregated)
-    per_well_output_file = args.output_file  # You may want to auto-name if preferred
+    per_well_output_file = args.per_well_output_file or args.output_file
     if not args.no_compress_output and per_well_output_file.endswith(".gz"):
         compression = "gzip"
         logger.info("Per-well output will be gzip-compressed (.gz).")
@@ -1474,24 +1473,37 @@ def main():
     logger.info(f"Saved per-well aggregated, feature-selected data to {per_well_output_file} (shape: {merged_df.shape})")
 
     # --- OPTIONAL: Per-object output (if --per_object_output set) ---
+    # 12. Optional per-object save
     if getattr(args, "per_object_output", False):
-        if 'per_object_df' not in locals():
-            logger.warning("Per-object DataFrame not found. Skipping per-object output.")
+        if not args.aggregate_per_well:
+            logger.info("--per_object_output requested, but --aggregate_per_well was not set. "
+                        "Main output is already per-object; skipping extra per-object file.")
         else:
-            per_object_output_file = per_well_output_file.replace('.tsv', '_per_object.tsv').replace('.gz', '_per_object.tsv.gz')
-            # Remove unnecessary columns from per-object output as well
-            for col in cols_to_drop:
-                if col in per_object_df.columns:
-                    per_object_df = per_object_df.drop(columns=col)
-            dupe_cols = per_object_df.columns.duplicated()
-            if any(dupe_cols):
-                dup_names = per_object_df.columns[dupe_cols].tolist()
-                logger.warning(f"Found and dropping duplicate columns in per-object output: {dup_names}")
-                per_object_df = per_object_df.loc[:, ~per_object_df.columns.duplicated()]
-            per_object_df.to_csv(per_object_output_file, sep=args.sep, index=False, compression=compression)
-            logger.info(f"Saved per-object (non-aggregated) data to {per_object_output_file} (shape: {per_object_df.shape})")
-    else:
-        logger.info("Per-object output skipped (--per_object_output not set).")
+            if per_object_df is None:
+                logger.warning("per_object_df snapshot missing; cannot write per-object output.")
+            else:
+                # Align columns to the selected feature set for consistency
+                meta_keep = [c for c in ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+                            if c in per_object_df.columns]
+                keep_cols = meta_keep + [c for c in selected_features if c in per_object_df.columns]
+                missing_from_po = set(selected_features) - set(per_object_df.columns)
+                if missing_from_po:
+                    logger.warning(f"{len(missing_from_po)} selected features not present in per-object table; "
+                                f"they will be absent from per-object output.")
+
+                per_object_out = (
+                    args.per_well_output_file
+                    if args.per_well_output_file else args.output_file
+                )
+                per_object_out = per_object_out.replace(".tsv.gz", "_per_object.tsv.gz") \
+                                            .replace(".tsv", "_per_object.tsv") \
+                                            .replace(".csv.gz", "_per_object.csv.gz") \
+                                            .replace(".csv", "_per_object.csv")
+
+                po_compression = "gzip" if (not args.no_compress_output and per_object_out.endswith(".gz")) else None
+                per_object_df[keep_cols].to_csv(per_object_out, sep=args.sep, index=False, compression=po_compression)
+                logger.info(f"Wrote per-object output to {per_object_out} (shape: {per_object_df[keep_cols].shape})")
+
 
     logger.info("Output complete.")
     log_memory_usage(logger, prefix=" END ")
