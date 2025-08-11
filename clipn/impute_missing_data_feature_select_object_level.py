@@ -1142,28 +1142,84 @@ def main():
     cp_df[plate_col] = _norm_plate(cp_df[plate_col])
     cp_df[well_col]  = _norm_well(cp_df[well_col])
 
+
+    logger.info(f"Shape after metadata merge: {merged_df.shape}")
+
+    # --- 0) Make sure keys are normalized ---
     meta_df[meta_plate_col] = _norm_plate(meta_df[meta_plate_col])
     meta_df[meta_well_col]  = _norm_well(meta_df[meta_well_col])
 
-    # must be unique per well in metadata
-    dups = meta_df.duplicated(subset=[meta_plate_col, meta_well_col], keep=False).sum()
-    if dups:
-        logger.error(f"Metadata has {dups} duplicated Plate×Well keys. Example:\n"
-                    f"{meta_df[meta_df.duplicated([meta_plate_col, meta_well_col], keep=False)].head()}")
-        # If desired: meta_df = meta_df.drop_duplicates([meta_plate_col, meta_well_col], keep='first')
+    # --- 1) Audit duplicates by PlatexWell ---
+    dup_mask = meta_df.duplicated([meta_plate_col, meta_well_col], keep=False)
+    if dup_mask.any():
+        dup_preview = meta_df.loc[
+            dup_mask,
+            [meta_plate_col, meta_well_col, "cpd_id", "cpd_type", "Library"]
+            + [c for c in meta_df.columns if "concentration" in c.lower()]
+        ].head(10)
+        logger.warning(
+            f"Metadata has duplicated PlatexWell keys (n={dup_mask.sum()}). "
+            f"Example rows:\n{dup_preview}"
+        )
 
-    logger.info(f"cp_df unique PlatexWell: {left_keys.shape[0]:,}")
-    logger.info(f"meta_df unique PlatexWell: {right_keys.shape[0]:,}")
-    logger.info(f"Intersection size: {left_keys.merge(right_keys, left_on=[plate_col, well_col], right_on=[meta_plate_col, meta_well_col]).shape[0]:,}")
+    # --- 2) Assert single cpd_id per well (just to be safe) ---
+    multi_cpd = (
+        meta_df.groupby([meta_plate_col, meta_well_col])["cpd_id"]
+            .nunique(dropna=True)
+    )
+    conflict_keys = multi_cpd[multi_cpd > 1]
+    if len(conflict_keys):
+        bad = (meta_df
+            .merge(conflict_keys.reset_index().drop(columns=["cpd_id"]),
+                    on=[meta_plate_col, meta_well_col], how="inner")
+            .sort_values([meta_plate_col, meta_well_col]))
+        logger.error(
+            "Some wells map to multiple distinct cpd_id values. "
+            "Fix the plate map before proceeding. Example:\n"
+            f"{bad[[meta_plate_col, meta_well_col, 'cpd_id']].head(20)}"
+        )
+        raise ValueError("Metadata has wells with >1 cpd_id.")
 
+    # --- 3) Drop concentration columns (you don't need them now) ---
+    conc_cols = [c for c in meta_df.columns if "concentration" in c.lower()]
+    if conc_cols:
+        logger.info(f"Dropping concentration columns from metadata: {conc_cols}")
+        # optional: keep an audit file
+        # meta_df[ [meta_plate_col, meta_well_col] + conc_cols ].to_csv("dropped_concentrations.tsv", sep="\t", index=False)
+        meta_df = meta_df.drop(columns=conc_cols)
 
-    merged_df = cp_df.merge(meta_df, how="left", 
-                            left_on=[plate_col, well_col], 
-                            right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
+    # --- 4) Collapse to exactly one row per Plate×Well ---
+    before = meta_df.shape[0]
+    meta_df = meta_df.drop_duplicates(subset=[meta_plate_col, meta_well_col], keep="first")
+    after = meta_df.shape[0]
+    if before != after:
+        logger.info(f"Collapsed metadata to unique keys: {before} → {after} rows.")
+
+    # (re)create key sets for diagnostics
+    left_keys  = cp_df[[plate_col,  well_col ]].drop_duplicates()
+    right_keys = meta_df[[meta_plate_col, meta_well_col]].drop_duplicates()
+
+    logger.info(f"cp_df unique Plate×Well:  {left_keys.shape[0]:,}")
+    logger.info(f"meta_df unique Plate×Well:{right_keys.shape[0]:,}")
+    logger.info("Intersection size: {:,}".format(
+        left_keys.merge(
+            right_keys,
+            left_on=[plate_col, well_col],
+            right_on=[meta_plate_col, meta_well_col]
+        ).shape[0]
+    ))
+
+    # --- 5) Safe merge: enforce many-to-one ---
+    merged_df = cp_df.merge(
+        meta_df,
+        how="left",
+        left_on=[plate_col, well_col],
+        right_on=[meta_plate_col, meta_well_col],
+        suffixes=('', '_meta'),
+        validate="many_to_one"
+    )
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
 
-    left_keys  = cp_df[[plate_col, well_col]].drop_duplicates()
-    right_keys = meta_df[[meta_plate_col, meta_well_col]].drop_duplicates()
 
     anti = left_keys.merge(
         right_keys,
