@@ -263,76 +263,97 @@ def log_memory_usage(logger, prefix="", extra_msg=None):
     logger.info(msg)
 
 
-def add_plate_well_metadata_if_missing(obj_df, input_dir, obj_filename, logger):
+def add_plate_well_metadata_if_missing(obj_df: pd.DataFrame,
+                                        input_dir: Path,
+                                        obj_filename: str,
+                                        logger: logging.Logger
+                                    ) -> pd.DataFrame:
     """
-    Add plate/well metadata to object-level DataFrame by merging with matching image-level file if needed.
-    
-    Parameters
-    ----------
-    obj_df : pd.DataFrame
-        The loaded object-level DataFrame.
-    input_dir : pathlib.Path
-        Path object of the directory containing the files.
-    obj_filename : str
-        Name of the object-level file (e.g., HepG2CP_Cell.csv).
-    logger : logging.Logger
-        Logger object.
-    
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with plate/well columns if possible.
+    Attach plate/well metadata to an object-level table by merging its matching image file.
+
+    The function:
+      - Checks if plate/well already exist; if yes, returns the input unchanged.
+      - Locates the sibling *_Image.csv[.gz] file based on the object filename.
+      - Reads ONLY the columns needed from the image file (ImageNumber + plate/well).
+      - Left-merges on 'ImageNumber'.
+      - Returns a DataFrame and does not leave duplicate suffixed columns behind.
+
+    Args:
+        obj_df: Object-level DataFrame (e.g., Cell, Cytoplasm, Nuclei table).
+        input_dir: Directory containing the object and image tables.
+        obj_filename: The object-level filename (used to find the image file).
+        logger: Logger for status/warning messages.
+
+    Returns:
+        A DataFrame guaranteed to have, if possible, plate/well columns (possibly
+        via merge with the image table). If the image table cannot be found or
+        lacks the required keys, the original DataFrame is returned.
     """
     plate_candidates = ["Plate", "Plate_Metadata", "Metadata_Plate", "Image_Metadata_Plate"]
     well_candidates = ["Well", "Well_Metadata", "Metadata_Well", "Image_Metadata_Well"]
 
-    # Check if plate/well present
+    # Already have plate/well? Done.
     has_plate = any(col in obj_df.columns for col in plate_candidates)
     has_well = any(col in obj_df.columns for col in well_candidates)
     if has_plate and has_well:
         logger.info(f"Plate/Well metadata already present in {obj_filename}")
         return obj_df
 
-    # Try to find image-level file
+    # Derive base and look for *_Image
     base = obj_filename
     for suffix in ["_Cell", "_Cytoplasm", "_Nuclei"]:
         base = base.replace(suffix, "")
-    for suffix in [".csv", ".csv.gz"]:
+    for suffix in [".csv.gz", ".csv"]:
         if base.endswith(suffix):
             base = base[: -len(suffix)]
-    image_file_candidates = [f"{base}_Image.csv", f"{base}_Image.csv.gz"]
-    image_file = None
-    for candidate in image_file_candidates:
-        path = input_dir / candidate
-        if path.exists():
-            image_file = path
+
+    candidates = [f"{base}_Image.csv.gz", f"{base}_Image.csv"]
+    image_path = None
+    for cand in candidates:
+        p = input_dir / cand
+        if p.exists():
+            image_path = p
             break
-    if image_file is None:
+
+    if image_path is None:
         logger.error(
             f"Plate/Well metadata missing and no matching image-level file found for {obj_filename}. "
-            f"Tried: {image_file_candidates}"
+            f"Tried: {candidates}"
         )
-        return obj_df  # Let downstream checks error out, or you can choose to sys.exit(1)
-
-    logger.info(f"Merging {obj_filename} with {image_file.name} to add plate/well metadata.")
-    img_df = pd.read_csv(image_file)
-    # Defensive: Check for ImageNumber in both
-    if "ImageNumber" not in obj_df.columns or "ImageNumber" not in img_df.columns:
-        logger.error(f"Cannot merge {obj_filename} and {image_file.name}: 'ImageNumber' not present in both files.")
         return obj_df
 
-    # Merge on ImageNumber
-    merged = obj_df.merge(img_df, on="ImageNumber", suffixes=("", "_img"), how="left")
-    logger.info(f"Merged {obj_filename} with {image_file.name}; resulting shape: {merged.shape}")
+    # Read as little as we can from the image table
+    try:
+        # Peek to find actual plate/well col names
+        img_head = pd.read_csv(image_path, nrows=5)
+        img_plate = next((c for c in plate_candidates if c in img_head.columns), None)
+        img_well = next((c for c in well_candidates if c in img_head.columns), None)
+        usecols = ["ImageNumber"] + [c for c in [img_plate, img_well] if c is not None]
+        if "ImageNumber" not in obj_df.columns:
+            logger.error(f"Cannot merge {obj_filename} and {image_path.name}: 'ImageNumber' not present in object file.")
+            return obj_df
 
-    # Check again for plate/well
-    has_plate = any(col in merged.columns for col in plate_candidates)
-    has_well = any(col in merged.columns for col in well_candidates)
-    if not (has_plate and has_well):
-        logger.error(
-            f"Even after merging with image-level file, could not find both plate and well columns in {obj_filename}."
-        )
+        if not usecols or len(usecols) == 1:  # only ImageNumber found or none
+            logger.error(f"No plate/well columns found in {image_path.name}.")
+            return obj_df
+
+        img_df = pd.read_csv(image_path, usecols=usecols)
+    except Exception as exc:
+        logger.error(f"Failed reading image file '{image_path.name}': {exc}")
+        return obj_df
+
+    if "ImageNumber" not in img_df.columns:
+        logger.error(f"Image file '{image_path.name}' lacks 'ImageNumber'; cannot merge.")
+        return obj_df
+
+    # Merge and clean
+    merged = obj_df.merge(img_df, on="ImageNumber", how="left", suffixes=("", "_img"))
+    logger.info(f"Merged {obj_filename} with {image_path.name}; resulting shape: {merged.shape}")
+
+    # Standardise/clean to a single pair of columns
+    merged = select_single_plate_well(merged, logger=logger)
     return merged
+
 
 
 def standardise_well_name(well):
@@ -607,7 +628,6 @@ def clean_metadata_columns(df, logger=None):
 
     return df
 
-import logging
 
 def find_merge_columns(feature_cols, meta_cols, candidates=None):
     """
@@ -722,6 +742,87 @@ def harmonise_metadata_columns(df, logger=None, is_metadata_file=False):
         raise ValueError("Could not harmonise plate/well column names in metadata.")
     return df
 
+
+def select_single_plate_well(df: pd.DataFrame, logger: logging.Logger | None = None) -> pd.DataFrame:
+    """
+    Ensure exactly one pair of plate/well metadata columns exists with canonical names.
+
+    The function:
+      - Detects possible plate and well column variants.
+      - Prefers to keep/rename to 'Plate_Metadata' and 'Well_Metadata'.
+      - Drops any alternative/suffixed duplicates (e.g. *_img, *_x, *_y).
+      - Leaves the rest of the DataFrame intact.
+
+    Args:
+        df: Input DataFrame that may contain multiple plate/well columns.
+        logger: Optional logger for informational messages.
+
+    Returns:
+        A DataFrame with a single, consistent pair of columns:
+        'Plate_Metadata' and 'Well_Metadata'.
+    """
+    logger = logger or logging.getLogger("coerce_plate_well")
+
+    plate_variants = [
+        "Plate_Metadata", "Plate", "plate", "Metadata_Plate", "Image_Metadata_Plate",
+        "Plate_Metadata_img", "Plate_img", "Metadata_Plate_img",
+        "Plate_Metadata_x", "Plate_Metadata_y"
+    ]
+    well_variants = [
+        "Well_Metadata", "Well", "well", "Metadata_Well", "Image_Metadata_Well",
+        "Well_Metadata_img", "Well_img", "Metadata_Well_img",
+        "Well_Metadata_x", "Well_Metadata_y"
+    ]
+
+    df_out = df.copy()
+
+    # ---- Plate ----
+    plate_present = [c for c in plate_variants if c in df_out.columns]
+    if not plate_present:
+        if logger:
+            logger.debug("No plate column candidates found; leaving as-is.")
+    else:
+        keep_plate = "Plate_Metadata" if "Plate_Metadata" in plate_present else plate_present[0]
+        if keep_plate != "Plate_Metadata":
+            if "Plate_Metadata" in df_out.columns and keep_plate != "Plate_Metadata":
+                # already have a Plate_Metadata; do nothing
+                pass
+            else:
+                df_out = df_out.rename(columns={keep_plate: "Plate_Metadata"})
+        # Drop all other plate variants except the canonical one
+        drop_plate = [c for c in plate_present if c != "Plate_Metadata"]
+        if drop_plate and logger:
+            logger.info(f"Dropping alternative plate columns: {drop_plate}")
+        df_out = df_out.drop(columns=drop_plate, errors="ignore")
+
+    # ---- Well ----
+    well_present = [c for c in well_variants if c in df_out.columns]
+    if not well_present:
+        if logger:
+            logger.debug("No well column candidates found; leaving as-is.")
+    else:
+        keep_well = "Well_Metadata" if "Well_Metadata" in well_present else well_present[0]
+        if keep_well != "Well_Metadata":
+            if "Well_Metadata" in df_out.columns and keep_well != "Well_Metadata":
+                # already have a Well_Metadata; do nothing
+                pass
+            else:
+                df_out = df_out.rename(columns={keep_well: "Well_Metadata"})
+        # Drop all other well variants except the canonical one
+        drop_well = [c for c in well_present if c != "Well_Metadata"]
+        if drop_well and logger:
+            logger.info(f"Dropping alternative well columns: {drop_well}")
+        df_out = df_out.drop(columns=drop_well, errors="ignore")
+
+    # Final tidy: any generic suffixed junk that slipped through
+    junk_like = [c for c in df_out.columns if c.endswith(("_img", "_x", "_y"))]
+    # Keep if they are not the canonical Plate/Well names
+    junk_like = [c for c in junk_like if c not in ("Plate_Metadata", "Well_Metadata")]
+    if junk_like and logger:
+        logger.info(f"Dropping leftover suffixed columns: {junk_like[:10]}{'...' if len(junk_like) > 10 else ''}")
+    df_out = df_out.drop(columns=junk_like, errors="ignore")
+
+    return df_out
 
 
 def auto_select_scaler(df, feature_cols, logger):
@@ -880,17 +981,27 @@ def main():
     # Read each file (compressed or not), and add plate/well metadata if missing
     dataframes = []
 
+    # Read each file (compressed or not), and add plate/well metadata if missing
+    dataframes = []
+
     for f in csv_files:
         logger.info(f"Reading file: {f.name}")
         dtype_map = infer_dtypes(f)
         df = pd.read_csv(f, dtype=dtype_map)
+
+        # Add Plate/Well from the matching *_Image file if needed,
+        # and coerce to a single, clean pair of Plate_Metadata/Well_Metadata
         df = add_plate_well_metadata_if_missing(df, input_dir, f.name, logger)
+        df = select_single_plate_well(df, logger=logger)
+
         log_memory_usage(logger, prefix=f" [After {f.name} loaded] ")
         dataframes.append(df)
-        # Free temp DataFrame -  too much RAM being used
+
+        # Free temp DataFrame - too much RAM being used
         del df
         gc.collect()
         log_memory_usage(logger, prefix=f" [After {f.name} loaded garbage cleaned] ")
+
 
 
 
