@@ -93,7 +93,6 @@ from sklearn.preprocessing import StandardScaler, RobustScaler
 from scipy.stats import shapiro
 import gc
 from cell_painting.process_data import (
-    standardise_metadata_columns,
     variance_threshold_selector,
     correlation_filter)
 
@@ -135,6 +134,17 @@ def parse_args():
                         action='store_true',
                         help='If set, output one row per well (median of all objects in the well). Default: off (per-object output).'
                         )
+    parser.add_argument('--corr_strategy',
+                        choices=['variance', 'min_redundancy'],
+                        default='variance',
+                        help='How to pick a representative within correlated groups.'
+                    )
+    parser.add_argument('--protect_features',
+                        type=lambda s: [x.strip() for x in s.split(',')] if s else None,
+                        default=None,
+                        help='Comma-separated list of features to always keep.'
+                    )
+
     parser.add_argument('--per_well_output_file', type=str, default=None,
                         help="Optional output file for per-well aggregated data (default: auto-named from --output_file)")
     parser.add_argument('--per_object_output',
@@ -171,73 +181,66 @@ def setup_logging(log_level="INFO"):
     return logging.getLogger("merge_logger")
 
 
-def robust_read_csv(path: str,
-                    logger: Optional[logging.Logger] = None,
-                    n_check_lines: int = 2) -> pd.DataFrame:
-    """
-    Read a CSV/TSV file with simple delimiter detection.
 
-    Tries comma first; if the header appears to contain tabs or the CSV
-    parse yields a single column while the header had tabs, retry as TSV.
-    If CSV parsing fails outright, fall back to TSV. If both fail, raise.
+def robust_read_csv(path, logger=None, n_check_lines=2):
+    """
+    Robustly read a CSV/TSV (optionally gzipped) file, automatically detecting
+    the delimiter and handling gzipped files transparently.
 
     Parameters
     ----------
     path : str
-        File path to read.
+        Path to the file to read.
     logger : logging.Logger, optional
-        Logger for status messages.
-    n_check_lines : int
-        Number of header lines to inspect for tab characters.
+        Logger instance for status messages. Defaults to a module-level logger.
+    n_check_lines : int, optional
+        Number of lines to inspect when guessing the delimiter. Default is 2.
 
     Returns
     -------
     pd.DataFrame
-        Loaded DataFrame.
+        The loaded DataFrame.
 
     Raises
     ------
-    Exception
-        If neither CSV nor TSV parsing succeeds.
+    ValueError
+        If the file cannot be parsed as either CSV or TSV.
     """
-    from itertools import islice  # local import to keep function self-contained
+    logger = logger or logging.getLogger(__name__)
 
-    logger = logger or logging.getLogger("robust_csv")
+    # Choose appropriate opener
+    opener = gzip.open if str(path).endswith(".gz") else open
 
-    # Peek at the header safely (no StopIteration)
-    with open(path, "r", encoding="utf-8") as fh:
+    # Peek at the first few lines
+    with opener(path, mode="rt", encoding="utf-8", errors="replace") as fh:
         lines = list(islice(fh, n_check_lines))
 
     header_has_tabs = any("\t" in line for line in lines)
 
-    if header_has_tabs:
-        logger.info("Detected tab characters in header; trying TSV first.")
-        try:
-            return pd.read_csv(path, sep="\t")
-        except Exception as tsv_err:
-            logger.warning("TSV read failed (%s); falling back to CSV.", tsv_err)
+    # Preferred and fallback delimiters
+    try_first = "\t" if header_has_tabs else ","
+    try_second = "," if header_has_tabs else "\t"
 
-    # Try CSV
-    try:
-        df = pd.read_csv(path)
-        # If only one column but the header had tabs, retry as TSV
-        if df.shape[1] == 1 and header_has_tabs:
+    for sep, label in ((try_first, "first guess"), (try_second, "fallback")):
+        try:
+            df = pd.read_csv(path, sep=sep if sep != "," else None)
+            # Single-column safeguard
+            if df.shape[1] == 1 and sep == "," and header_has_tabs:
+                continue
             logger.info(
-                "Single-column CSV with tabs in header; retrying as TSV."
+                "Read file as %s-separated (%s).",
+                "tab" if sep == "\t" else "comma",
+                label
             )
-            return pd.read_csv(path, sep="\t")
-        logger.info("Read file as comma-separated.")
-        return df
-    except Exception as csv_err:
-        logger.warning("CSV read failed (%s); retrying as TSV.", csv_err)
-        try:
-            df = pd.read_csv(path, sep="\t")
-            logger.info("Successfully read file as tab-separated after CSV failed.")
             return df
-        except Exception as tsv_err:
-            logger.error("Reading as TSV also failed: %s", tsv_err)
-            raise tsv_err
+        except Exception as err:
+            logger.warning(
+                "Reading as %s-separated failed (%s).",
+                "tab" if sep == "\t" else "comma",
+                err
+            )
 
+    raise ValueError(f"Failed to parse file '{path}' as CSV or TSV.")
 
 
 
@@ -279,6 +282,175 @@ def log_memory_usage(logger, prefix="", extra_msg=None):
     if extra_msg:
         msg += " | " + extra_msg
     logger.info(msg)
+
+
+def _rank_features_for_corr_filter(
+    X: pd.DataFrame,
+    strategy: str = "variance",
+    protect: Optional[Iterable[str]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> list[str]:
+    """
+    Produce an ordered list of feature names indicating the priority to KEEP.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Numeric feature matrix (rows = samples, cols = features).
+    strategy : {"variance", "min_redundancy"}
+        Ranking heuristic:
+            - "variance": sort by variance (desc) — keep most variable first.
+            - "min_redundancy": sort by mean absolute correlation (asc) —
+              keep least redundant first.
+    protect : iterable of str, optional
+        Features that must be kept. They are placed at the front of the ranking
+        (original order preserved).
+    logger : logging.Logger, optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    list[str]
+        Feature names sorted by priority to keep.
+    """
+    logger = logger or logging.getLogger("corr_filter")
+
+    cols = list(X.columns)
+    protect = [c for c in (protect or []) if c in cols]
+    unprotected = [c for c in cols if c not in protect]
+
+    if strategy == "variance":
+        variances = X[unprotected].var(ddof=1).astype(float)
+        ranked = list(variances.sort_values(ascending=False).index)
+        logger.info(
+            "Correlation filter ranking: strategy=variance; "
+            "top-5 most variable: %s",
+            ranked[:5],
+        )
+
+    elif strategy == "min_redundancy":
+        # Compute absolute correlation (fill NaN->0 to avoid propagation)
+        corr = X[unprotected].corr().abs().fillna(0.0)
+        # Mean absolute correlation to others (exclude self by adjusting diagonal to 0)
+        np.fill_diagonal(corr.values, 0.0)
+        mean_abs_corr = corr.mean(axis=0)
+        ranked = list(mean_abs_corr.sort_values(ascending=True).index)
+        logger.info(
+            "Correlation filter ranking: strategy=min_redundancy; "
+            "top-5 least redundant (lowest mean |corr|): %s",
+            ranked[:5],
+        )
+
+    else:
+        logger.warning(
+            "Unknown ranking strategy '%s'; falling back to original column order.",
+            strategy,
+        )
+        ranked = unprotected
+
+    # Protected features first (original order), then ranked others
+    return protect + ranked
+
+
+def correlation_filter_smart(
+    X: pd.DataFrame,
+    threshold: float = 0.99,
+    strategy: str = "variance",
+    protect: Optional[Iterable[str]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> pd.DataFrame:
+    """
+    Drop highly correlated features, keeping the “best” one per correlated group.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Numeric feature matrix (rows = samples, cols = features).
+    threshold : float, default 0.99
+        Absolute Pearson correlation threshold above which a later feature is dropped.
+    strategy : {"variance", "min_redundancy"}
+        How to decide which feature to keep first:
+          - "variance": keep highest-variance features.
+          - "min_redundancy": keep features with lowest mean absolute correlation first.
+    protect : iterable of str, optional
+        Features that must be retained even if correlated.
+    logger : logging.Logger, optional
+        Logger for progress and summary.
+
+    Returns
+    -------
+    pd.DataFrame
+        X with correlated columns removed according to the strategy.
+    """
+    logger = logger or logging.getLogger("corr_filter")
+
+    if X.empty or X.shape[1] == 1:
+        logger.info("Correlation filter skipped (matrix has ≤1 column).")
+        return X
+
+    # Ensure numeric; guard against non-numeric dtypes sneaking in
+    X_num = X.select_dtypes(include=[np.number])
+    if X_num.shape[1] != X.shape[1]:
+        missing = set(X.columns) - set(X_num.columns)
+        logger.warning(
+            "Non-numeric columns ignored in correlation filter: %s",
+            sorted(missing)[:10],
+        )
+
+    logger.info(
+        "Applying correlation filter: n_features=%d, threshold=%.3f, strategy=%s",
+        X_num.shape[1],
+        threshold,
+        strategy,
+    )
+
+    # Ranking (priority to KEEP)
+    keep_priority = _rank_features_for_corr_filter(
+        X_num, strategy=strategy, protect=protect, logger=logger
+    )
+
+    # Precompute absolute correlation matrix for speed
+    corr = X_num.corr().abs().fillna(0.0)
+    kept: list[str] = []
+    dropped: list[str] = []
+
+    # Greedy selection: iterate in keep-priority order;
+    # if candidate is highly correlated with any kept feature, drop it.
+    kept_set = set()
+    for col in keep_priority:
+        if col in kept_set:
+            continue
+        if not kept:
+            kept.append(col)
+            kept_set.add(col)
+            continue
+
+        # Check correlation with already kept features
+        # If any |r| >= threshold, drop; else keep.
+        if corr.loc[col, kept].max() >= threshold:
+            dropped.append(col)
+        else:
+            kept.append(col)
+            kept_set.add(col)
+
+    n_before = X_num.shape[1]
+    n_after = len(kept)
+    logger.info(
+        "Correlation filter result: kept=%d, dropped=%d (%.1f%% removed).",
+        n_after,
+        n_before - n_after,
+        100.0 * (n_before - n_after) / max(n_before, 1),
+    )
+
+    # Helpful debug preview
+    if dropped:
+        logger.debug("First 10 dropped due to high correlation: %s", dropped[:10])
+    logger.debug("First 10 kept: %s", kept[:10])
+
+    # Return DataFrame with kept columns only (preserve original column order among kept)
+    kept_in_original_order = [c for c in X.columns if c in kept_set]
+    return X.loc[:, kept_in_original_order]
+
 
 
 def add_plate_well_metadata_if_missing(obj_df: pd.DataFrame,
@@ -1436,7 +1608,15 @@ def main():
     # Correlation filter
     if args.correlation_threshold and args.correlation_threshold > 0.0:
         logger.info(f"Applying correlation threshold: {args.correlation_threshold}")
-        filtered_corr = correlation_filter(filtered_var, threshold=args.correlation_threshold)
+        filtered_corr = correlation_filter_smart(filtered_var,
+                                                threshold=args.correlation_threshold, 
+                                                strategy="variance",
+                                                logger=logger
+                                            )
+        logger.info("Feature selection summary: start=%d → after variance=%d → after correlation=%d",
+                    len(feature_cols), filtered_var.shape[1], filtered_corr.shape[1])
+
+        
     else:
         logger.info("Correlation threshold filter disabled.")
         filtered_corr = filtered_var
