@@ -59,6 +59,9 @@ from clipn.model import CLIPn
 from sklearn import set_config
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
 
+random.seed(0); _np.random.seed(0); _torch.manual_seed(0)
+if _torch.cuda.is_available(): _torch.cuda.manual_seed_all(0)
+
 from cell_painting.process_data import (
     prepare_data_for_clipn_from_df,
     run_clipn_simple,
