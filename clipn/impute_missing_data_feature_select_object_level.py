@@ -885,6 +885,17 @@ def infer_dtypes(filename, nrows=1000):
     return dtypes
 
 
+def _norm_plate(s):
+    return s.astype(str).str.strip()
+
+def _norm_well(s):
+    return (
+        s.astype(str)
+         .str.strip()
+         .str.upper()
+         .str.replace(r'^([A-H])(\d{1,2})$', lambda m: f"{m.group(1)}{int(m.group(2)):02d}", regex=True)
+    )
+
 def scale_per_plate(df, plate_col, method="auto", logger=None):
     """
     Scale numeric features per plate using the chosen method.
@@ -1126,11 +1137,51 @@ def main():
         for col in ('Plate_Metadata', 'Well_Metadata'):
             if col in df_.columns and pd.api.types.is_string_dtype(df_[col]):
                 df_[col] = df_[col].str.strip()
+    
+
+    cp_df[plate_col] = _norm_plate(cp_df[plate_col])
+    cp_df[well_col]  = _norm_well(cp_df[well_col])
+
+    meta_df[meta_plate_col] = _norm_plate(meta_df[meta_plate_col])
+    meta_df[meta_well_col]  = _norm_well(meta_df[meta_well_col])
+
+    # must be unique per well in metadata
+    dups = meta_df.duplicated(subset=[meta_plate_col, meta_well_col], keep=False).sum()
+    if dups:
+        logger.error(f"Metadata has {dups} duplicated Plate×Well keys. Example:\n"
+                    f"{meta_df[meta_df.duplicated([meta_plate_col, meta_well_col], keep=False)].head()}")
+        # If desired: meta_df = meta_df.drop_duplicates([meta_plate_col, meta_well_col], keep='first')
+
+    logger.info(f"cp_df unique Plate×Well: {left_keys.shape[0]:,}")
+    logger.info(f"meta_df unique Plate×Well: {right_keys.shape[0]:,}")
+    logger.info(f"Intersection size: {left_keys.merge(right_keys, left_on=[plate_col, well_col], right_on=[meta_plate_col, meta_well_col]).shape[0]:,}")
+
 
     merged_df = cp_df.merge(meta_df, how="left", 
                             left_on=[plate_col, well_col], 
                             right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
+
+    left_keys  = cp_df[[plate_col, well_col]].drop_duplicates()
+    right_keys = meta_df[[meta_plate_col, meta_well_col]].drop_duplicates()
+
+    anti = left_keys.merge(
+        right_keys,
+        left_on=[plate_col, well_col],
+        right_on=[meta_plate_col, meta_well_col],
+        how='left',
+        indicator=True
+    ).query('_merge == "left_only"')[[plate_col, well_col]]
+
+    n_missing = len(anti)
+    logger.warning(f"Keys missing in metadata: {n_missing} Plate×Well pairs (unique).")
+
+    if n_missing:
+        top = (cp_df.merge(anti, on=[plate_col, well_col], how='inner')
+                    [plate_col].value_counts().head(10))
+        logger.warning(f"Top plates with missing metadata:\n{top.to_string()}")
+        logger.info(f"Example missing keys:\n{anti.head(20).to_string(index=False)}")
+
 
     # After merge
     n_total = merged_df.shape[0]
