@@ -86,6 +86,7 @@ import sys
 import re
 import pandas as pd
 import numpy as np
+from itertools import islice
 from typing import Optional
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import StandardScaler, RobustScaler
@@ -170,11 +171,15 @@ def setup_logging(log_level="INFO"):
     return logging.getLogger("merge_logger")
 
 
-def robust_read_csv(path, logger=None, n_check_lines=2):
+def robust_read_csv(path: str,
+                    logger: Optional[logging.Logger] = None,
+                    n_check_lines: int = 2) -> pd.DataFrame:
     """
-    Robustly read a CSV/TSV file, auto-detecting comma or tab delimiter.
-    Tries comma first; if fails or tab detected in header, tries tab.
-    If both fail, raises the last error.
+    Read a CSV/TSV file with simple delimiter detection.
+
+    Tries comma first; if the header appears to contain tabs or the CSV
+    parse yields a single column while the header had tabs, retry as TSV.
+    If CSV parsing fails outright, fall back to TSV. If both fail, raise.
 
     Parameters
     ----------
@@ -183,7 +188,7 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
     logger : logging.Logger, optional
         Logger for status messages.
     n_check_lines : int
-        Number of lines to check for tab presence.
+        Number of header lines to inspect for tab characters.
 
     Returns
     -------
@@ -195,31 +200,44 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
     Exception
         If neither CSV nor TSV parsing succeeds.
     """
+    from itertools import islice  # local import to keep function self-contained
+
     logger = logger or logging.getLogger("robust_csv")
-    with open(path, 'r', encoding='utf-8') as f:
-        lines = [next(f) for _ in range(n_check_lines)]
-    # Check for tab character in the first few lines
-    if any('\t' in line for line in lines):
-        logger.info("Detected tab character in header; reading as TSV.")
-        return pd.read_csv(path, sep='\t')
-    # Try comma first, fall back to tab if any failure
+
+    # Peek at the header safely (no StopIteration)
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = list(islice(fh, n_check_lines))
+
+    header_has_tabs = any("\t" in line for line in lines)
+
+    if header_has_tabs:
+        logger.info("Detected tab characters in header; trying TSV first.")
+        try:
+            return pd.read_csv(path, sep="\t")
+        except Exception as tsv_err:
+            logger.warning("TSV read failed (%s); falling back to CSV.", tsv_err)
+
+    # Try CSV
     try:
         df = pd.read_csv(path)
-        # Extra check: If only one column and there are tabs in header, treat as TSV
-        if df.shape[1] == 1 and '\t' in lines[0]:
-            logger.info("File appears to be TSV but read as CSV; retrying as TSV.")
-            return pd.read_csv(path, sep='\t')
+        # If only one column but the header had tabs, retry as TSV
+        if df.shape[1] == 1 and header_has_tabs:
+            logger.info(
+                "Single-column CSV with tabs in header; retrying as TSV."
+            )
+            return pd.read_csv(path, sep="\t")
         logger.info("Read file as comma-separated.")
         return df
-    except Exception as e:
-        logger.warning(f"Reading as CSV failed ({e}); retrying as TSV.")
+    except Exception as csv_err:
+        logger.warning("CSV read failed (%s); retrying as TSV.", csv_err)
         try:
-            df = pd.read_csv(path, sep='\t')
+            df = pd.read_csv(path, sep="\t")
             logger.info("Successfully read file as tab-separated after CSV failed.")
             return df
-        except Exception as e2:
-            logger.error(f"Reading as TSV also failed: {e2}")
-            raise e2  # Reraise the last exception
+        except Exception as tsv_err:
+            logger.error("Reading as TSV also failed: %s", tsv_err)
+            raise tsv_err
+
 
 
 
@@ -980,10 +998,6 @@ def main():
     excluded_files = [f.name for f in all_files if f not in csv_files]
     logger.info(f"Looking for CellProfiler CSV files in {input_dir}...")
     logger.info("Excluding files with 'image' or 'normalised' in their names.")
-    mode_msg = "per-well aggregated" if args.aggregate_per_well else "per-object"
-    logger.info(f"Saved {mode_msg}, feature-selected data to {per_well_output_file} (shape: {merged_df.shape})")
-
-
 
 
     if not csv_files:
@@ -1504,6 +1518,8 @@ def main():
                 per_object_df[keep_cols].to_csv(per_object_out, sep=args.sep, index=False, compression=po_compression)
                 logger.info(f"Wrote per-object output to {per_object_out} (shape: {per_object_df[keep_cols].shape})")
 
+    mode_msg = "per-well aggregated" if args.aggregate_per_well else "per-object"
+    logger.info(f"Saved {mode_msg}, feature-selected data to {per_well_output_file} (shape: {merged_df.shape})")
 
     logger.info("Output complete.")
     log_memory_usage(logger, prefix=" END ")
