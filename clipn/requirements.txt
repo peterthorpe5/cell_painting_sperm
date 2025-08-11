@@ -23,3 +23,5 @@ hdbscan
 xlsxwriter
 shap
 psutil
+kmapper
+phate
