@@ -763,7 +763,7 @@ def main(args):
 
 
     dataframes, common_cols = load_and_harmonise_datasets(args.datasets_csv, logger, mode=args.mode)
-    logger.debug(f"[Harmonised] Columns for '{name}': {df_harmonised.columns.tolist()}")
+    logger.debug(f"[Harmonised] Columns for '{name}': {dataframes.columns.tolist()}")
     logger.info(f"Loaded and harmonised {len(dataframes)} datasets from {args.datasets_csv}")
     logger.info("NOTE this script does not perform any DMSO normalisation, you must do this before running this script. if you want it..")
 
