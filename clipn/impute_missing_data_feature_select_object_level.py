@@ -124,7 +124,7 @@ def parse_args():
 
     parser.add_argument('--correlation_threshold', type=float, default=0.95,
                         help='Correlation threshold for filtering features (default: 0.95).')
-    parser.add_argument('--variance_threshold', type=float, default=0.1,
+    parser.add_argument('--variance_threshold', type=float, default=0.05,
                         help='Variance threshold for filtering features (default: 0.05).  Low-variance features are almost constant across all samples—they do not help distinguish between classes or clusters.')
     parser.add_argument('--library', type=str, default=None,
                     help="Value to add as 'Library' column if not present in the metadata. "
@@ -1122,10 +1122,27 @@ def main():
     logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
 
     # 4. Merge metadata
+    for df_ in (cp_df, meta_df):
+        for col in ('Plate_Metadata', 'Well_Metadata'):
+            if col in df_.columns and pd.api.types.is_string_dtype(df_[col]):
+                df_[col] = df_[col].str.strip()
+
     merged_df = cp_df.merge(meta_df, how="left", 
                             left_on=[plate_col, well_col], 
                             right_on=[meta_plate_col, meta_well_col], suffixes=('', '_meta'))
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
+
+    # After merge
+    n_total = merged_df.shape[0]
+    n_cpd = merged_df['cpd_id'].notna().sum() if 'cpd_id' in merged_df.columns else 0
+    logger.info(f"Post-merge: cpd_id present for {n_cpd}/{n_total} rows ({100.0*n_cpd/n_total:.1f}%).")
+
+    # If low assignment, show top key mismatches
+    if n_cpd < 0.8 * n_total:
+        logger.warning("Low cpd_id assignment. Dumping a small sample of unmatched keys...")
+        missing = merged_df.loc[merged_df['cpd_id'].isna(), ['Plate_Metadata','Well_Metadata']].drop_duplicates().head(20)
+        logger.warning(f"Example missing keys:\n{missing}")
+
 
 
     # Drop columns that are all NA after merging metadata
@@ -1315,8 +1332,8 @@ def main():
 
     # After feature selection:
     final_cols = present_metadata + list(filtered_corr.columns)
-    final_df = merged_df[final_cols].copy()
-
+    merged_df = merged_df[final_cols].copy()
+    logger.info(f"Final DataFrame shape (after feature selection): {merged_df.shape}")
 
     # 12) OUTPUT SECTION 
 
