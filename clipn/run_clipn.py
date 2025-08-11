@@ -318,7 +318,6 @@ def merge_annotations(latent_df_or_path, annotation_file: str, output_prefix: st
         n_merged = merged["cpd_id"].notna().sum()
         logger.info(f"Successfully merged rows with non-null cpd_id: {n_merged}")
 
-        merged_tsv = f"{output_prefix}_latent_with_annotations.tsv"
         merged_csv = f"{output_prefix}_latent_with_annotations.csv"
 
         merged.to_csv(merged_tsv, sep='\t', index=False)
@@ -359,8 +358,7 @@ def aggregate_latent_per_compound(
 
     # Auto-detect latent columns if not provided (pure integer column names)
     if latent_cols is None:
-        latent_cols = [col for col in decoded_df.columns if (isinstance(col, int)) or (isinstance(col, str) and col.isdigit())]
-
+        latent_cols = [col for col in df.columns if (isinstance(col, int)) or (isinstance(col, str) and col.isdigit())]
         if not latent_cols:
             raise ValueError("No integer-named latent columns found.")
 
@@ -703,8 +701,7 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
         raise ValueError("No numeric columns available for scaling in combined_df.")
     # --- END DEBUG BLOCK --
 
-
-    data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
+    data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df)
 
     latent_dict, model, loss = run_clipn_simple(data_dict, label_dict, latent_dim=latent_dim, lr=lr, epochs=epochs)
     if isinstance(loss, (list, np.ndarray)):
@@ -739,7 +736,8 @@ def run_clipn_integration(df, logger, clipn_param, output_path, experiment, mode
     # Combine and save
     np.savez(latent_file_id, **latent_dict_str_keys, **cpd_ids_array)
 
-    post_clipn_dir = Path(args.out) / "post_clipn"
+
+    post_clipn_dir = Path(output_path) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
     latent_file = post_clipn_dir / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
@@ -832,7 +830,7 @@ def main(args):
     logger.info("Encoding categorical labels for CLIPn compatibility")
 
     combined_df, encoders = encode_labels(combined_df, logger)
-    metadata_df = decode_labels(combined_df.copy(), encectors, logger)[
+    metadata_df = decode_labels(combined_df.copy(), encoders, logger)[
                                 ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
                             ]
 
@@ -992,10 +990,21 @@ def main(args):
             axis=1
         )
 
-        latent_training_df.to_csv(training_output_path / "training_only_latent.csv", index=False)
+        latent_training_df.to_csv(training_output_path / "training_only_latent.tsv", sep="\t", index=False)
+
 
         logger.debug("First 10 cpd_id values:\n%s", latent_training_df["cpd_id"].head(10).to_string(index=False))
         logger.debug("Unique cpd_id values (first 10): %s", latent_training_df["cpd_id"].unique()[:10])
+
+        main_decoded_path = Path(args.out) / f"{args.experiment}_decoded.tsv"
+        decoded_df.to_csv(main_decoded_path, sep="\t", index=False)
+
+        post_clipn_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.tsv"
+        decoded_df.to_csv(post_clipn_decoded_path, sep="\t", index=False)
+
+        # label mappings
+        mapping_df.to_csv(mapping_path.with_suffix(".tsv"), sep="\t", index=False)
+
 
 
         if not query_df.empty:
@@ -1100,7 +1109,8 @@ def main(args):
             model = torch.load(model_path, weights_only=False)
 
             # Standardise and prepare input data
-            df_scaled = standardise_numeric_columns_preserving_metadata(combined_df, meta_columns=["cpd_id", "cpd_type", "Library"])
+            df_scaled = standardise_numeric_columns_preserving_metadata(combined_df, meta_columns=["cpd_id", "cpd_type", "Library", 
+                                                                                                   "Plate_Metadata", "Well_Metadata"])
             data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_scaled)
 
             # Predict latent space using loaded model
