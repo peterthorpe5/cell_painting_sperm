@@ -279,6 +279,79 @@ def _mapper_lens_array(*, X: np.ndarray, method: str, logger: logging.Logger) ->
     return PCA(n_components=2, random_state=42).fit_transform(X)
 
 
+def _build_tooltips_array(*, df_meta: pd.DataFrame, tooltip_cols: list[str]) -> np.ndarray:
+    """
+    Build HTML-safe tooltips from selected metadata columns.
+
+    Parameters
+    ----------
+    df_meta : pd.DataFrame
+        Metadata for each sample (rows align with X).
+    tooltip_cols : list[str]
+        Columns to show in the tooltip.
+
+    Returns
+    -------
+    np.ndarray
+        Array of HTML strings, one per row in df_meta.
+    """
+    cols = [c for c in tooltip_cols if c in df_meta.columns]
+    if not cols:
+        cols = ["cpd_id"]
+    rows = []
+    for _, r in df_meta[cols].astype(str).iterrows():
+        parts = [f"<b>{c}</b>: {r[c]}" for c in cols]
+        rows.append("<br>".join(parts))
+    return np.array(rows, dtype=object)
+
+
+def _draw_graph_html_pyvis(
+    *,
+    nodes: pd.DataFrame,
+    edges: pd.DataFrame,
+    output_html: Path,
+    logger: logging.Logger
+) -> None:
+    """
+    Write an interactive network HTML using pyvis (fallback if KeplerMapper isn't available).
+
+    Parameters
+    ----------
+    nodes : pd.DataFrame
+        Columns: node_id, size, colour_value (optional), members (semicolon-separated).
+    edges : pd.DataFrame
+        Columns: source, target.
+    output_html : Path
+        Output HTML file path.
+    logger : logging.Logger
+        Logger.
+    """
+    try:
+        from pyvis.network import Network
+    except Exception as exc:
+        logger.warning("pyvis not available; cannot create interactive topology HTML (%s).", exc)
+        return
+
+    net = Network(height="800px", width="100%", directed=False, notebook=False)
+    net.barnes_hut()  # nice physics defaults
+
+    # Add nodes with title tooltips
+    for _, row in nodes.iterrows():
+        label = str(row.get("node_id", ""))
+        members = str(row.get("members", ""))
+        colour = row.get("colour_value", "")
+        title = f"<b>Node:</b> {label}<br><b>Colour:</b> {colour}<br><b>Members:</b> {members}"
+        net.add_node(n_id=label, label=label, title=title)
+
+    # Add edges
+    for _, row in edges.iterrows():
+        net.add_edge(str(row["source"]), str(row["target"]))
+
+    output_html.parent.mkdir(parents=True, exist_ok=True)
+    net.write_html(str(output_html))
+    logger.info("Saved interactive topology HTML to %s", output_html)
+
+
 def build_topological_graph(
     *,
     X: pd.DataFrame,
@@ -292,6 +365,8 @@ def build_topological_graph(
     dbscan_eps: float,
     dbscan_min_samples: int,
     knn_k: int,
+    interactive: bool,
+    tooltip_cols: list[str],
     logger: logging.Logger,
 ) -> None:
     """
@@ -299,45 +374,19 @@ def build_topological_graph(
     - topo_nodes.tsv
     - topo_edges.tsv
     - topo_graph.pdf
-
-    Parameters
-    ----------
-    X : pd.DataFrame
-        Feature matrix (numeric).
-    df_meta : pd.DataFrame
-        DataFrame including 'cpd_id' and metadata for colouring.
-    out_dir : Path
-        Output directory.
-    colour_by : str
-        Column for colour mapping (if present).
-    mapper_lens : str
-        'pca' | 'umap' | 'identity'.
-    n_cubes : int
-        Cover hypercubes.
-    overlap : float
-        Cover overlap fraction in [0, 1).
-    cluster_alg : str
-        'dbscan' | 'hdbscan'.
-    dbscan_eps : float
-        DBSCAN eps (if used).
-    dbscan_min_samples : int
-        DBSCAN min_samples (if used).
-    knn_k : int
-        Fallback: k for k-NN graph.
-    logger : logging.Logger
-        Logger instance.
+    - topo_graph.html (if interactive requested and deps available)
     """
     nodes_path = out_dir / "topo_nodes.tsv"
     edges_path = out_dir / "topo_edges.tsv"
-    pdf_path = out_dir / "topo_graph.pdf"
+    pdf_path   = out_dir / "topo_graph.pdf"
+    html_path  = out_dir / "topo_graph.html"
 
-    # Attempt KeplerMapper
+    # KeplerMapper branch
     if KMAP_AVAILABLE:
         logger.info("Building Mapper graph using KeplerMapper.")
         mapper = km.KeplerMapper(verbose=0)
 
         lens = _mapper_lens_array(X=X.values, method=mapper_lens, logger=logger)
-
         # choose clusterer
         if cluster_alg.lower() == "hdbscan" and HDBSCAN_AVAILABLE:
             logger.info("Mapper clustering: HDBSCAN")
@@ -354,12 +403,10 @@ def build_topological_graph(
             clusterer=clusterer,
         )
 
-        # Extract nodes/edges
-        # graph['nodes'] is dict: node_id -> list of sample indices
+        # Nodes/edges TSV
         node_rows = []
         for nid, members in graph["nodes"].items():
             members = list(members)
-            # Compute a colour label summary (majority) if possible
             colour_val = None
             if colour_by in df_meta.columns:
                 vals = df_meta.iloc[members][colour_by].astype(str)
@@ -373,11 +420,10 @@ def build_topological_graph(
                     "members": ";".join(df_meta.iloc[members]["cpd_id"].astype(str).tolist()),
                 }
             )
-
         edge_rows = []
         for a, nbrs in graph["links"].items():
             for b in nbrs:
-                if int(a) < int(b):  # undirected unique
+                if int(a) < int(b):
                     edge_rows.append({"source": str(a), "target": str(b)})
 
         nodes_df = pd.DataFrame(node_rows)
@@ -385,32 +431,42 @@ def build_topological_graph(
         write_tsv(df=nodes_df, path=nodes_path, logger=logger, index=False)
         write_tsv(df=edges_df, path=edges_path, logger=logger, index=False)
 
-        # Draw PDF with matplotlib
-        _draw_graph_pdf(
-            nodes=nodes_df,
-            edges=edges_df,
-            output_pdf=pdf_path,
-            logger=logger,
-        )
+        # PDF (static)
+        _draw_graph_pdf(nodes=nodes_df, edges=edges_df, output_pdf=pdf_path, logger=logger)
+
+        # HTML (interactive) via KeplerMapper
+        if interactive:
+            try:
+                tooltips = _build_tooltips_array(df_meta=df_meta, tooltip_cols=tooltip_cols)
+                html = mapper.visualize(
+                    graph,
+                    path_html=str(html_path),
+                    title="Topological graph (Mapper)",
+                    X=X.values,
+                    lens=lens,
+                    color_function=None,
+                    custom_tooltips=tooltips,
+                )
+                # mapper.visualize writes the HTML file; return value kept for completeness
+                logger.info("Saved interactive topology HTML to %s", html_path)
+            except Exception as exc:
+                logger.warning("KeplerMapper HTML visualisation failed: %s", exc)
         return
 
-    # Fallback: build a k-NN graph that behaves like a topology sketch
+    # Fallback: k-NN graph
     logger.warning("KeplerMapper not available; building k-NN graph fallback (k=%d).", knn_k)
     n = len(X)
-    k = min(max(2, knn_k), max(2, n - 1))  # at least 2, exclude self later
-
+    k = min(max(2, knn_k), max(2, n - 1))
     nn = NearestNeighbors(n_neighbors=k, metric="cosine")
     nn.fit(X.values)
-    dist, idx = nn.kneighbors(X.values)
+    _, idx = nn.kneighbors(X.values)
 
-    # Build edges (undirected, dedup)
     edges = set()
     for i in range(n):
-        for j in idx[i][1:]:  # skip self
+        for j in idx[i][1:]:
             a, b = sorted((int(i), int(j)))
             edges.add((a, b))
 
-    # Collapse to node level as Mapper-like: each original sample is a node
     nodes_df = pd.DataFrame(
         {
             "node_id": [str(i) for i in range(n)],
@@ -420,16 +476,14 @@ def build_topological_graph(
         }
     )
     edges_df = pd.DataFrame([{"source": str(a), "target": str(b)} for (a, b) in sorted(edges)])
-
     write_tsv(df=nodes_df, path=nodes_path, logger=logger, index=False)
     write_tsv(df=edges_df, path=edges_path, logger=logger, index=False)
 
-    _draw_graph_pdf(
-        nodes=nodes_df,
-        edges=edges_df,
-        output_pdf=pdf_path,
-        logger=logger,
-    )
+    _draw_graph_pdf(nodes=nodes_df, edges=edges_df, output_pdf=pdf_path, logger=logger)
+
+    interactive = True
+    if interactive:
+        _draw_graph_html_pyvis(nodes=nodes_df, edges=edges_df, output_html=html_path, logger=logger)
 
 
 def _draw_graph_pdf(*, nodes: pd.DataFrame, edges: pd.DataFrame, output_pdf: Path, logger: logging.Logger) -> None:
@@ -659,6 +713,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mapper_eps", type=float, default=0.5, help="DBSCAN eps (default: 0.5).")
     p.add_argument("--mapper_min_samples", type=int, default=5, help="DBSCAN min_samples (default: 5).")
     p.add_argument("--knn_k", type=int, default=10, help="k for k-NN fallback when Mapper is unavailable (default: 10).")
+    p.add_argument("--interactive_topo", action="store_true",
+                   help="Write an interactive HTML for the topological graph.")
+    p.add_argument("--tooltip_columns", nargs="+",
+                   default=["cpd_id", "Dataset", "cpd_type", "Library"],
+                   help="Columns to include in node/sample tooltips for interactive topo HTML.")
+
 
     # UMAP / PHATE params
     p.add_argument("--umap_metric", default="cosine", help="UMAP metric (default: cosine).")
@@ -708,8 +768,11 @@ def main() -> None:
             dbscan_eps=args.mapper_eps,
             dbscan_min_samples=args.mapper_min_samples,
             knn_k=args.knn_k,
+            interactive=args.interactive_topo,
+            tooltip_cols=args.tooltip_columns,
             logger=logger,
         )
+
 
     # UMAP
     if args.embedding in ("umap", "all"):
