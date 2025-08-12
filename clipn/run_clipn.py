@@ -70,8 +70,7 @@ if torch.cuda.is_available():
 from cell_painting.process_data import (
     prepare_data_for_clipn_from_df,
     run_clipn_simple,
-    standardise_metadata_columns,
-)
+    standardise_metadata_columns,)
 
 # Global timer (for memory log timestamps)
 _SCRIPT_START_TIME = time.time()
@@ -763,53 +762,83 @@ def read_table_auto(path: str) -> pd.DataFrame:
     sep = detect_csv_delimiter(path)
     return pd.read_csv(filepath_or_buffer=path, sep=sep)
 
-def clean_nonfinite_features(
+def clean_and_impute_features(
     df: pd.DataFrame,
     feature_cols: list[str],
     logger: logging.Logger,
-    label: str = "cleanup",
-) -> pd.DataFrame:
+    *,
+    groupby_cols: list[str] = None,           # e.g. ["Dataset", "Plate_Metadata"]
+    max_nan_col_frac: float = 0.3,            # drop features with >30% NaN
+    max_nan_row_frac: float = 0.8,            # drop rows with >80% NaN across features
+) -> tuple[pd.DataFrame, list[str]]:
     """
-    Replace ±inf with NaN and drop rows with NaN in feature columns.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input table (MultiIndex: Dataset, Sample).
-    feature_cols : list[str]
-        Numeric feature columns to check.
-    logger : logging.Logger
-        Logger for messages.
-    label : str
-        Label to include in logs (e.g., 'pre-scaling', 'post-scaling').
+    Replace ±inf with NaN, drop very sparse features/rows, and impute remaining NaNs.
 
     Returns
     -------
-    pd.DataFrame
-        Cleaned DataFrame with the same columns; rows with non-finite
-        feature values are removed.
+    (df_clean, dropped_features)
     """
     if not feature_cols:
-        return df
+        return df, []
 
-    feats = df[feature_cols]
-    n_inf = np.isinf(feats).to_numpy().sum()
-    n_nan = feats.isna().to_numpy().sum()
-    if not (n_inf or n_nan):
-        logger.info("[%s] No non-finite values detected in features.", label)
-        return df
-
-    logger.warning(
-        "[%s] Found non-finite values in features: inf=%d, NaN=%d. "
-        "Replacing inf with NaN and dropping rows with NaN.",
-        label, int(n_inf), int(n_nan),
-    )
     df = df.copy()
-    df.loc[:, feature_cols] = feats.replace([np.inf, -np.inf], np.nan)
-    before = len(df)
-    df = df.dropna(subset=feature_cols)
-    logger.info("[%s] Dropped %d rows with non-finite features.", label, before - len(df))
-    return df
+    # 1) replace inf
+    df.loc[:, feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+
+    # 2) drop sparse features
+    col_nan_frac = df[feature_cols].isna().mean(axis=0)
+    drop_feats = col_nan_frac[col_nan_frac > max_nan_col_frac].index.tolist()
+    if drop_feats:
+        logger.warning(
+            "Dropping %d/%d features with > %.0f%% NaN: first few %s",
+            len(drop_feats), len(feature_cols), max_nan_col_frac * 100, drop_feats[:10],
+        )
+        keep_feats = [c for c in feature_cols if c not in drop_feats]
+    else:
+        keep_feats = feature_cols
+
+    # 3) drop extremely incomplete rows (across kept features)
+    if keep_feats:
+        row_nan_frac = df[keep_feats].isna().mean(axis=1)
+        drop_rows = row_nan_frac > max_nan_row_frac
+        n_drop_rows = int(drop_rows.sum())
+        if n_drop_rows:
+            logger.warning(
+                "Dropping %d rows with > %.0f%% NaN across kept features.",
+                n_drop_rows, max_nan_row_frac * 100,
+            )
+        df = df.loc[~drop_rows]
+    else:
+        logger.error("All features would be dropped. Loosen max_nan_col_frac or inspect inputs.")
+        return df.iloc[0:0], feature_cols  # empty df
+
+    # 4) impute remaining NaNs (median per group)
+    groupby_cols = groupby_cols or ["Dataset"]
+    missing_before = int(df[keep_feats].isna().sum().sum())
+    if missing_before:
+        logger.info(
+            "Imputing %d remaining NaNs using median per group=%s.",
+            missing_before, groupby_cols,
+        )
+        def _impute_group(g: pd.DataFrame) -> pd.DataFrame:
+            med = g[keep_feats].median(numeric_only=True)
+            g.loc[:, keep_feats] = g[keep_feats].fillna(med)
+            return g
+        df = df.groupby(groupby_cols, dropna=False, sort=False).apply(_impute_group)
+        # pandas >= 2.1 leaves group keys in index name sometimes; ensure same index
+        if isinstance(df.index, pd.MultiIndex) and df.index.names != ["Dataset", "Sample"]:
+            try:
+                df.index = df.index.droplevel(list(range(len(groupby_cols))))
+            except Exception:
+                pass
+
+    still_missing = int(df[keep_feats].isna().sum().sum())
+    if still_missing:
+        logger.warning("After median impute, %d NaNs remain; filling with global medians.", still_missing)
+        global_med = df[keep_feats].median(numeric_only=True)
+        df.loc[:, keep_feats] = df[keep_feats].fillna(global_med)
+
+    return df, drop_feats
 
 
 def aggregate_latent_per_compound(
@@ -941,6 +970,26 @@ def main(args: argparse.Namespace) -> None:
         logger=logger,
         label="pre-scaling",
     )
+
+
+    # Robust clean + impute (pre-scaling)
+    combined_df, dropped_feats = clean_and_impute_features(
+        df=combined_df,
+        feature_cols=feature_cols,
+        logger=logger,
+        groupby_cols=["Dataset", "Plate_Metadata"] if "Plate_Metadata" in combined_df.columns else ["Dataset"],
+        max_nan_col_frac=0.30,
+        max_nan_row_frac=0.80,
+    )
+    if dropped_feats:
+        feature_cols = [c for c in feature_cols if c not in dropped_feats]
+
+    # Hard guard
+    if combined_df.shape[0] == 0:
+        raise ValueError(
+            "No rows left after NaN handling. Loosen thresholds (max_nan_col_frac/max_nan_row_frac) "
+            "or inspect inputs for pervasive missingness."
+        )
 
 
 

@@ -7,6 +7,18 @@ This repository provides a pipeline for preprocessing Cell Painting data and per
 
 ---
 
+
+conda create -n clipn python=3.10
+
+conda activate clipn
+
+pip install -r requirements.txt
+
+then you may need to run this:  
+
+conda install -y -c conda-forge --force-reinstall "numpy=1.26.*" "pandas=2.0.*"
+
+
 ## 1. Preprocessing: `impute_missing_data_feature_select.py`
 
 ### Description
