@@ -58,9 +58,14 @@ import torch.serialization
 from clipn.model import CLIPn
 from sklearn import set_config
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
+import random
+random.seed(0)
+np.random.seed(0)
+torch.manual_seed(0)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(0)
 
-random.seed(0); _np.random.seed(0); _torch.manual_seed(0)
-if _torch.cuda.is_available(): _torch.cuda.manual_seed_all(0)
+
 
 from cell_painting.process_data import (
     prepare_data_for_clipn_from_df,
@@ -713,8 +718,9 @@ def merge_annotations(
         else:
             latent_df = latent_df_or_path.copy()
 
-        # Read annotations as TSV (consistent with project policy)
-        annot_df = pd.read_csv(filepath_or_buffer=annotation_file, sep="\t")
+        # instead of fixed sep="\t"
+        annot_df = read_table_auto(annotation_file)
+
 
         # Try to derive Plate/Well if only generic columns provided
         if "Plate_Metadata" not in annot_df.columns and "Plate" in annot_df.columns:
@@ -750,6 +756,60 @@ def merge_annotations(
 
     except Exception as exc:
         logger.warning("Annotation merging failed: %s", exc)
+
+
+def read_table_auto(path: str) -> pd.DataFrame:
+    """Read CSV/TSV with automatic delimiter detection (prefers tab)."""
+    sep = detect_csv_delimiter(path)
+    return pd.read_csv(filepath_or_buffer=path, sep=sep)
+
+def clean_nonfinite_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    logger: logging.Logger,
+    label: str = "cleanup",
+) -> pd.DataFrame:
+    """
+    Replace ±inf with NaN and drop rows with NaN in feature columns.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input table (MultiIndex: Dataset, Sample).
+    feature_cols : list[str]
+        Numeric feature columns to check.
+    logger : logging.Logger
+        Logger for messages.
+    label : str
+        Label to include in logs (e.g., 'pre-scaling', 'post-scaling').
+
+    Returns
+    -------
+    pd.DataFrame
+        Cleaned DataFrame with the same columns; rows with non-finite
+        feature values are removed.
+    """
+    if not feature_cols:
+        return df
+
+    feats = df[feature_cols]
+    n_inf = np.isinf(feats).to_numpy().sum()
+    n_nan = feats.isna().to_numpy().sum()
+    if not (n_inf or n_nan):
+        logger.info("[%s] No non-finite values detected in features.", label)
+        return df
+
+    logger.warning(
+        "[%s] Found non-finite values in features: inf=%d, NaN=%d. "
+        "Replacing inf with NaN and dropping rows with NaN.",
+        label, int(n_inf), int(n_nan),
+    )
+    df = df.copy()
+    df.loc[:, feature_cols] = feats.replace([np.inf, -np.inf], np.nan)
+    before = len(df)
+    df = df.dropna(subset=feature_cols)
+    logger.info("[%s] Dropped %d rows with non-finite features.", label, before - len(df))
+    return df
 
 
 def aggregate_latent_per_compound(
@@ -874,6 +934,16 @@ def main(args: argparse.Namespace) -> None:
     if not feature_cols:
         raise ValueError("No numeric feature columns found after harmonisation. Check feature overlap and dtypes.")
 
+    # Clean obvious non-finite values before any scaling
+    combined_df = clean_nonfinite_features(
+        df=combined_df,
+        feature_cols=feature_cols,
+        logger=logger,
+        label="pre-scaling",
+    )
+
+
+
     # Optional scaling
     if args.skip_standardise:
         logger.info("Skipping feature scaling (--skip_standardise set).")
@@ -890,7 +960,13 @@ def main(args: argparse.Namespace) -> None:
         )
         logger.info("Scaled combined DataFrame shape: %s", df_scaled_all.shape)
         log_memory_usage(logger, prefix="[After scaling] ")
-
+    # Clean again in case scaling produced NaN/Inf (e.g. zero-variance issues)
+    df_scaled_all = clean_nonfinite_features(
+        df=df_scaled_all,
+        feature_cols=feature_cols,
+        logger=logger,
+        label="post-scaling",
+    )
     # Encode labels (cpd_id is explicitly not encoded)
     logger.info("Encoding categorical labels for CLIPn compatibility")
     df_encoded, encoders = encode_labels(df=df_scaled_all.copy(), logger=logger)
@@ -1184,7 +1260,10 @@ def main(args: argparse.Namespace) -> None:
                 first_vals = decoded_df.groupby("cpd_id", as_index=False)[col].first()
                 df_compound = pd.merge(left=df_compound, right=first_vals, on="cpd_id", how="left")
         agg_path = post_clipn_dir / f"{args.experiment}_CLIPn_latent_aggregated_{args.aggregate_method}.tsv"
-        df_compound.to_csv(path_or_buf=agg_path, sep="\t", index=False)
+        safe_to_csv(df=df_compound,
+                    path=agg_path,
+                    sep="\t",
+                    logger=logger,)
         logger.info("Aggregated latent space saved to: %s", agg_path)
 
     # Plate/Well lookup (if present)
