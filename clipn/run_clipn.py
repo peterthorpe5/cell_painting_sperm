@@ -1066,7 +1066,6 @@ def main(args: argparse.Namespace) -> None:
         )
         training_output_path = Path(args.out) / "training"
         training_output_path.mkdir(parents=True, exist_ok=True)
-        (training_output_path / "training_only_latent.tsv").write_text("", encoding="utf-8")  # ensure dir exists
 
         safe_to_csv(df=latent_training_df,
                     path=training_output_path / "training_only_latent.tsv",
