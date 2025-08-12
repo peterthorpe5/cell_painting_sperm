@@ -872,6 +872,39 @@ def clean_and_impute_features(
 
     return df, drop_feats
 
+def clean_nonfinite_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    logger: logging.Logger,
+    label: str = "",
+) -> pd.DataFrame:
+    """
+    Replace ±inf with NaN in selected feature columns and log counts.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table.
+    feature_cols : list[str]
+        Numeric feature column names to clean.
+    logger : logging.Logger
+        Logger for status messages.
+    label : str
+        Short label to include in log messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy of the input with non-finite values replaced by NaN.
+    """
+    out = df.copy()
+    n_pos = int(np.isinf(out[feature_cols]).sum().sum())
+    n_neg = int(np.isneginf(out[feature_cols]).sum().sum())
+    if n_pos or n_neg:
+        logger.warning("[%s] Replacing %d inf and %d -inf with NaN.", label, n_pos, n_neg)
+        out.loc[:, feature_cols] = out[feature_cols].replace([np.inf, -np.inf], np.nan)
+    return out
+
 
 def aggregate_latent_per_compound(
     df: pd.DataFrame,
@@ -1249,7 +1282,9 @@ def main(args: argparse.Namespace) -> None:
                 raise FileNotFoundError(f"No model files matched pattern: {args.load_model}")
             model_path = model_files[0]
             logger.info("Loading pre-trained CLIPn model from: %s", model_path)
-            model = torch.load(f=model_path, weights_only=False)
+            model = torch_load_compat(model_path=model_path, weights_only=False)
+
+
 
             # Prepare and predict latent with loaded model
             data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_encoded)
