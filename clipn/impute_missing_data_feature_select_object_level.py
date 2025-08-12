@@ -785,7 +785,7 @@ def harmonise_column_names(df, candidates, target, logger):
 
 
 def impute_missing(df, method="knn", knn_neighbours=5, logger=None,
-                   max_cells=1000000, max_features=3000):
+                   max_cells=100000000, max_features=300000):
     """
     Impute missing values for all numeric columns.
 
