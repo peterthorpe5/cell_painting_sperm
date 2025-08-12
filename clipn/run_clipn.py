@@ -356,6 +356,35 @@ def load_single_dataset(
     logger.debug("[%s] Final index names: %s", name, df.index.names)
     return df
 
+def safe_to_csv(df: pd.DataFrame, path: Path | str, sep: str = "\t", logger: logging.Logger | None = None) -> None:
+    """
+    Write a DataFrame to CSV/TSV robustly by stringifying column names and
+    flattening any MultiIndex columns before saving.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Table to write.
+    path : Path | str
+        Output file path.
+    sep : str
+        Delimiter (default: tab).
+    logger : logging.Logger | None
+        Logger instance.
+    """
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = ["__".join(map(str, t)) for t in out.columns.to_list()]
+    else:
+        out.columns = out.columns.map(str)
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, sep=sep, index=False)
+    if logger:
+        logger.info("Wrote %s rows × %s cols -> %s", out.shape[0], out.shape[1], path)
+
+
 
 def harmonise_numeric_columns(
     dataframes: Dict[str, pd.DataFrame],
@@ -962,11 +991,11 @@ def main(args: argparse.Namespace) -> None:
         training_output_path = Path(args.out) / "training"
         training_output_path.mkdir(parents=True, exist_ok=True)
         (training_output_path / "training_only_latent.tsv").write_text("", encoding="utf-8")  # ensure dir exists
-        latent_training_df.to_csv(
-            path_or_buf=training_output_path / "training_only_latent.tsv",
-            sep="\t",
-            index=False,
-        )
+
+        safe_to_csv(df=latent_training_df,
+                    path=training_output_path / "training_only_latent.tsv",
+                    sep="\t",
+                    logger=logger,)
 
         logger.debug("First 10 cpd_id values:\n%s", latent_training_df["cpd_id"].head(10).to_string(index=False))
         logger.debug("Unique cpd_id values (first 10): %s", latent_training_df["cpd_id"].unique()[:10])
@@ -1033,7 +1062,10 @@ def main(args: argparse.Namespace) -> None:
 
             query_output_path = Path(args.out) / "query_only" / f"{args.experiment}_query_only_latent.tsv"
             query_output_path.parent.mkdir(parents=True, exist_ok=True)
-            latent_query_df.to_csv(path_or_buf=query_output_path, sep="\t", index=False)
+            safe_to_csv(df=latent_query_df,
+                        path=query_output_path,
+                        sep="\t",
+                        logger=logger,)
             logger.info("Query-only latent data saved to %s", query_output_path)
 
             # Merge training + query for downstream combined decode/outputs
@@ -1120,11 +1152,18 @@ def main(args: argparse.Namespace) -> None:
 
     # Persist decoded outputs (TSV only)
     main_decoded_path = Path(args.out) / f"{args.experiment}_decoded.tsv"
-    decoded_df.to_csv(path_or_buf=main_decoded_path, sep="\t", index=False)
+    safe_to_csv(df=decoded_df,
+                path=main_decoded_path,
+                sep="\t",
+                logger=logger,)
+
     logger.info("Decoded data saved to %s", main_decoded_path)
 
     post_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.tsv"
-    decoded_df.to_csv(path_or_buf=post_decoded_path, sep="\t", index=False)
+    safe_to_csv(df=decoded_df,
+                path=post_decoded_path,
+                sep="\t",
+                logger=logger,)
     logger.info("Decoded data saved to %s", post_decoded_path)
 
     # Optional compound-level aggregation
@@ -1152,7 +1191,10 @@ def main(args: argparse.Namespace) -> None:
     if {"Plate_Metadata", "Well_Metadata"}.issubset(decoded_df.columns):
         plate_well_df = decoded_df[["Dataset", "Sample", "cpd_id", "Plate_Metadata", "Well_Metadata"]].copy()
         plate_well_file = post_clipn_dir / f"{args.experiment}_latent_plate_well_lookup.tsv"
-        plate_well_df.to_csv(path_or_buf=plate_well_file, sep="\t", index=False)
+        safe_to_csv(df=plate_well_df,
+                    path=plate_well_file,
+                    sep="\t",
+                    logger=logger,)
         logger.info("Saved Plate/Well metadata to: %s", plate_well_file)
     else:
         logger.warning("Plate_Metadata or Well_Metadata missing in decoded output — skipping plate/well export.")
@@ -1176,7 +1218,10 @@ def main(args: argparse.Namespace) -> None:
         for column, encoder in encoders.items():
             mapping_path = mapping_dir / f"label_mapping_{column}.tsv"
             mapping_df = pd.DataFrame({column: encoder.classes_, f"{column}_encoded": range(len(encoder.classes_))})
-            mapping_df.to_csv(path_or_buf=mapping_path, sep="\t", index=False)
+            safe_to_csv(df=mapping_df,
+                        path=mapping_path.with_suffix(".tsv"),
+                        sep="\t",
+                        logger=logger,)
             logger.info("Saved label mapping for %s to %s", column, mapping_path)
         logger.info("CLIPn integration completed.")
         log_memory_usage(logger, prefix="[Mostly finished] ")

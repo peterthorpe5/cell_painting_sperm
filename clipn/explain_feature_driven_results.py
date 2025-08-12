@@ -1,526 +1,549 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-Feature Attribution and Statistical Comparison for Cell Painting Nearest Neighbours
-----------------------------------------------------------------------------------
+Feature Attribution & Statistical Comparison for CLIPn Neighbourhoods
+---------------------------------------------------------------------
 
-This script:
-- Identifies features/compartments most different between a query compound and DMSO controls.
-- Identifies features/compartments that explain the similarity to nearest neighbour compounds.
-- Performs non-parametric tests (Mann–Whitney U or KS) at the well level.
-- Automatically infers compartments from feature names if no mapping file is provided.
-- Outputs top N features and groups for each comparison, with BH-corrected p-values.
-- Provides extensive logging.
+For each query compound, this script compares well-level **numeric** features
+against background sets and nearest neighbours:
 
+1) Query vs DMSO/background (per-feature tests: Mann–Whitney U or KS)
+   - Effect sizes: median difference, Wasserstein distance
+   - p-values and BH–FDR (across ALL tested features per comparison)
+   - Top-N enriched and depleted features
 
+2) Query vs each of its nearest neighbours (optional)
+   - Same statistics per neighbour pair
+
+3) Optional feature grouping (e.g., compartment/channel) for compact summaries
+
+Input files are TSV or CSV; all outputs are **TSV** (no comma-separated outputs).
+
+Typical usage
+-------------
 python explain_feature_driven_results.py \
-    --ungrouped_list dataset_paths.txt \
+    --ungrouped_list features_manifest.tsv \
     --query_ids queries.txt \
     --nn_file nearest_neighbours.tsv \
-    --output_dir ./nn_analysis_results \
+    --output_dir out/explain \
+    --test mw \
+    --top_features 15 \
     --nn_per_query 10 \
-    --top_features 5
+    --feature_group_file feature_groups.tsv
 
+Required columns
+----------------
+- Well-level feature tables must contain:
+  cpd_id (and numeric features; metadata columns are ignored)
+- Nearest-neighbour table must contain:
+  cpd_id (or query_id), neighbour_id, distance
+
+Outputs (per query)
+-------------------
+- <query>/query_vs_background_stats.tsv
+- <query>/top_enriched_features.tsv
+- <query>/top_depleted_features.tsv
+- <query>/nn_compare/<neighbour>_stats.tsv    (if --nn_file provided)
+- <query>/group_summary.tsv                    (if --feature_group_file provided)
+
+Notes
+-----
+- Harmonises feature files by intersecting shared columns.
+- Fills NaNs in features with column medians (logged).
+- Uses two-sided tests by default.
 """
 
+from __future__ import annotations
 
 import argparse
-import os
-import pandas as pd
-import numpy as np
 import logging
-from statsmodels.stats.multitest import multipletests
-from scipy.stats import mannwhitneyu, ks_2samp
-from collections import defaultdict
-import warnings
-from scipy.stats import mannwhitneyu, ks_2samp, wasserstein_distance
+import os
+import sys
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
 import numpy as np
+import pandas as pd
+from scipy.stats import mannwhitneyu, ks_2samp, wasserstein_distance
 
 
-def setup_logger(log_file):
+# -------------------------- Logging ------------------------------------------
+
+
+def setup_logger(*, output_dir: str, log_name: str = "explain_features.log") -> logging.Logger:
     """
-    Configure logging to both file and stdout.
+    Configure file and console logging.
 
-    Args:
-        log_file (str): Path to the log file.
+    Parameters
+    ----------
+    output_dir : str
+        Output directory to write log file.
+    log_name : str
+        Log filename placed in output_dir.
 
-    Returns:
-        logging.Logger: Configured logger.
+    Returns
+    -------
+    logging.Logger
+        Logger instance.
     """
-    logger = logging.getLogger("feature_attribution_logger")
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    log_path = out / log_name
+
+    logger = logging.getLogger("explain_features")
     logger.setLevel(logging.DEBUG)
-    fmt = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+    logger.handlers.clear()
 
-    fh = logging.FileHandler(log_file, mode="w")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
+    stream = logging.StreamHandler(stream=sys.stderr)
+    stream.setLevel(logging.INFO)
+    stream.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
 
-    sh = logging.StreamHandler()
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(fmt)
+    fileh = logging.FileHandler(filename=log_path, mode="w", encoding="utf-8")
+    fileh.setLevel(logging.DEBUG)
+    fileh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    logger.addHandler(fh)
-    logger.addHandler(sh)
+    logger.addHandler(stream)
+    logger.addHandler(fileh)
+    logger.info("Logging to %s", log_path)
     return logger
 
 
-def load_ungrouped_files(list_file):
+# -------------------------- I/O & utils --------------------------------------
+
+
+def read_table(*, path: str) -> pd.DataFrame:
     """
-    Load and concatenate all ungrouped (well-level) feature files from a list.
+    Read TSV/CSV with automatic delimiter detection.
 
-    Args:
-        list_file (str): Path to dataset list file (CSV/TSV) with 'path' column.
+    Parameters
+    ----------
+    path : str
+        Input file path.
 
-    Returns:
-        pd.DataFrame: Concatenated well-level feature data.
+    Returns
+    -------
+    pd.DataFrame
+        Loaded table.
     """
-    if list_file.endswith(".csv"):
-        df_list = pd.read_csv(list_file)
-    else:
-        df_list = pd.read_csv(list_file, sep=None, engine='python')
-    assert "path" in df_list.columns, "Dataset list file must contain a 'path' column"
-    dfs = []
-    for p in df_list['path']:
-        tmp = pd.read_csv(p, sep="\t")
-        # Ensure cpd_type is present
-        tmp = ensure_column(tmp, "cpd_type", "missing")
-        dfs.append(tmp)
-    # Harmonise columns (intersection)
-    common_cols = set(dfs[0].columns)
-    for d in dfs[1:]:
-        common_cols &= set(d.columns)
-    dfs = [d[list(common_cols)] for d in dfs]
-    combined = pd.concat(dfs, ignore_index=True)
-    return combined
+    return pd.read_csv(path, sep=None, engine="python")
 
 
-
-def load_groupings(group_file):
+def load_feature_manifest(*, list_or_single: str, logger: logging.Logger) -> pd.DataFrame:
     """
-    Load feature-to-group mapping from file (CSV/TSV: columns = ['feature','group']).
+    Load one or more well-level feature files and harmonise columns.
 
-    Args:
-        group_file (str): Path to the feature-group file.
+    Parameters
+    ----------
+    list_or_single : str
+        A TSV/CSV with a 'path' column pointing to multiple TSVs,
+        or a single TSV of features.
+    logger : logging.Logger
+        Logger instance.
 
-    Returns:
-        dict: Mapping from group to feature list.
+    Returns
+    -------
+    pd.DataFrame
+        Harmonised concatenated table.
     """
-    df = pd.read_csv(group_file, sep=None, engine='python')
-    group_map = {}
-    for group, subdf in df.groupby('group'):
-        group_map[group] = subdf['feature'].tolist()
-    return group_map
+    try:
+        meta = read_table(path=list_or_single)
+        if "path" in meta.columns:
+            logger.info("Detected manifest with %d feature files.", len(meta))
+            dfs = []
+            for p in meta["path"]:
+                df = read_table(path=str(p))
+                dfs.append(df)
+            common = set(dfs[0].columns)
+            for d in dfs[1:]:
+                common &= set(d.columns)
+            if not common:
+                raise ValueError("No common columns across feature files.")
+            keep = sorted(common)
+            dfs = [d[keep] for d in dfs]
+            out = pd.concat(dfs, ignore_index=True)
+            logger.info("Harmonised features shape: %s", out.shape)
+            return out
+    except Exception as e:
+        logger.info("Not a manifest or failed to parse as such (%s). Loading as single TSV.", e)
+
+    out = read_table(path=list_or_single)
+    logger.info("Loaded single feature table: shape=%s", out.shape)
+    return out
 
 
-def infer_compartments(feature_cols):
+def ensure_numeric_features(*, df: pd.DataFrame, logger: logging.Logger) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Infer compartments from feature names by taking the final underscore-delimited token.
+    Keep numeric feature columns and impute NaNs with column medians.
 
-    Args:
-        feature_cols (list): List of feature column names.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input well-level table.
+    logger : logging.Logger
+        Logger instance.
 
-    Returns:
-        dict: Mapping of compartment name to feature list.
+    Returns
+    -------
+    (df_num, cols) : Tuple[pd.DataFrame, List[str]]
+        Clean numeric-only feature matrix and column names.
     """
-    group_map = defaultdict(list)
-    for feat in feature_cols:
-        tokens = feat.split("_")
-        if len(tokens) > 1:
-            compartment = tokens[-1].lower()
-        else:
-            compartment = "unknown"
-        group_map[compartment].append(feat)
-    return dict(group_map)
+    if "cpd_id" not in df.columns:
+        raise ValueError("Feature table must contain 'cpd_id' column.")
+    numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    if not numeric:
+        raise ValueError("No numeric feature columns found.")
+    df_num = df[["cpd_id"] + numeric].copy()
+    nans = df_num[numeric].isna().sum().sum()
+    if int(nans) > 0:
+        logger.warning("Found %d NaN values in features; imputing with column medians.", int(nans))
+        med = df_num[numeric].median(axis=0)
+        df_num[numeric] = df_num[numeric].fillna(value=med)
+    return df_num, numeric
 
 
-def get_well_level(df, cpd_id, cpd_id_col='cpd_id'):
+def parse_query_ids(*, arg: str) -> List[str]:
     """
-    Extract all rows for a given compound id (well-level).
+    Parse query IDs from comma-separated string or file.
 
-    Args:
-        df (pd.DataFrame): DataFrame of well-level data.
-        cpd_id (str): Compound ID of interest.
-        cpd_id_col (str): Name of column for compound ID.
+    Parameters
+    ----------
+    arg : str
+        Comma list or path to file with one ID per line.
 
-    Returns:
-        pd.DataFrame: Subset for the compound.
+    Returns
+    -------
+    List[str]
+        Query identifiers.
     """
-    mask = df[cpd_id_col].astype(str).str.upper() == str(cpd_id).upper()
-    return df[mask]
+    if os.path.isfile(arg):
+        with open(arg) as fh:
+            return [ln.strip() for ln in fh if ln.strip()]
+    return [x.strip() for x in arg.split(",") if x.strip()]
 
 
-def get_wells_for_dmso(df, dmso_label='DMSO'):
+def load_neighbours(*, nn_file: str, query_id: str, n_top: int, logger: logging.Logger) -> List[str]:
     """
-    Extract all DMSO wells (robust: returns any row where any column contains the string 'DMSO', ignoring case).
+    Return top-N neighbour IDs for a given query.
 
-    Args:
-        df (pd.DataFrame): DataFrame of well-level data.
-        dmso_label (str): String label for DMSO.
+    Parameters
+    ----------
+    nn_file : str
+        Nearest-neighbour TSV/CSV.
+    query_id : str
+        Query compound identifier.
+    n_top : int
+        Top-N neighbours to select.
+    logger : logging.Logger
+        Logger instance.
 
-    Returns:
-        pd.DataFrame: Subset for DMSO controls.
+    Returns
+    -------
+    List[str]
+        Neighbour compound IDs.
     """
-    mask = df.apply(lambda row: row.astype(str).str.upper().str.contains(dmso_label.upper()).any(), axis=1)
-    return df[mask]
+    nn = read_table(path=nn_file)
+    qcol = "cpd_id" if "cpd_id" in nn.columns else ("query_id" if "query_id" in nn.columns else None)
+    if qcol is None or "neighbour_id" not in nn.columns:
+        raise ValueError("NN table must contain 'cpd_id' (or 'query_id') and 'neighbour_id'.")
+    hits = nn[nn[qcol].astype(str).str.upper() == str(query_id).upper()].copy()
+    if "distance" in hits.columns:
+        hits = hits.sort_values("distance", ascending=True)
+    out = hits["neighbour_id"].astype(str).unique().tolist()[:n_top]
+    logger.info("Selected %d neighbours for %s: %s", len(out), query_id, out)
+    return out
 
 
-
-
-def compare_distributions(df1, df2, feature_cols, test='mw', logger=None):
+def benjamini_hochberg(*, pvals: np.ndarray) -> np.ndarray:
     """
-    Compare distributions of each feature between two well sets using non-parametric
-    statistical tests and Earth Mover's Distance (EMD/Wasserstein).
+    Benjamini–Hochberg FDR.
 
-    Args:
-        df1 (pd.DataFrame): DataFrame for group 1 (e.g., query).
-        df2 (pd.DataFrame): DataFrame for group 2 (e.g., DMSO/NN).
-        feature_cols (list): List of feature column names.
-        logger (logging.Logger): Logger for diagnostic output.
-        test (str): Statistical test to use ('mw' for Mann–Whitney U, 'ks' for Kolmogorov–Smirnov).
+    Parameters
+    ----------
+    pvals : np.ndarray
+        Array of p-values.
 
-    Returns:
-        pd.DataFrame: Results with stat, raw_pvalue, abs_median_diff, emd, med_query, med_comp.
+    Returns
+    -------
+    np.ndarray
+        Adjusted q-values (same shape).
     """
-    stats = []
-    for feat in feature_cols:
-        x1 = df1[feat].dropna()
-        x2 = df2[feat].dropna()
-        if len(x1) < 2 or len(x2) < 2:
-            stat, p, emd = np.nan, np.nan, np.nan
-            logger.debug(f"Skipping {feat}: not enough values in one or both groups.")
-        else:
-            # Choose test
-            if test == 'mw':
-                try:
-                    stat, p = mannwhitneyu(x1, x2, alternative='two-sided')
-                except Exception as e:
-                    logger.warning(f"Mann–Whitney failed for {feat}: {e}")
-                    stat, p = np.nan, np.nan
-            else:
-                try:
-                    stat, p = ks_2samp(x1, x2)
-                except Exception as e:
-                    logger.warning(f"KS test failed for {feat}: {e}")
-                    stat, p = np.nan, np.nan
-            # EMD/Wasserstein
-            try:
-                emd = wasserstein_distance(x1, x2)
-            except Exception as e:
-                logger.warning(f"EMD failed for {feat}: {e}")
-                emd = np.nan
-        med1 = np.median(x1) if len(x1) else np.nan
-        med2 = np.median(x2) if len(x2) else np.nan
-        abs_diff = np.abs(med1 - med2)
-        stats.append({
-            'feature': feat,
-            'stat': stat,
-            'raw_pvalue': p,
-            'abs_median_diff': abs_diff,
-            'emd': emd,
-            'med_query': med1,
-            'med_comp': med2
-        })
-    logger.info("Completed comparison for all features with EMD.")
-    return pd.DataFrame(stats)
+    p = np.asarray(pvals, dtype=float)
+    n = p.size
+    order = np.argsort(p)
+    ranks = np.arange(1, n + 1)
+    q = np.empty_like(p)
+    q[order] = p[order] * n / ranks
+    q = np.minimum.accumulate(q[order[::-1]])[::-1]
+    q = np.clip(q, 0, 1)
+    out = np.empty_like(q)
+    out[order] = q
+    return out
 
 
-def group_feature_stats(feat_stats, group_map, fdr_alpha=0.05, logger=None):
+def run_two_sample_test(*, a: np.ndarray, b: np.ndarray, test: str) -> float:
     """
-    Summarise per-feature stats by group, including size and FDR counts.
+    Two-sample test p-value.
 
-    Args:
-        feat_stats (pd.DataFrame): Per-feature stats with FDR.
-        group_map (dict): Mapping from group to feature list.
-        fdr_alpha (float): FDR threshold.
-        logger (logging.Logger): Logger.
+    Parameters
+    ----------
+    a : np.ndarray
+        Sample A values.
+    b : np.ndarray
+        Sample B values.
+    test : str
+        'mw' (Mann–Whitney U) or 'ks' (Kolmogorov–Smirnov).
 
-    Returns:
-        pd.DataFrame: Per-group stats.
+    Returns
+    -------
+    float
+        Two-sided p-value.
     """
-    grouped = []
-    for group, feats in group_map.items():
-        group_df = feat_stats[feat_stats['feature'].isin(feats)]
-        if group_df.empty:
-            continue
-        abs_diff = group_df['abs_median_diff'].mean()
-        min_p = group_df['raw_pvalue'].min()
-        mean_emd = group_df['emd'].mean() if 'emd' in group_df.columns else np.nan
-        min_fdr = group_df['pvalue_bh'].min() if 'pvalue_bh' in group_df.columns else np.nan
-        n_features = len(group_df)
-        n_sig_fdr = (group_df['pvalue_bh'] <= fdr_alpha).sum() if 'pvalue_bh' in group_df.columns else np.nan
-        grouped.append({
-            'group': group,
-            'mean_abs_median_diff': abs_diff,
-            'min_raw_pvalue': min_p,
-            'mean_emd': mean_emd,
-            'min_pvalue_bh': min_fdr,
-            'n_features_in_group': n_features,
-            'n_features_sig_fdr': n_sig_fdr
-        })
-    if logger:
-        logger.debug(f"Summarised {len(grouped)} feature groups.")
-    return pd.DataFrame(grouped)
+    if test == "mw":
+        res = mannwhitneyu(a, b, alternative="two-sided")
+        return float(res.pvalue)
+    res = ks_2samp(a, b, alternative="two-sided", mode="auto")
+    return float(res.pvalue)
 
 
-def ensure_column(df, colname, fill_value="missing"):
+def summarise_groups(
+    *,
+    stats_df: pd.DataFrame,
+    feature_group_map: Dict[str, str],
+    top_n: int
+) -> pd.DataFrame:
     """
-    Ensure the specified column exists in the DataFrame.
-    If missing, add it with the given fill value.
+    Summarise per-feature statistics into groups by mean absolute effect.
 
-    Args:
-        df (pd.DataFrame): Input DataFrame.
-        colname (str): Column name to ensure.
-        fill_value (Any): Value to fill if column is missing.
+    Parameters
+    ----------
+    stats_df : pd.DataFrame
+        Per-feature stats with columns ['feature','median_diff','emd','p','q'].
+    feature_group_map : Dict[str, str]
+        Mapping feature -> group.
+    top_n : int
+        Top-N groups to retain.
 
-    Returns:
-        pd.DataFrame: DataFrame with the column present.
+    Returns
+    -------
+    pd.DataFrame
+        Group summary.
     """
-    if colname not in df.columns:
-        df[colname] = fill_value
-    return df
-
-
-def parse_query_ids(query_ids_arg):
-    """
-    Parse query IDs from comma-separated string, file, or list.
-
-    Args:
-        query_ids_arg (str or list): Comma-separated string or filename.
-
-    Returns:
-        list: List of query IDs as strings.
-    """
-    if isinstance(query_ids_arg, list):
-        return query_ids_arg
-    if os.path.isfile(query_ids_arg):
-        with open(query_ids_arg, 'r') as f:
-            ids = [line.strip() for line in f if line.strip()]
-        return ids
-    # Otherwise, treat as comma-separated string
-    return [x.strip() for x in query_ids_arg.split(',') if x.strip()]
-
-
-def reorder_and_write(df, filename, col_order, logger, filetype="tsv"):
-    """
-    Ensure output DataFrame has all desired columns, in order.
-    Any missing columns will be filled with NaN.
-
-    Args:
-        df (pd.DataFrame): Data to write.
-        filename (str): Output file path.
-        col_order (list): Desired column order.
-        logger (logging.Logger): Logger for messages.
-        filetype (str): 'tsv' or 'excel'.
-    """
-    # Only include columns that are present, in order. Add missing as NaN.
-    for col in col_order:
-        if col not in df.columns:
-            df[col] = np.nan
-    cols_in_order = [col for col in col_order if col in df.columns]
-    # Append any others at the end
-    remaining = [c for c in df.columns if c not in cols_in_order]
-    df_out = df[cols_in_order + remaining]
-    if filetype == "tsv":
-        df_out.to_csv(filename, sep="\t", index=False)
-    elif filetype == "excel":
-        df_out.to_excel(filename, index=False)
-    logger.debug(f"Wrote {filename} with columns: {df_out.columns.tolist()}")
-
-
-def load_nn_table(nn_file, query_id, nn_per_query=10):
-    """
-    Load nearest neighbours for a given query from NN table.
-
-    Args:
-        nn_file (str): Path to nearest_neighbours.tsv.
-        query_id (str): Query cpd_id.
-        nn_per_query (int): Number of NNs to use.
-
-    Returns:
-        list: List of NN cpd_ids (strings).
-    """
-    nn_df = pd.read_csv(nn_file, sep=None, engine='python')
-    mask = nn_df['cpd_id'].astype(str).str.upper() == str(query_id).upper()
-    neighbours = nn_df[mask].sort_values('distance')['neighbour_id'].astype(str).tolist()
-    return neighbours[:nn_per_query]
-
-
-def main():
-    """
-    Main script entry point for batch feature attribution and comparison to DMSO for multiple queries.
-    """
-    parser = argparse.ArgumentParser(
-        description="Statistical attribution for cell painting NNs vs DMSO (batch mode)"
+    tmp = stats_df.copy()
+    tmp["group"] = tmp["feature"].map(feature_group_map).fillna("ungrouped")
+    tmp["abs_effect"] = tmp["median_diff"].abs()
+    grp = (
+        tmp.groupby("group", as_index=False)
+        .agg(
+            n_features=("feature", "count"),
+            mean_abs_effect=("abs_effect", "mean"),
+            median_abs_effect=("abs_effect", "median"),
+            min_q=("q", "min"),
+        )
+        .sort_values(["mean_abs_effect", "n_features"], ascending=[False, False])
+        .head(top_n)
     )
-    parser.add_argument('--ungrouped_list', required=True,
-                        help="CSV/TSV with column 'path' for ungrouped feature files")
-    parser.add_argument('--query_ids', required=False,
-                        default="DDD02387619,DDD02948916,DDD02955130,DDD02958365",
-                        help="Comma-separated string, one-per-line file, or filename with query IDs")
-    parser.add_argument('--nn_file', required=True,
-                        help="Nearest neighbours TSV (cpd_id, neighbour_id, distance)")
-    parser.add_argument('--cpd_type_col', default='cpd_type',
-                        help="Column for compound type")
-    parser.add_argument('--cpd_id_col', default='cpd_id',
-                        help="Column for compound ID")
-    parser.add_argument('--dmso_label', default='DMSO',
-                        help="Control label (case-insensitive, substring match)")
-    parser.add_argument('--feature_group_file',
-                        help="Feature-group mapping (CSV/TSV, optional)")
-    parser.add_argument('--output_dir', required=True,
-                        help="Directory for output tables")
-    parser.add_argument('--nn_per_query', type=int, default=10,
-                        help="Number of nearest neighbours to compare per query")
-    parser.add_argument('--top_features', type=int, default=10,
-                        help="Number of top features/groups to report per comparison")
-    parser.add_argument('--test', default='mw', choices=['mw', 'ks'],
-                        help="Statistical test: 'mw' or 'ks'")
-    parser.add_argument('--log_file', default="feature_attribution.log",
-                        help="Log file name")
-    args = parser.parse_args()
-
-    standard_col_order = [
-    "feature", "stat", "raw_pvalue", "abs_median_diff", "emd", "med_query", "med_comp", "pvalue_bh"]
+    return grp
 
 
-    standard_col_order_group = [
-    "group",
-    "mean_abs_median_diff",
-    "min_raw_pvalue",
-    "mean_emd",
-    "min_pvalue_bh",
-    "n_features_sig_fdr",
-    "n_features_in_group"]
+def write_tsv(*, df: pd.DataFrame, path: str | Path, logger: logging.Logger) -> None:
+    """
+    Write a DataFrame to TSV.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Table to write.
+    path : str | Path
+        Output path.
+    logger : logging.Logger
+        Logger instance.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path_or_buf=path, sep="\t", index=False)
+    logger.info("Wrote %d rows -> %s", len(df), path)
 
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    logger = setup_logger(os.path.join(args.output_dir, args.log_file))
-    logger.info("Starting batch NN feature attribution analysis.")
-    logger.info(f"Arguments: {args}")
+# -------------------------- Core comparisons ---------------------------------
 
-    logger.info("Loading all well-level (ungrouped) data files...")
-    df = load_ungrouped_files(args.ungrouped_list)
-    meta_cols = [args.cpd_id_col, args.cpd_type_col, 'Library', 'Plate_Metadata', 'Well_Metadata', 'Dataset']
-    feature_cols = [c for c in df.columns if c not in meta_cols and pd.api.types.is_numeric_dtype(df[c])]
-    logger.info(f"Detected {len(feature_cols)} features for analysis: {feature_cols[:10]} ...")
 
-    # DMSO wells (all files)
-    logger.info("Extracting DMSO wells (control distribution)...")
-    dmso_df = get_wells_for_dmso(df, dmso_label=args.dmso_label)
-    logger.info(f"Found {dmso_df.shape[0]} DMSO wells.")
+def per_feature_stats(
+    *,
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    mask_a: np.ndarray,
+    mask_b: np.ndarray,
+    test: str
+) -> pd.DataFrame:
+    """
+    Compute per-feature statistics between two groups.
 
-    # Suppress openpyxl warnings
-    warnings.simplefilter("ignore")
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input table containing features.
+    feature_cols : List[str]
+        Numeric feature columns.
+    mask_a : np.ndarray
+        Boolean mask for group A rows.
+    mask_b : np.ndarray
+        Boolean mask for group B rows.
+    test : str
+        'mw' or 'ks'.
 
-    # Feature grouping: use provided file or infer compartments
-    if args.feature_group_file:
-        group_map = load_groupings(args.feature_group_file)
-        logger.info("Loaded feature groupings from file.")
-    else:
-        group_map = infer_compartments(feature_cols)
-        logger.info(f"Inferred {len(group_map)} compartments: {list(group_map.keys())}")
+    Returns
+    -------
+    pd.DataFrame
+        Stats per feature: feature, median_A, median_B, median_diff, emd, p, q.
+    """
+    rows = []
+    a_idx = np.where(mask_a)[0]
+    b_idx = np.where(mask_b)[0]
+    for feat in feature_cols:
+        a = df[feat].values[a_idx]
+        b = df[feat].values[b_idx]
+        med_a = float(np.median(a))
+        med_b = float(np.median(b))
+        med_diff = med_a - med_b
+        emd = float(wasserstein_distance(a, b))
+        p = run_two_sample_test(a=a, b=b, test=test)
+        rows.append(
+            {
+                "feature": feat,
+                "median_A": med_a,
+                "median_B": med_b,
+                "median_diff": med_diff,
+                "emd": emd,
+                "p": p,
+            }
+        )
+    out = pd.DataFrame(rows)
+    out["q"] = benjamini_hochberg(pvals=out["p"].values)
+    out = out.sort_values("q", ascending=True)
+    return out
 
-    # Query IDs
-    query_ids = parse_query_ids(args.query_ids)
-    logger.info(f"Processing {len(query_ids)} query compounds: {query_ids}")
 
-    for query_id in query_ids:
-        logger.info(f"\n=== Analysing query: {query_id} ===")
-        # Query wells
-        query_df = get_well_level(df, query_id, cpd_id_col=args.cpd_id_col)
-        if query_df.empty:
-            logger.warning(f"No wells found for query {query_id}, skipping.")
-            continue
+def run_query_background(
+    *,
+    df_num: pd.DataFrame,
+    feature_cols: List[str],
+    query_id: str,
+    test: str,
+    logger: logging.Logger
+) -> pd.DataFrame:
+    """
+    Compare query vs background (non-query, or optional DMSO subset if present).
 
-        # Query vs DMSO
-        logger.info(f"Comparing query compound {query_id} to DMSO controls...")
-        q_dmso_stats = compare_distributions(query_df, dmso_df, feature_cols, test=args.test, logger=logger)
-        # Always assign FDR correction to the full result table!
-        if not q_dmso_stats.empty and q_dmso_stats['raw_pvalue'].notna().any():
-            _, q_dmso_stats['pvalue_bh'], _, _ = multipletests(
-                q_dmso_stats['raw_pvalue'].fillna(1), method='fdr_bh'
-            )
+    Parameters
+    ----------
+    df_num : pd.DataFrame
+        Numeric-only well-level table (must include 'cpd_id').
+    feature_cols : List[str]
+        Numeric feature columns.
+    query_id : str
+        Query compound identifier.
+    test : str
+        'mw' or 'ks'.
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    pd.DataFrame
+        Stats per feature.
+    """
+    is_query = df_num["cpd_id"].astype(str).str.upper() == str(query_id).upper()
+
+    # Optional: if a DMSO background column exists, prefer that as background
+    # Otherwise, use all non-query wells
+    if "cpd_type" in df_num.columns:
+        is_dmso = df_num["cpd_type"].astype(str).str.upper().str.contains("DMSO")
+        if is_dmso.any():
+            mask_b = is_dmso.values
+            logger.info("Using DMSO wells as background (n=%d).", int(mask_b.sum()))
         else:
-            q_dmso_stats['pvalue_bh'] = np.nan
+            mask_b = ~is_query.values
+            logger.info("Using all non-query wells as background (n=%d).", int(mask_b.sum()))
+    else:
+        mask_b = ~is_query.values
+        logger.info("Using all non-query wells as background (n=%d).", int(mask_b.sum()))
 
-        n_query_wells = query_df.shape[0]
-        n_dmso_wells = dmso_df.shape[0]
-        q_dmso_stats['n_query_wells'] = n_query_wells
-        q_dmso_stats['n_dmso_wells'] = n_dmso_wells
+    mask_a = is_query.values
+    n_a = int(mask_a.sum())
+    n_b = int(mask_b.sum())
+    logger.info("Query wells: %d; background wells: %d", n_a, n_b)
 
-        q_dmso_stats = q_dmso_stats.sort_values('abs_median_diff', ascending=True)
-        top_dmso = q_dmso_stats.head(args.top_features).copy()
-        out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_features.tsv")
-        out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-        reorder_and_write(top_dmso, out_tsv, standard_col_order + ["n_query_wells", "n_dmso_wells"], logger, "tsv")
-        reorder_and_write(top_dmso, out_xlsx, standard_col_order + ["n_query_wells", "n_dmso_wells"], logger, "excel")
+    if n_a < 3 or n_b < 10:
+        logger.warning("Too few wells for robust stats (query<3 or background<10). Proceeding anyway.")
 
-        logger.info(f"Saved top features distinguishing {query_id} from DMSO: {top_dmso['feature'].tolist()}")
-
-        # Groups (compartments)
-        if group_map:
-            q_dmso_group_stats = group_feature_stats(q_dmso_stats, group_map, logger=logger)
-            q_dmso_group_stats['n_query_wells'] = n_query_wells
-            q_dmso_group_stats['n_dmso_wells'] = n_dmso_wells
-            q_dmso_group_stats = q_dmso_group_stats.sort_values('mean_abs_median_diff', ascending=True)
-            top_grp = q_dmso_group_stats.head(args.top_features).copy()
-            out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_DMSO_top_groups.tsv")
-            out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-            reorder_and_write(top_grp, out_tsv, standard_col_order_group + ["n_query_wells", "n_dmso_wells"], logger, "tsv")
-            reorder_and_write(top_grp, out_xlsx, standard_col_order_group + ["n_query_wells", "n_dmso_wells"], logger, "excel")
-
-            logger.info(f"Saved top compartments distinguishing {query_id} from DMSO: {top_grp['group'].tolist()}")
-
-        # Nearest neighbours (from NN table)
-        nn_ids = load_nn_table(args.nn_file, query_id, nn_per_query=args.nn_per_query)
-        logger.info(f"Loaded {len(nn_ids)} nearest neighbours for {query_id}: {nn_ids}")
-
-        for nn_id in nn_ids:
-            nn_df = get_well_level(df, nn_id, cpd_id_col=args.cpd_id_col)
-            if nn_df.empty:
-                logger.warning(f"No wells found for NN {nn_id}, skipping.")
-                continue
-            logger.info(f"Comparing {query_id} to NN {nn_id}...")
-            n_nn_wells = nn_df.shape[0]
-            q_nn_stats = compare_distributions(query_df, nn_df, feature_cols, test=args.test, logger=logger)
-            if not q_nn_stats.empty and q_nn_stats['raw_pvalue'].notna().any():
-                _, q_nn_stats['pvalue_bh'], _, _ = multipletests(
-                    q_nn_stats['raw_pvalue'].fillna(1), method='fdr_bh'
-                )
-            else:
-                q_nn_stats['pvalue_bh'] = np.nan
-            q_nn_stats['n_query_wells'] = n_query_wells
-            q_nn_stats['n_nn_wells'] = n_nn_wells
-
-            q_nn_stats = q_nn_stats.sort_values('abs_median_diff', ascending=True)
-            top_nn = q_nn_stats.head(args.top_features).copy()
-            out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_features.tsv")
-            out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-            reorder_and_write(top_nn, out_tsv, standard_col_order + ["n_query_wells", "n_nn_wells"], logger, "tsv")
-            reorder_and_write(top_nn, out_xlsx, standard_col_order + ["n_query_wells", "n_nn_wells"], logger, "excel")
-
-            logger.info(f"Saved top features explaining similarity between {query_id} and {nn_id}: {top_nn['feature'].tolist()}")
-
-            if group_map:
-                q_nn_group_stats = group_feature_stats(q_nn_stats, group_map, logger=logger)
-                q_nn_group_stats['n_query_wells'] = n_query_wells
-                q_nn_group_stats['n_nn_wells'] = n_nn_wells
-                q_nn_group_stats = q_nn_group_stats.sort_values('mean_abs_median_diff', ascending=True)
-                top_grp = q_nn_group_stats.head(args.top_features).copy()
-                out_tsv = os.path.join(args.output_dir, f"{query_id}_vs_{nn_id}_top_groups.tsv")
-                out_xlsx = out_tsv.replace(".tsv", ".xlsx")
-                reorder_and_write(top_grp, out_tsv, standard_col_order_group + ["n_query_wells", "n_nn_wells"], logger, "tsv")
-                reorder_and_write(top_grp, out_xlsx, standard_col_order_group + ["n_query_wells", "n_nn_wells"], logger, "excel")
-                logger.info(f"Saved top compartments explaining similarity between {query_id} and {nn_id}: {top_grp['group'].tolist()}")
-
-    logger.info("Feature attribution and statistical comparison completed.")
-
-    print("Total rows:", df.shape[0])
-    print("DMSO rows:", get_wells_for_dmso(df).shape[0])
-
-    get_wells_for_dmso(df).to_csv("all_dmso_rows.tsv", sep="\t", index=False)
+    stats = per_feature_stats(df=df_num, feature_cols=feature_cols, mask_a=mask_a, mask_b=mask_b, test=test)
+    return stats
 
 
-if __name__ == "__main__":
-    main()
+def run_query_vs_neighbours(
+    *,
+    df_num: pd.DataFrame,
+    feature_cols: List[str],
+    query_id: str,
+    neighbour_ids: List[str],
+    test: str,
+    out_dir: str,
+    logger: logging.Logger
+) -> None:
+    """
+    Compare query vs each neighbour compound individually.
+
+    Parameters
+    ----------
+    df_num : pd.DataFrame
+        Numeric feature table with 'cpd_id'.
+    feature_cols : List[str]
+        Numeric feature columns.
+    query_id : str
+        Query compound identifier.
+    neighbour_ids : List[str]
+        Neighbour compound IDs.
+    test : str
+        'mw' or 'ks'.
+    out_dir : str
+        Output directory for per-neighbour TSVs.
+    logger : logging.Logger
+        Logger instance.
+    """
+    qmask = df_num["cpd_id"].astype(str).str.upper() == str(query_id).upper()
+    nn_dir = Path(out_dir) / "nn_compare"
+    nn_dir.mkdir(parents=True, exist_ok=True)
+
+    for nid in neighbour_ids:
+        nmask = df_num["cpd_id"].astype(str).str.upper() == str(nid).upper()
+        if qmask.sum() < 3 or nmask.sum() < 3:
+            logger.info("Skipping neighbour %s due to low sample counts (query=%d, neighbour=%d).",
+                        nid, int(qmask.sum()), int(nmask.sum()))
+            continue
+        stats = per_feature_stats(df=df_num, feature_cols=feature_cols, mask_a=qmask.values, mask_b=nmask.values, test=test)
+        out = nn_dir / f"{query_id}_vs_{nid}_stats.tsv"
+        write_tsv(df=stats, path=out, logger=logger)
+
+
+# -------------------------- Grouping -----------------------------------------
+
+
+def load_feature_groups(*, feature_group_file: str, logger: logging.Logger) -> Dict[str, str]:
+    """
+    Load feature->group mapping from CSV/TSV.
+
+    Parameters
+    ----------
+    feature_group_file : str
+        Path to mapping file with columns: feature, group.
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping from feature name to group label.
+    """
+    df = read_table(path=feature_group_file)
+    need = {"feature",
