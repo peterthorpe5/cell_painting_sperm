@@ -44,7 +44,10 @@ from __future__ import annotations
 import argparse
 import glob
 import logging
-import os
+import os  # must be before 'import torch'
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
+
 import sys
 import time
 from pathlib import Path
