@@ -78,8 +78,6 @@ _SCRIPT_START_TIME = time.time()
 # Make sklearn return DataFrames
 set_config(transform_output="pandas")
 
-# Ensure CLIPn is safe to unpickle
-torch.serialization.add_safe_globals([CLIPn])
 
 
 # =========================
@@ -128,6 +126,40 @@ def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
     logger.info("Experiment Name: %s", experiment)
 
     return logger
+
+
+def _register_clipn_for_pickle() -> None:
+    """
+    Best-effort registration of CLIPn for Torch's safe unpickling.
+
+    On older PyTorch versions the 'add_safe_globals' helper does not exist.
+    In that case this function becomes a no-op and loading still works
+    provided the CLIPn class is importable.
+    """
+    try:
+        add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+        if callable(add_safe_globals):
+            add_safe_globals([CLIPn])
+    except Exception:
+        # Optional hardening only; safe to ignore on older Torch.
+        pass
+
+
+
+def torch_load_compat(model_path: str, *, map_location: str | None = None, weights_only: bool | None = None):
+    """
+    Backwards-compatible torch.load.
+
+    Tries to use the 'weights_only' argument when supported; falls back
+    silently if the running PyTorch does not accept it.
+    """
+    try:
+        if weights_only is None:
+            return torch.load(f=model_path, map_location=map_location)
+        return torch.load(f=model_path, map_location=map_location, weights_only=weights_only)
+    except TypeError:
+        # Older Torch without 'weights_only'
+        return torch.load(f=model_path, map_location=map_location)
 
 
 def detect_csv_delimiter(csv_path: str) -> str:
@@ -898,7 +930,9 @@ def main(args: argparse.Namespace) -> None:
     """
     logger = setup_logging(out_dir=args.out, experiment=args.experiment)
     logger.info("Starting CLIPn integration pipeline")
+    logger.info("PyTorch Version: %s", getattr(torch, "__version__", "unknown"))
 
+    _register_clipn_for_pickle()
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1058,7 +1092,8 @@ def main(args: argparse.Namespace) -> None:
                 raise FileNotFoundError(f"No model files matched pattern: {args.load_model}")
             model_path = model_files[0]
             logger.info("Loading pre-trained CLIPn model from: %s", model_path)
-            model = torch.load(f=model_path, weights_only=False)
+            model = torch_load_compat(model_path=model_path, weights_only=False)
+
 
             # Prepare and predict training references
             data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(reference_df)
@@ -1130,8 +1165,11 @@ def main(args: argparse.Namespace) -> None:
             # Extend dataset_key_mapping to include query datasets
             max_existing_key = max(dataset_key_mapping.keys(), default=-1)
             new_keys = list(range(max_existing_key + 1, max_existing_key + 1 + len(query_names)))
-            for new_key, name in zip(new_keys, query_names, strict=True):
+            if len(new_keys) != len(query_names):
+                raise ValueError("Internal error: key/name length mismatch while extending dataset_key_mapping.")
+            for new_key, name in zip(new_keys, query_names):
                 dataset_key_mapping[new_key] = name
+
 
             # Identify a reference encoder to copy from
             try:
