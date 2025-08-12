@@ -84,6 +84,7 @@ import time
 from pathlib import Path
 import sys
 import re
+import gzip 
 import pandas as pd
 import numpy as np
 from itertools import islice
@@ -182,25 +183,24 @@ def setup_logging(log_level="INFO"):
     return logging.getLogger("merge_logger")
 
 
-
 def robust_read_csv(path, logger=None, n_check_lines=2):
     """
-    Robustly read a CSV/TSV (optionally gzipped) file, automatically detecting
-    the delimiter and handling gzipped files transparently.
+    Robustly read a CSV/TSV (optionally gzipped), auto-detecting the delimiter,
+    decoding with BOM-awareness, and normalising header labels.
 
     Parameters
     ----------
     path : str
         Path to the file to read.
     logger : logging.Logger, optional
-        Logger instance for status messages. Defaults to a module-level logger.
+        Logger instance.
     n_check_lines : int, optional
-        Number of lines to inspect when guessing the delimiter. Default is 2.
+        Number of lines to inspect when guessing the delimiter.
 
     Returns
     -------
     pd.DataFrame
-        The loaded DataFrame.
+        The loaded DataFrame with normalised column labels.
 
     Raises
     ------
@@ -209,40 +209,60 @@ def robust_read_csv(path, logger=None, n_check_lines=2):
     """
     logger = logger or logging.getLogger(__name__)
 
-    # Choose appropriate opener
     opener = gzip.open if str(path).endswith(".gz") else open
-
-    # Peek at the first few lines
     with opener(path, mode="rt", encoding="utf-8", errors="replace") as fh:
         lines = list(islice(fh, n_check_lines))
 
     header_has_tabs = any("\t" in line for line in lines)
-
-    # Preferred and fallback delimiters
-    try_first = "\t" if header_has_tabs else ","
-    try_second = "," if header_has_tabs else "\t"
+    try_first, try_second = ("\t", ",") if header_has_tabs else (",", "\t")
 
     for sep, label in ((try_first, "first guess"), (try_second, "fallback")):
         try:
-            df = pd.read_csv(path, sep=sep if sep != "," else None)
-            # Single-column safeguard
-            if df.shape[1] == 1 and sep == "," and header_has_tabs:
-                continue
+            # Use explicit sep and BOM-aware decoding; python engine is tolerant.
+            df = pd.read_csv(path, sep=sep, engine="python", encoding="utf-8-sig")
+            df.columns = normalise_column_labels(df.columns)
             logger.info(
                 "Read file as %s-separated (%s).",
                 "tab" if sep == "\t" else "comma",
-                label
+                label,
             )
             return df
         except Exception as err:
             logger.warning(
                 "Reading as %s-separated failed (%s).",
                 "tab" if sep == "\t" else "comma",
-                err
+                err,
             )
 
     raise ValueError(f"Failed to parse file '{path}' as CSV or TSV.")
 
+
+
+def normalise_column_labels(cols):
+    """
+    Clean a sequence of column labels by removing BOM/zero-width characters,
+    converting NBSP to a space, and stripping outer whitespace.
+
+    Parameters
+    ----------
+    cols : Iterable[str]
+        Original column labels.
+
+    Returns
+    -------
+    pandas.Index
+        Cleaned column labels as a pandas Index.
+    """
+    return pd.Index(
+        [
+            str(c)
+            .replace("\ufeff", "")   # BOM
+            .replace("\u200b", "")   # zero-width space
+            .replace("\xa0", " ")    # non-breaking space -> space
+            .strip()
+            for c in cols
+        ]
+    )
 
 
 def log_memory_usage(logger, prefix="", extra_msg=None):
@@ -895,35 +915,37 @@ def harmonise_metadata_columns(
     preferred: Optional[tuple[str, str]] = None,
 ) -> pd.DataFrame:
     """
-    Harmonise plate/well names in a metadata table to 'Plate_Metadata' and 'Well_Metadata'.
+    Harmonise plate and well column names to 'Plate_Metadata' and 'Well_Metadata'.
 
-    Order of attempts:
-        1) Use `preferred` (from --merge_keys), matching case/underscore-insensitively.
-        2) Try a broad synonym list for plate and well columns.
-        3) If 'Row' and 'Column' (or variants) exist, build Well as A01-style and use that.
+    Resolution order:
+      1) Use user-preferred names from --merge_keys (case/underscore-insensitive).
+      2) Try broad synonym lists for plate and well headers.
+      3) If Row/Column exist, construct Well as A01-style and use that.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Metadata DataFrame.
+        Input metadata DataFrame.
     logger : logging.Logger, optional
         Logger for messages.
     is_metadata_file : bool
-        Unused here; included for compatibility with existing calls.
+        Kept for compatibility (not used).
     preferred : tuple[str, str] or None
-        (plate_col_name, well_col_name) as the user's intended merge keys.
+        (plate_name, well_name) as passed by the user.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with 'Plate_Metadata' and 'Well_Metadata' present (renamed/constructed).
+        DataFrame with 'Plate_Metadata' and 'Well_Metadata' present.
 
     Raises
     ------
     ValueError
-        If neither a plate nor a well column can be resolved.
+        If required columns cannot be resolved.
     """
     logger = logger or logging.getLogger("meta_harmonise")
+    df = df.copy()
+    df.columns = normalise_column_labels(df.columns)
 
     def _norm(s: str) -> str:
         return s.replace("_", "").replace(" ", "").lower()
@@ -936,20 +958,21 @@ def harmonise_metadata_columns(
                 return hit
         return None
 
-    # 1) User-preferred keys (from --merge_keys)
     plate_col = None
     well_col = None
+
+    # 1) Preferred keys from --merge_keys
     if preferred and len(preferred) == 2:
         plate_try, well_try = preferred
         plate_col = _find_col([plate_try])
-        well_col  = _find_col([well_try])
+        well_col = _find_col([well_try])
 
-    # 2) Broad synonyms if needed
+    # 2) Synonyms
     if plate_col is None:
         plate_syns = [
             "Plate_Metadata", "Plate", "plate", "Barcode", "Plate_Barcode", "PlateBarcode",
             "PlateID", "Plate_Id", "PlateName", "Assay_Plate_Barcode", "AssayPlate_Barcode",
-            "Metadata_Plate", "Image_Metadata_Plate"
+            "Metadata_Plate", "Image_Metadata_Plate", "original_Pt_Mt"
         ]
         plate_col = _find_col(plate_syns)
 
@@ -960,48 +983,44 @@ def harmonise_metadata_columns(
         ]
         well_col = _find_col(well_syns)
 
-    # 3) Fallback: build Well from Row/Column if available
+    # 3) Fallback from Row/Column
     if well_col is None:
-        row_col  = _find_col(["Row", "WellRow", "row", "Image_Metadata_Row"])
-        col_col  = _find_col(["Column", "Col", "WellColumn", "column", "Image_Metadata_Column", "Image_Metadata_Col"])
+        row_col = _find_col(["Row", "WellRow", "row", "Image_Metadata_Row"])
+        col_col = _find_col(["Column", "Col", "WellColumn", "column", "Image_Metadata_Column", "Image_Metadata_Col"])
         if row_col and col_col:
             tmp = df[[row_col, col_col]].copy()
-            # coerce: row letter + zero-padded 2-digit column
             tmp["Well_Metadata"] = (
                 tmp[row_col].astype(str).str.strip().str.upper().str[0]
-                + tmp[col_col].astype(str).str.extract(r"(\d+)", expand=False).astype(float).fillna(0).astype(int).astype(str).str.zfill(2)
+                + tmp[col_col].astype(str)
+                  .str.extract(r"(\d+)", expand=False).astype(float).fillna(0).astype(int)
+                  .astype(str).str.zfill(2)
             )
-            df = df.copy()
             df["Well_Metadata"] = tmp["Well_Metadata"]
             well_col = "Well_Metadata"
-            if logger:
-                logger.info(f"Constructed 'Well_Metadata' from '{row_col}' + '{col_col}'.")
+            logger.info(f"Constructed 'Well_Metadata' from '{row_col}' + '{col_col}'.")
 
-    # Apply renames if we have resolved columns
+    # Apply final renames to canonical labels
     if plate_col and plate_col != "Plate_Metadata":
         df = df.rename(columns={plate_col: "Plate_Metadata"})
         plate_col = "Plate_Metadata"
-        if logger:
-            logger.info(f"Renamed plate column to 'Plate_Metadata'.")
+        logger.info("Renamed plate column to 'Plate_Metadata'.")
 
     if well_col and well_col != "Well_Metadata":
         df = df.rename(columns={well_col: "Well_Metadata"})
         well_col = "Well_Metadata"
-        if logger:
-            logger.info(f"Renamed well column to 'Well_Metadata'.")
+        logger.info("Renamed well column to 'Well_Metadata'.")
 
-    # Final check
     missing = [c for c in ("Plate_Metadata", "Well_Metadata") if c not in df.columns]
     if missing:
         cols_preview = ", ".join(df.columns.tolist())
-        if logger:
-            logger.error(f"Could not harmonise: missing {missing}. Available columns: {cols_preview}")
+        logger.error(f"Could not harmonise: missing {missing}. Available columns: {cols_preview}")
         raise ValueError(
             f"Could not harmonise plate/well names in metadata. Missing {missing}. "
             f"Available columns: {cols_preview}"
         )
 
     return df
+
 
 
 def select_single_plate_well(df: pd.DataFrame, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
@@ -1327,6 +1346,7 @@ def main():
 
     # 3. Load and harmonise metadata
     meta_df = robust_read_csv(args.metadata_file, logger=logger)
+
     # Use the caller’s explicit merge keys as first preference
     preferred_keys = tuple([k.strip() for k in args.merge_keys.split(",")]) if args.merge_keys else None
     meta_df = harmonise_metadata_columns(meta_df, logger=logger, is_metadata_file=True, preferred=preferred_keys)
