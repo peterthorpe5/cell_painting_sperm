@@ -1165,6 +1165,27 @@ def infer_dtypes(filename, nrows=1000):
     return dtypes
 
 
+def standardise_metadata_columns(df, logger=None, dataset_name=None):
+    """
+    Standardise metadata columns (cpd_id, cpd_type, Library) in a DataFrame.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame (can be merged data).
+    logger : logging.Logger, optional
+        Logger for messages.
+    dataset_name : str or None
+        Kept for backward compatibility; not used.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with standardised metadata columns.
+    """
+    return clean_metadata_columns(df, logger=logger)
+
+
 def _norm_plate(s):
     return s.astype(str).str.strip()
 
