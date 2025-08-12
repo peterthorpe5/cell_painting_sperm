@@ -888,51 +888,120 @@ def robust_merge_features_and_metadata(features_df, meta_df, logger=None):
     return merged
 
 
-def harmonise_metadata_columns(df, logger=None, is_metadata_file=False):
+def harmonise_metadata_columns(
+    df: pd.DataFrame,
+    logger: Optional[logging.Logger] = None,
+    is_metadata_file: bool = False,
+    preferred: Optional[tuple[str, str]] = None,
+) -> pd.DataFrame:
     """
-    Harmonise plate and well column names in the provided DataFrame to 'Plate_Metadata' and 'Well_Metadata'.
+    Harmonise plate/well names in a metadata table to 'Plate_Metadata' and 'Well_Metadata'.
 
-    Args:
-        df (pd.DataFrame): Input DataFrame (annotation or features).
-        logger (logging.Logger, optional): Logger for information and warnings.
-        is_metadata_file (bool): If True, use broader candidate set for annotation file.
+    Order of attempts:
+        1) Use `preferred` (from --merge_keys), matching case/underscore-insensitively.
+        2) Try a broad synonym list for plate and well columns.
+        3) If 'Row' and 'Column' (or variants) exist, build Well as A01-style and use that.
 
-    Returns:
-        pd.DataFrame: DataFrame with harmonised column names.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Metadata DataFrame.
+    logger : logging.Logger, optional
+        Logger for messages.
+    is_metadata_file : bool
+        Unused here; included for compatibility with existing calls.
+    preferred : tuple[str, str] or None
+        (plate_col_name, well_col_name) as the user's intended merge keys.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 'Plate_Metadata' and 'Well_Metadata' present (renamed/constructed).
+
+    Raises
+    ------
+    ValueError
+        If neither a plate nor a well column can be resolved.
     """
-    plate_candidates = [
-        "Plate_Metadata", "Plate", "Barcode", "plate", "Metadata_Plate", "Image_Metadata_Plate"
-    ] if is_metadata_file else [
-        "Plate_Metadata", "Plate", "plate", "Metadata_Plate", "Image_Metadata_Plate"
-    ]
-    well_candidates = [
-        "Well_Metadata", "Well", "well", "Metadata_Well", "Image_Metadata_Well"
-    ]
-    # Plate harmonisation
-    plate_col = next((col for col in plate_candidates if col in df.columns), None)
+    logger = logger or logging.getLogger("meta_harmonise")
+
+    def _norm(s: str) -> str:
+        return s.replace("_", "").replace(" ", "").lower()
+
+    def _find_col(candidates: list[str]) -> Optional[str]:
+        norm_map = {_norm(c): c for c in df.columns}
+        for cand in candidates:
+            hit = norm_map.get(_norm(cand))
+            if hit:
+                return hit
+        return None
+
+    # 1) User-preferred keys (from --merge_keys)
+    plate_col = None
+    well_col = None
+    if preferred and len(preferred) == 2:
+        plate_try, well_try = preferred
+        plate_col = _find_col([plate_try])
+        well_col  = _find_col([well_try])
+
+    # 2) Broad synonyms if needed
+    if plate_col is None:
+        plate_syns = [
+            "Plate_Metadata", "Plate", "plate", "Barcode", "Plate_Barcode", "PlateBarcode",
+            "PlateID", "Plate_Id", "PlateName", "Assay_Plate_Barcode", "AssayPlate_Barcode",
+            "Metadata_Plate", "Image_Metadata_Plate"
+        ]
+        plate_col = _find_col(plate_syns)
+
+    if well_col is None:
+        well_syns = [
+            "Well_Metadata", "Well", "well", "Well Name", "WellName", "Well_ID", "WellID",
+            "Metadata_Well", "Image_Metadata_Well"
+        ]
+        well_col = _find_col(well_syns)
+
+    # 3) Fallback: build Well from Row/Column if available
+    if well_col is None:
+        row_col  = _find_col(["Row", "WellRow", "row", "Image_Metadata_Row"])
+        col_col  = _find_col(["Column", "Col", "WellColumn", "column", "Image_Metadata_Column", "Image_Metadata_Col"])
+        if row_col and col_col:
+            tmp = df[[row_col, col_col]].copy()
+            # coerce: row letter + zero-padded 2-digit column
+            tmp["Well_Metadata"] = (
+                tmp[row_col].astype(str).str.strip().str.upper().str[0]
+                + tmp[col_col].astype(str).str.extract(r"(\d+)", expand=False).astype(float).fillna(0).astype(int).astype(str).str.zfill(2)
+            )
+            df = df.copy()
+            df["Well_Metadata"] = tmp["Well_Metadata"]
+            well_col = "Well_Metadata"
+            if logger:
+                logger.info(f"Constructed 'Well_Metadata' from '{row_col}' + '{col_col}'.")
+
+    # Apply renames if we have resolved columns
     if plate_col and plate_col != "Plate_Metadata":
         df = df.rename(columns={plate_col: "Plate_Metadata"})
+        plate_col = "Plate_Metadata"
         if logger:
-            logger.info(f"Renamed column '{plate_col}' to 'Plate_Metadata'.")
-    elif not plate_col:
-        if logger:
-            logger.warning(f"None of the candidate plate columns {plate_candidates} found in DataFrame.")
-    # Well harmonisation
-    well_col = next((col for col in well_candidates if col in df.columns), None)
+            logger.info(f"Renamed plate column to 'Plate_Metadata'.")
+
     if well_col and well_col != "Well_Metadata":
         df = df.rename(columns={well_col: "Well_Metadata"})
+        well_col = "Well_Metadata"
         if logger:
-            logger.info(f"Renamed column '{well_col}' to 'Well_Metadata'.")
-    elif not well_col:
-        if logger:
-            logger.warning(f"None of the candidate well columns {well_candidates} found in DataFrame.")
-    # Final check
-    if "Plate_Metadata" not in df.columns or "Well_Metadata" not in df.columns:
-        if logger:
-            logger.error("Could not harmonise plate/well column names in metadata.")
-        raise ValueError("Could not harmonise plate/well column names in metadata.")
-    return df
+            logger.info(f"Renamed well column to 'Well_Metadata'.")
 
+    # Final check
+    missing = [c for c in ("Plate_Metadata", "Well_Metadata") if c not in df.columns]
+    if missing:
+        cols_preview = ", ".join(df.columns.tolist())
+        if logger:
+            logger.error(f"Could not harmonise: missing {missing}. Available columns: {cols_preview}")
+        raise ValueError(
+            f"Could not harmonise plate/well names in metadata. Missing {missing}. "
+            f"Available columns: {cols_preview}"
+        )
+
+    return df
 
 
 def select_single_plate_well(df: pd.DataFrame, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
@@ -1258,7 +1327,10 @@ def main():
 
     # 3. Load and harmonise metadata
     meta_df = robust_read_csv(args.metadata_file, logger=logger)
-    meta_df = harmonise_metadata_columns(meta_df, logger, is_metadata_file=True)
+    # Use the caller’s explicit merge keys as first preference
+    preferred_keys = tuple([k.strip() for k in args.merge_keys.split(",")]) if args.merge_keys else None
+    meta_df = harmonise_metadata_columns(meta_df, logger=logger, is_metadata_file=True, preferred=preferred_keys)
+
     meta_df = clean_metadata_columns(meta_df, logger)
     logger.info(f"Shape meta_df: {meta_df.shape}")
 
