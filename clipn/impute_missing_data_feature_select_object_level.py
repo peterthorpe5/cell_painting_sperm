@@ -669,59 +669,118 @@ def normalise_to_dmso(df, feature_cols, metadata_col='cpd_type', dmso_label='dms
 
 def harmonise_column_names(df, candidates, target, logger):
     """
-    Harmonise column names in a DataFrame, renaming a single unambiguous candidate to the target if needed.
-    If multiple candidates are found, abort and force user to fix input.
+    Harmonise a column name to a canonical target, with defensive handling.
+
+    Steps
+    -----
+    1) De-duplicate the provided `candidates` list (order preserved).
+    2) Detect duplicate column *labels* in `df` and de-duplicate by keeping the
+       first occurrence (logs which labels were collapsed).
+    3) If `target` already exists, return immediately.
+    4) Find which candidate (if any) exists in `df` after de-duplication.
+       - If none: log a warning and return (df, None).
+       - If more than one *distinct* candidate exists: raise a clear error.
+       - If exactly one: rename it to `target`.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        Input DataFrame.
+        Input DataFrame whose columns may contain several variants of a name.
     candidates : list of str
-        Possible column names to look for.
+        Possible column names to look for (case-sensitive, order matters).
+        Duplicates in this list are ignored.
     target : str
-        Desired column name.
+        Desired canonical column name to enforce.
     logger : logging.Logger
-        Logger for messages.
+        Logger for diagnostic messages.
 
     Returns
     -------
-    tuple
-        (pandas.DataFrame with harmonised column name, str name of the harmonised column or None)
+    tuple[pandas.DataFrame, str | None]
+        The (possibly modified) DataFrame and the resolved column name
+        (the canonical `target`) or None if nothing matched.
 
     Raises
     ------
     ValueError
-        If multiple candidates for the column are found, or if a conflict exists with the target.
+        If multiple *distinct* candidate columns are present in `df`.
     """
-    found = [c for c in candidates if c in df.columns]
+    # 1) De-duplicate candidate strings while preserving order
+    cand_unique = list(dict.fromkeys([str(c) for c in candidates]))
+    if len(cand_unique) != len(candidates):
+        dup_in_candidates = [c for i, c in enumerate(candidates) if c in candidates[:i]]
+        logger.debug(
+            "Candidate list contained duplicates; collapsed these (kept first): %s",
+            sorted(set(dup_in_candidates))
+        )
+    logger.debug("Candidates (unique, ordered): %s", cand_unique)
+    logger.debug("Target: %s", target)
+
+    # 2) De-duplicate duplicate column labels in df (keep first)
+    dup_mask = df.columns.duplicated()
+    if dup_mask.any():
+        dup_labels = df.columns[dup_mask].unique().tolist()
+        before_cols = df.shape[1]
+        logger.warning(
+            "Duplicate column labels detected and will be de-duplicated by keeping the first occurrence: %s",
+            dup_labels
+        )
+        df = df.loc[:, ~df.columns.duplicated()]
+        logger.info("Column de-duplication: %d → %d columns.",
+                    before_cols, df.shape[1])
+    else:
+        logger.debug("No duplicate column labels found in DataFrame.")
+
+    # 3) If the canonical target already exists, prefer it outright
+    if target in df.columns:
+        logger.info("Target column '%s' already present; no rename needed.", target)
+        return df, target
+
+    # 4) Identify which (unique) candidates exist in the DataFrame
+    found = [c for c in cand_unique if c in df.columns]
+    logger.debug("Candidates present in DataFrame: %s", found)
+
     if len(found) == 0:
-        logger.warning(f"No candidate columns for '{target}' found in DataFrame: {candidates}")
+        logger.warning(
+            "No candidate columns for '%s' found in DataFrame. Tried: %s",
+            target, cand_unique
+        )
         return df, None
+
     if len(found) > 1:
+        # More than one *distinct* name present → genuine ambiguity
         logger.error(
-            f"Ambiguous candidates for '{target}' found: {found}. Please ensure only one exists and rerun."
+            "Ambiguous candidates for '%s' found in DataFrame: %s. "
+            "Please ensure only one exists and re-run.",
+            target, found
         )
         raise ValueError(
             f"Ambiguous candidates for '{target}' found: {found}. "
-            "Please ensure only one exists in your input file and rerun the script."
+            "Please ensure only one exists in your input file and re-run the script."
         )
+
+    # Exactly one candidate present: rename if needed
     chosen = found[0]
     if chosen == target:
-        logger.info(f"Target column '{target}' already present.")
+        logger.info("Chosen candidate equals target '%s'; no rename performed.", target)
         return df, target
-    # Do not rename if target already exists
+
     if target in df.columns:
+        # This branch is defensive; we already returned earlier if target existed.
         logger.error(
-            f"Target column '{target}' already exists alongside candidate '{chosen}'. "
-            "No renaming performed. Please resolve this conflict."
+            "Target '%s' already exists alongside candidate '%s'. "
+            "No renaming performed. Please resolve this conflict.",
+            target, chosen
         )
         raise ValueError(
             f"Target column '{target}' already exists alongside candidate '{chosen}'. "
             "Please resolve this conflict in your input file."
         )
-    logger.info(f"Renaming column '{chosen}' to '{target}'.")
+
+    logger.info("Renaming column '%s' to canonical '%s'.", chosen, target)
     df = df.rename(columns={chosen: target})
     return df, target
+
 
 
 
@@ -1165,6 +1224,29 @@ def infer_dtypes(filename, nrows=1000):
     return dtypes
 
 
+def _uniq(seq):
+    """
+    Return items from `seq` with order preserved and duplicates removed.
+
+    Parameters
+    ----------
+    seq : Iterable
+        Input sequence.
+
+    Returns
+    -------
+    list
+        De-duplicated list preserving first occurrence order.
+    """
+    seen = set()
+    out = []
+    for item in seq:
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+
 def standardise_metadata_columns(df, logger=None, dataset_name=None):
     """
     Standardise metadata columns (cpd_id, cpd_type, Library) in a DataFrame.
@@ -1353,17 +1435,25 @@ def main():
 
 
     # 2. Harmonise plate/well columns
-
-
     merge_keys = [k.strip() for k in args.merge_keys.split(",")]
-    plate_candidates = [merge_keys[0], "Plate", "plate", "Plate_Metadata", "Metadata_Plate", "Image_Metadata_Plate"]
-    well_candidates = [merge_keys[1], "Well", "well", "Well_Metadata", "Metadata_Well", "Image_Metadata_Well"]
+
+    plate_candidates = _uniq([
+        merge_keys[0],
+        "Plate", "plate", "Plate_Metadata", "Metadata_Plate", "Image_Metadata_Plate"
+    ])
+    well_candidates = _uniq([
+        merge_keys[1],
+        "Well", "well", "Well_Metadata", "Metadata_Well", "Image_Metadata_Well"
+    ])
+
     cp_df, plate_col = harmonise_column_names(cp_df, plate_candidates, "Plate_Metadata", logger)
-    cp_df, well_col = harmonise_column_names(cp_df, well_candidates, "Well_Metadata", logger)
+    cp_df, well_col  = harmonise_column_names(cp_df, well_candidates,  "Well_Metadata",  logger)
     if plate_col is None or well_col is None:
         logger.error("Could not harmonise plate/well column names in CellProfiler data.")
         sys.exit(1)
-    logger.info(f"CellProfiler: using plate column '{plate_col}', well column '{well_col}'.")
+    logger.info("CellProfiler: using plate column '%s', well column '%s'.", plate_col, well_col)
+
+
 
     # 3. Load and harmonise metadata
     meta_df = robust_read_csv(args.metadata_file, logger=logger)
