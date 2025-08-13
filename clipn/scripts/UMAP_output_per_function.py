@@ -49,6 +49,71 @@ import umap.umap_ as umap
 import plotly.express as px
 from sklearn.cluster import KMeans, AgglomerativeClustering
 import numpy as np
+import io
+import csv
+
+def read_table_auto(file_path):
+    """
+    Read a delimited text table with automatic delimiter detection.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to a CSV/TSV file.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with cleaned column names.
+
+    Notes
+    -----
+    - Uses pandas' engine-based inference (sep=None) first.
+    - Falls back from tab to comma if only one column is produced.
+    - Strips BOMs and surrounding whitespace on column names.
+    """
+    df = pd.read_csv(filepath_or_buffer=file_path, sep=None, engine="python")
+    if df.shape[1] == 1 and "," in df.columns[0]:
+        # Header got swallowed as one column → force comma
+        df = pd.read_csv(filepath_or_buffer=file_path, sep=",")
+    df.columns = [c.strip().lstrip("\ufeff") for c in df.columns]
+    return df
+
+
+def ensure_cpd_id(df):
+    """
+    Ensure a 'cpd_id' column exists by harmonising common synonyms.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame which should contain compound identifiers.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame guaranteed to have a 'cpd_id' column (string, stripped).
+
+    Raises
+    ------
+    ValueError
+        If no suitable identifier column is found.
+    """
+    rename_map = {
+        "Compound": "cpd_id",
+        "compound": "cpd_id",
+        "compound_id": "cpd_id",
+        "Compound ID": "cpd_id",
+        "cpdID": "cpd_id",
+        "name": "cpd_id",
+    }
+    df = df.rename(columns=rename_map)
+    if "cpd_id" not in df.columns:
+        raise ValueError("Could not find a 'cpd_id' column or a known synonym in compound metadata.")
+    df["cpd_id"] = df["cpd_id"].astype(str).str.strip()
+    return df
+
+
 
 def summarise_clusters(df, outdir, compound_columns):
     """
@@ -102,20 +167,25 @@ def run_umap_analysis(input_path, output_dir, args):
     print(f"[DEBUG] Input columns: {list(df.columns)}")
 
     if args.compound_metadata:
-        compound_meta = pd.read_csv(args.compound_metadata, sep='\t')
-        print(f"[DEBUG] Compound metadata columns before rename: {list(compound_meta.columns)}")
+        compound_meta = read_table_auto(file_path=args.compound_metadata)
+        print(f"[DEBUG] Compound metadata columns before harmonise: {list(compound_meta.columns)}")
 
-        if "Library" in df.columns and "library" in compound_meta.columns:
-            compound_meta = compound_meta.drop(columns=["library"])
-
+        # Keep your existing special-case rename, then harmonise identifiers
         if "publish own other" in compound_meta.columns:
             compound_meta = compound_meta.rename(columns={"publish own other": "published_other"})
 
-        df = pd.merge(df, compound_meta, on="cpd_id", how="left")
-        compound_columns = [col for col in compound_meta.columns if col not in ["cpd_id", "library"]]
+        compound_meta = ensure_cpd_id(df=compound_meta)
 
+        # Avoid duplicate lowercase/uppercase 'Library' clashes
+        if "Library" in df.columns and "library" in compound_meta.columns:
+            compound_meta = compound_meta.drop(columns=["library"])
+
+        df = pd.merge(left=df, right=compound_meta, on="cpd_id", how="left")
+        compound_columns = [c for c in compound_meta.columns if c not in ["cpd_id", "library"]]
         print(f"[DEBUG] Compound columns merged: {compound_columns}")
         print(f"[DEBUG] Data shape after merge: {df.shape}")
+
+
 
     latent_features = df[[col for col in df.columns if col.isdigit()]].copy()
     print(f"[INFO] Using {latent_features.shape[1]} numeric columns for UMAP:")
@@ -145,10 +215,17 @@ def run_umap_analysis(input_path, output_dir, args):
 
 
     if args.highlight_list:
-        highlight_set = set(c.upper() for c in args.highlight_list)
-        df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().isin(highlight_set)
+        highlight_set = {c.upper() for c in args.highlight_list}
+        name_cols = [c for c in ["cpd_id", "Compound", "compound_name"] if c in df.columns]
+        def _row_is_highlighted(row):
+            for col in name_cols:
+                if str(row[col]).upper() in highlight_set:
+                    return True
+            return False
+        df["is_highlighted"] = df.apply(func=_row_is_highlighted, axis=1)
     else:
         df["is_highlighted"] = df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper()) if args.highlight_prefix else False
+
 
     if "Library" not in df.columns and "library" in df.columns:
         df["Library"] = df["library"]

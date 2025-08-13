@@ -16,6 +16,15 @@ pip install -r requirements.txt
 
 then you may need to run this:  
 
+pip install --upgrade --no-deps \
+  torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2
+pip install --upgrade onnx==1.14.1 onnxruntime==1.16.3 onnxscript==0.1.0
+
+pip uninstall -y onnxscript
+pip install --upgrade onnx==1.14.1 onnxruntime==1.16.3
+
+
+
 conda install -y -c conda-forge --force-reinstall "numpy=1.26.*" "pandas=2.0.*"
 
 
