@@ -531,7 +531,7 @@ def parse_args() -> argparse.Namespace:
 
     # Column names
     parser.add_argument("--id_col", default="cpd_id", help="Identifier column name (default: cpd_id)")
-    parser.add_argument("--dataset_col", default="Dataset", help="Dataset column name (default: Dataset)")
+    parser.add_argument("--dataset_col", default="Library", help="Dataset column name (default: Dataset)")
     parser.add_argument("--type_col", default="cpd_type", help="Type/label column name (default: cpd_type)")
     parser.add_argument("--cluster_col", default="Cluster", help="Cluster label column name (default: Cluster)")
 
