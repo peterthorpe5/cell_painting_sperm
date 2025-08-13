@@ -43,7 +43,11 @@ def load_metadata(path):
     """
     if path and os.path.isfile(path):
         print(f"[INFO] Found compound metadata file: {path}")
-        meta = pd.read_csv(path, sep="\t")
+        try:
+            meta = pd.read_csv(path, sep=None, engine="python")  # auto-detect , or \t
+        except Exception:
+            meta = pd.read_csv(path)  # fallback (comma)
+        meta.columns = [c.strip() for c in meta.columns]
         return meta
     print("[WARNING] No compound metadata file found.")
     return None
@@ -160,6 +164,22 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
     nn_path = os.path.join(folder, "post_clipn", "post_analysis_script", "nearest_neighbours.tsv")
     umap_path = os.path.join(folder, "post_clipn", "UMAP_kNone", "cpd_type", "clipn_umap_coordinates_cosine_n15_d0.1.tsv")
     meta = load_metadata(metadata_file)
+    # --- normalise metadata ID column to 'cpd_id' ---
+    if meta is not None:
+        if "cpd_id" not in meta.columns:
+            for cand in [
+                "COMPOUND_NAME", "Compound", "compound", "compound_id",
+                "CPD_ID", "cpd", "Compound Name"
+            ]:
+                if cand in meta.columns:
+                    meta = meta.rename(columns={cand: "cpd_id"})
+                    break
+        if "cpd_id" in meta.columns:
+            meta["cpd_id"] = meta["cpd_id"].astype(str).str.upper().str.strip()
+        else:
+            print("[WARNING] Metadata has no cpd_id-like column; skipping metadata merge.")
+            meta = None
+
 
     nn_df = pd.read_csv(nn_path, sep="\t")
     umap_df = pd.read_csv(umap_path, sep="\t")
