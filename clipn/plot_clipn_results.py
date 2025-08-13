@@ -475,21 +475,32 @@ def build_topological_graph(
 
         # HTML (interactive) via KeplerMapper
         if interactive:
+            logger.info("Building interactive HTML visualisation with KeplerMapper.")
             try:
                 tooltips = _build_tooltips_array(df_meta=df_meta, tooltip_cols=tooltip_cols)
-                html = mapper.visualize(
+                tooltips = list(map(str, tooltips))  # ensure list[str], not ndarray/DataFrame
+
+                # KeplerMapper wants a 1-D color vector; use first lens component
+                color_vec = lens[:, 0] if getattr(lens, "ndim", 1) > 1 else lens
+
+                mapper.visualize(
                     graph,
                     path_html=str(html_path),
                     title="Topological graph (Mapper)",
-                    X=X.values,
+                    X=X.values if hasattr(X, "values") else np.asarray(X),
                     lens=lens,
-                    color_function=None,
+                    color_function=color_vec,
                     custom_tooltips=tooltips,
                 )
-                # mapper.visualize writes the HTML file; return value kept for completeness
                 logger.info("Saved interactive topology HTML to %s", html_path)
             except Exception as exc:
-                logger.warning("KeplerMapper HTML visualisation failed: %s", exc)
+                logger.warning("KeplerMapper HTML visualisation failed, falling back to PyVis: %s", exc)
+                _draw_graph_html_pyvis(
+                    nodes=nodes_df, edges=edges_df,
+                    output_html=html_path, logger=logger
+                )
+
+
         return
 
     # Fallback: k-NN graph
