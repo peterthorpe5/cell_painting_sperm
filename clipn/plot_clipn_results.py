@@ -421,11 +421,28 @@ def build_topological_graph(
                 }
             )
         edge_rows = []
-        for a, nbrs in graph["links"].items():
-            for b in nbrs:
-                if int(a) < int(b):
-                    edge_rows.append({"source": str(a), "target": str(b)})
+
         
+        # Deduplicate undirected edges using string node IDs
+        edge_keys = set()
+        # Nodes/edges TSV
+        node_rows = []
+        for nid, members in graph["nodes"].items():
+            members = list(members)
+            colour_val = None
+            if colour_by in df_meta.columns:
+                vals = df_meta.iloc[members][colour_by].astype(str)
+                if len(vals):
+                    colour_val = vals.value_counts().idxmax()
+            node_rows.append(
+                {
+                    "node_id": str(nid),
+                    "size": int(len(members)),
+                    "colour_value": colour_val if colour_val is not None else "",
+                    "members": ";".join(df_meta.iloc[members]["cpd_id"].astype(str).tolist()),
+                }
+            )
+
         # Deduplicate undirected edges using string node IDs
         edge_keys = set()
         for a, nbrs in graph["links"].items():
@@ -437,7 +454,6 @@ def build_topological_graph(
                 key = tuple(sorted((sa, sb)))  # canonical undirected edge
                 edge_keys.add(key)
 
-        # Keep only edges whose endpoints exist among the nodes we wrote
         valid_nodes = {str(nid) for nid in graph["nodes"].keys()}
         edge_rows = [
             {"source": s, "target": t}
@@ -445,12 +461,13 @@ def build_topological_graph(
             if (s in valid_nodes and t in valid_nodes)
         ]
 
-        logger.info("Mapper produced %d nodes and %d edges.", len(nodes_df), len(edge_rows))
-
         nodes_df = pd.DataFrame(node_rows)
         edges_df = pd.DataFrame(edge_rows)
+        logger.info("Mapper produced %d nodes and %d edges.", len(nodes_df), len(edges_df))
+
         write_tsv(df=nodes_df, path=nodes_path, logger=logger, index=False)
         write_tsv(df=edges_df, path=edges_path, logger=logger, index=False)
+
 
         # PDF (static)
         _draw_graph_pdf(nodes=nodes_df, edges=edges_df, output_pdf=pdf_path, logger=logger)
@@ -502,7 +519,6 @@ def build_topological_graph(
 
     _draw_graph_pdf(nodes=nodes_df, edges=edges_df, output_pdf=pdf_path, logger=logger)
 
-    interactive = True
     if interactive:
         _draw_graph_html_pyvis(nodes=nodes_df, edges=edges_df, output_html=html_path, logger=logger)
 
