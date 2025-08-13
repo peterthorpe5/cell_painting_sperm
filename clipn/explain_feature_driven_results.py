@@ -656,6 +656,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    queries = collect_query_ids(args.query_ids, args.query_file, logger)
+l   logger.info("Queries: %s", queries)
+
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     logger = setup_logger(output_dir=str(out_root))
