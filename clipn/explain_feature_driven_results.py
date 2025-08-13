@@ -531,19 +531,121 @@ def run_query_vs_neighbours(
 
 def load_feature_groups(*, feature_group_file: str, logger: logging.Logger) -> Dict[str, str]:
     """
-    Load feature->group mapping from CSV/TSV.
-
-    Parameters
-    ----------
-    feature_group_file : str
-        Path to mapping file with columns: feature, group.
-    logger : logging.Logger
-        Logger instance.
-
-    Returns
-    -------
-    Dict[str, str]
-        Mapping from feature name to group label.
+    Load feature->group mapping from CSV/TSV. Requires columns: feature, group.
     """
     df = read_table(path=feature_group_file)
-    need = {"feature",
+    need = {"feature", "group"}
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        raise ValueError(f"Feature group file is missing required columns: {missing}")
+    df = df.dropna(subset=["feature"]).copy()
+    df["feature"] = df["feature"].astype(str)
+    df["group"] = df["group"].astype(str)
+    mapping = dict(zip(df["feature"], df["group"]))
+    logger.info("Loaded feature groups: %d mappings.", len(mapping))
+    return mapping
+
+
+def write_top_enriched_depleted(*, stats: pd.DataFrame, out_dir: Path, top_n: int, logger: logging.Logger) -> None:
+    """
+    Save top enriched/depleted features by median difference (descending/ascending).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # guard for empty stats
+    if stats is None or stats.empty:
+        logger.warning("No per-feature stats to summarise in %s", out_dir)
+        return
+    enriched = stats.sort_values(["median_diff", "q"], ascending=[False, True]).head(top_n)
+    depleted = stats.sort_values(["median_diff", "q"], ascending=[True, True]).head(top_n)
+    write_tsv(df=enriched, path=out_dir / "top_enriched_features.tsv", logger=logger)
+    write_tsv(df=depleted, path=out_dir / "top_depleted_features.tsv", logger=logger)
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Feature attribution for CLIPn neighbourhoods.")
+    p.add_argument("--ungrouped_list", required=True,
+                   help="Either a single TSV/CSV of well-level features, or a manifest with a 'path' column.")
+    p.add_argument("--query_ids", required=True,
+                   help="Comma-separated query IDs OR a path to a text file (one ID per line).")
+    p.add_argument("--nn_file", default=None,
+                   help="Nearest-neighbour TSV/CSV with columns: cpd_id (or query_id), neighbour_id, [distance].")
+    p.add_argument("--output_dir", required=True, help="Output folder.")
+    p.add_argument("--test", choices=["mw", "ks"], default="mw", help="Two-sample test (default: mw).")
+    p.add_argument("--top_features", type=int, default=15, help="Top-N enriched/depleted features to save (default: 15).")
+    p.add_argument("--nn_per_query", type=int, default=10, help="Top-N neighbours per query (default: 10).")
+    p.add_argument("--feature_group_file", default=None,
+                   help="Optional TSV/CSV with columns: feature, group — to summarise by groups.")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    out_root = Path(args.output_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    logger = setup_logger(output_dir=str(out_root))
+
+    logger.info("Arguments: %s", vars(args))
+
+    # Load features (single table or manifest), keep numeric + cpd_id
+    df_raw = load_feature_manifest(list_or_single=args.ungrouped_list, logger=logger)
+    df_num, feature_cols = ensure_numeric_features(df=df_raw, logger=logger)
+
+    # Keep cpd_type if available (useful for background selection); safe-merge on index
+    if "cpd_type" in df_raw.columns and "cpd_type" not in df_num.columns:
+        try:
+            df_num = pd.concat([df_num, df_raw["cpd_type"]], axis=1)
+        except Exception:
+            # fallback: align by row count only if shapes match
+            if len(df_num) == len(df_raw):
+                df_num["cpd_type"] = df_raw["cpd_type"].values
+
+    # Optional groups
+    feature_group_map: Dict[str, str] = {}
+    if args.feature_group_file:
+        feature_group_map = load_feature_groups(feature_group_file=args.feature_group_file, logger=logger)
+
+    # Parse queries
+    queries = parse_query_ids(arg=args.query_ids)
+
+    for q in queries:
+        q_dir = out_root / q
+        q_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info("== Query: %s ==", q)
+        # Query vs background
+        stats = run_query_background(
+            df_num=df_num,
+            feature_cols=feature_cols,
+            query_id=q,
+            test=args.test,
+            logger=logger,
+        )
+        write_tsv(df=stats, path=q_dir / "query_vs_background_stats.tsv", logger=logger)
+        write_top_enriched_depleted(stats=stats, out_dir=q_dir, top_n=args.top_features, logger=logger)
+
+        # Group summaries (optional)
+        if feature_group_map:
+            grp = summarise_groups(stats_df=stats, feature_group_map=feature_group_map, top_n=20)
+            write_tsv(df=grp, path=q_dir / "group_summary.tsv", logger=logger)
+
+        # Per-neighbour comparisons (optional)
+        if args.nn_file:
+            try:
+                neighs = load_neighbours(nn_file=args.nn_file, query_id=q, n_top=args.nn_per_query, logger=logger)
+                run_query_vs_neighbours(
+                    df_num=df_num,
+                    feature_cols=feature_cols,
+                    query_id=q,
+                    neighbour_ids=neighs,
+                    test=args.test,
+                    out_dir=str(q_dir),
+                    logger=logger,
+                )
+            except Exception as e:
+                logger.warning("Skipping neighbour comparisons for %s: %s", q, e)
+
+    logger.info("Done.")
+
+
+if __name__ == "__main__":
+    main()
