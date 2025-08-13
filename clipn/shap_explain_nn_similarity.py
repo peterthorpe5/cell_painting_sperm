@@ -394,6 +394,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Explain NN similarity (SHAP) for Cell Painting.")
     parser.add_argument("--features", required=True, help="TSV of well-level features or file-of-files with 'path'.")
     parser.add_argument("--nn_file", required=True, help="Nearest-neighbours TSV.")
+    parser.add_argument(
+    "--query_ids",
+    nargs="+",
+    help="Alias for --query_id. Provide one or more IDs; names with spaces must be quoted."
+    )
+
     parser.add_argument("--query_id", required=False,
                         default="DDD02387619,DDD02948916,DDD02955130,DDD02958365",
                         help="Comma list or file with one ID per line.")
@@ -402,6 +408,9 @@ def main() -> None:
     parser.add_argument("--n_top_features", type=int, default=10, help="Top-N features to plot/report.")
     parser.add_argument("--log_file", default="shap_explain.log", help="Log filename (inside output_dir).")
     args = parser.parse_args()
+
+    if args.query_ids and not args.query_id:
+        args.query_id = ",".join(args.query_ids)
 
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.output_dir, args.log_file))
