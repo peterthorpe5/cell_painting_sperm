@@ -61,7 +61,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -272,13 +272,13 @@ def benjamini_hochberg(*, pvals: np.ndarray) -> np.ndarray:
     n = p.size
     order = np.argsort(p)
     ranks = np.arange(1, n + 1)
-    q = np.empty_like(p)
-    q[order] = p[order] * n / ranks
-    q = np.minimum.accumulate(q[order[::-1]])[::-1]
-    q = np.clip(q, 0, 1)
-    out = np.empty_like(q)
-    out[order] = q
-    return out
+    p_sorted = p[order]
+    q_sorted = p_sorted * n / ranks
+    q_sorted = np.minimum.accumulate(q_sorted[::-1])[::-1]
+    q_sorted = np.clip(q_sorted, 0.0, 1.0)
+    q = np.empty_like(q_sorted)
+    q[order] = q_sorted
+    return q
 
 
 def run_two_sample_test(*, a: np.ndarray, b: np.ndarray, test: str) -> float:
@@ -627,20 +627,21 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Feature attribution for CLIPn neighbourhoods.")
     p.add_argument("--ungrouped_list", required=True,
                    help="Either a single TSV/CSV of well-level features, or a manifest with a 'path' column.")
-  
-    parser.add_argument(
+
+    # Queries: repeated IDs and/or a file
+    p.add_argument(
         "--query_ids",
         nargs="+",
         default=None,
-        help=("One or more compound IDs (repeat the flag values). "
-            "Comma-separated tokens are also accepted. "
-            "For names with spaces, quote them or use --query_file.")
+        help=("One or more compound IDs (repeat the values). "
+              "Comma-separated tokens are also accepted. "
+              "For names with spaces, quote them or use --query_file.")
     )
-    parser.add_argument(
+    p.add_argument(
         "--query_file",
         default=None,
         help=("Optional txt/TSV/CSV listing query IDs. If a table, uses 'cpd_id' "
-            "column if present; otherwise the first column. Comments (#) and blank lines ignored.")
+              "column if present; otherwise the first column. Comments (#) and blank lines ignored.")
     )
 
     p.add_argument("--nn_file", default=None,
@@ -656,25 +657,25 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    queries = collect_query_ids(args.query_ids, args.query_file, logger)
-l   logger.info("Queries: %s", queries)
 
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     logger = setup_logger(output_dir=str(out_root))
-
     logger.info("Arguments: %s", vars(args))
+
+    # Collect queries (new unified logic)
+    queries = collect_query_ids(args.query_ids, args.query_file, logger)
+    logger.info("Queries: %s", queries)
 
     # Load features (single table or manifest), keep numeric + cpd_id
     df_raw = load_feature_manifest(list_or_single=args.ungrouped_list, logger=logger)
     df_num, feature_cols = ensure_numeric_features(df=df_raw, logger=logger)
 
-    # Keep cpd_type if available (useful for background selection); safe-merge on index
+    # Keep cpd_type if available (useful for background selection)
     if "cpd_type" in df_raw.columns and "cpd_type" not in df_num.columns:
         try:
             df_num = pd.concat([df_num, df_raw["cpd_type"]], axis=1)
         except Exception:
-            # fallback: align by row count only if shapes match
             if len(df_num) == len(df_raw):
                 df_num["cpd_type"] = df_raw["cpd_type"].values
 
@@ -682,9 +683,6 @@ l   logger.info("Queries: %s", queries)
     feature_group_map: Dict[str, str] = {}
     if args.feature_group_file:
         feature_group_map = load_feature_groups(feature_group_file=args.feature_group_file, logger=logger)
-
-    # Parse queries
-    queries = parse_query_ids(arg=args.query_ids)
 
     for q in queries:
         q_dir = out_root / q
@@ -724,6 +722,7 @@ l   logger.info("Queries: %s", queries)
                 logger.warning("Skipping neighbour comparisons for %s: %s", q, e)
 
     logger.info("Done.")
+
 
 
 if __name__ == "__main__":
