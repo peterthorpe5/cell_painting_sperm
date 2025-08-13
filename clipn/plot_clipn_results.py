@@ -425,6 +425,27 @@ def build_topological_graph(
             for b in nbrs:
                 if int(a) < int(b):
                     edge_rows.append({"source": str(a), "target": str(b)})
+        
+        # Deduplicate undirected edges using string node IDs
+        edge_keys = set()
+        for a, nbrs in graph["links"].items():
+            sa = str(a)
+            for b in nbrs:
+                sb = str(b)
+                if sa == sb:
+                    continue  # no self-loops
+                key = tuple(sorted((sa, sb)))  # canonical undirected edge
+                edge_keys.add(key)
+
+        # Keep only edges whose endpoints exist among the nodes we wrote
+        valid_nodes = {str(nid) for nid in graph["nodes"].keys()}
+        edge_rows = [
+            {"source": s, "target": t}
+            for (s, t) in sorted(edge_keys)
+            if (s in valid_nodes and t in valid_nodes)
+        ]
+
+        logger.info("Mapper produced %d nodes and %d edges.", len(nodes_df), len(edge_rows))
 
         nodes_df = pd.DataFrame(node_rows)
         edges_df = pd.DataFrame(edge_rows)
