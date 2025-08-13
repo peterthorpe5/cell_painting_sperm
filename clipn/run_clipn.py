@@ -55,11 +55,12 @@ os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 import re
 import numpy as np
 import pandas as pd
 import psutil
+import concurrent.futures
 import torch
 import torch.serialization
 from clipn.model import CLIPn
@@ -133,6 +134,23 @@ def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
     logger.info("Experiment Name: %s", experiment)
 
     return logger
+
+
+def configure_torch_performance(logger: logging.Logger) -> None:
+    """
+    Small runtime hints for speed.
+    - On GPU: enable better matmul + cuDNN autotune.
+    - On CPU: leave defaults (MKL/OpenBLAS already multithreaded).
+    """
+    try:
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")  # TF32/fast FP32 on Ampere+
+            torch.backends.cudnn.benchmark = True       # tune best conv algo for fixed shapes
+            logger.info("Torch perf: enabled high-precision matmul + cuDNN benchmark on GPU.")
+        else:
+            logger.info("Torch perf: CPU mode (no special tweaks).")
+    except Exception as exc:
+        logger.warning("Torch perf configuration skipped: %s", exc)
 
 
 def _register_clipn_for_pickle() -> None:
@@ -472,7 +490,7 @@ def load_single_dataset(
         If mandatory metadata columns are missing after standardisation.
     """
     delimiter = detect_csv_delimiter(path)
-    df = pd.read_csv(filepath_or_buffer=path, delimiter=delimiter, index_col=None)
+    df = _read_csv_fast(path, delimiter)
 
     logger.debug("[%s] Columns after initial load: %s", name, df.columns.tolist())
 
@@ -900,10 +918,19 @@ def merge_annotations(
         logger.warning("Annotation merging failed: %s", exc)
 
 
+def _read_csv_fast(path: str, delimiter: str) -> pd.DataFrame:
+    # Try pyarrow engine (fast); fall back to default
+    try:
+        return pd.read_csv(path, delimiter=delimiter, engine="pyarrow")
+    except Exception:
+        return pd.read_csv(path, delimiter=delimiter)
+
+
 def read_table_auto(path: str) -> pd.DataFrame:
     """Read CSV/TSV with automatic delimiter detection (prefers tab)."""
     sep = detect_csv_delimiter(path)
     return pd.read_csv(filepath_or_buffer=path, sep=sep)
+
 
 def clean_and_impute_features(
     df: pd.DataFrame,
@@ -1073,6 +1100,7 @@ def main(args: argparse.Namespace) -> None:
         Parsed command-line arguments.
     """
     logger = setup_logging(out_dir=args.out, experiment=args.experiment)
+    configure_torch_performance(logger)
     logger.info("Starting CLIPn integration pipeline")
     logger.info("PyTorch Version: %s", getattr(torch, "__version__", "unknown"))
 
@@ -1196,6 +1224,11 @@ def main(args: argparse.Namespace) -> None:
     )
     # Encode labels (cpd_id is explicitly not encoded)
     logger.info("Encoding categorical labels for CLIPn compatibility")
+    # Ensure key categoricals are strings so they get encoded → can be decoded later
+    for _col in ("cpd_type", "Library", "Plate_Metadata", "Well_Metadata"):
+        if _col in df_scaled_all.columns:
+            df_scaled_all.loc[:, _col] = df_scaled_all[_col].astype("string")
+
     df_encoded, encoders = encode_labels(df=df_scaled_all.copy(), logger=logger)
     log_memory_usage(logger, prefix="[After encoding] ")
 

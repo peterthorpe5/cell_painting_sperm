@@ -69,35 +69,35 @@ def read_table_auto(file_path: str) -> pd.DataFrame:
 
 def ensure_cpd_id(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ensure a 'cpd_id' column exists by harmonising common synonyms.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Input DataFrame which should contain compound identifiers.
-
-    Returns
-    -------
-    pandas.DataFrame
-        DataFrame guaranteed to have a 'cpd_id' column (string, stripped).
-
-    Raises
-    ------
-    ValueError
-        If no suitable identifier column is found.
+    Ensure a single string 'cpd_id' column exists.
+    - Deduplicates columns.
+    - If multiple cpd_id-like columns exist, coalesce to first non-null.
+    - Cast to string and strip whitespace.
     """
-    rename_map = {
-        "Compound": "cpd_id",
-        "compound": "cpd_id",
-        "compound_id": "cpd_id",
-        "Compound ID": "cpd_id",
-        "cpdID": "cpd_id",
-        "name": "cpd_id",
-    }
-    df = df.rename(columns=rename_map)
-    if "cpd_id" not in df.columns:
-        raise ValueError("Could not find a 'cpd_id' column or a known synonym in compound metadata.")
-    df["cpd_id"] = df["cpd_id"].astype(str).str.strip()
+    df = df.copy()
+
+    # 1) Drop duplicate column names globally (keep first)
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
+
+    # 2) Find candidate columns that could be the ID
+    candidates = [c for c in df.columns
+                  if c.lower() in {"cpd_id", "compound_id", "compound", "cpd"}]
+
+    if not candidates:
+        raise ValueError("No 'cpd_id'-like column found in metadata (looked for cpd_id/compound_id/compound/cpd).")
+
+    # 3) If more than one candidate, coalesce left→right (first non-null)
+    if len(candidates) > 1:
+        s = df[candidates].bfill(axis=1).iloc[:, 0]
+    else:
+        s = df[candidates[0]]
+        # If duplicate name slipped through and we got a DataFrame, take first col
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+
+    # 4) Finalise as clean string
+    df["cpd_id"] = s.astype(str).str.strip()
     return df
 
 
