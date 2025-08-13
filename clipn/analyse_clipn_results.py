@@ -506,7 +506,11 @@ def generate_network(
         for (a, b), w in unique_edges.items():
             net.add_edge(source=ids[a], to=ids[b], value=max(1.0, 1.0 / (w + 1e-6)))
         html_path = Path(output_dir) / "compound_similarity_network.html"
-        net.write_html(path=html_path)
+        # be robust to pyvis versions
+        try:
+            net.write_html(str(html_path))        # newish pyvis
+        except TypeError:
+            net.save_graph(str(html_path))        # older pyvis fallback
         logger.info("Interactive network visualisation saved to %s", html_path)
     except Exception as exc:
         logger.error("Failed to render network HTML: %s", exc)
@@ -531,7 +535,7 @@ def parse_args() -> argparse.Namespace:
 
     # Column names
     parser.add_argument("--id_col", default="cpd_id", help="Identifier column name (default: cpd_id)")
-    parser.add_argument("--dataset_col", default="Library", help="Dataset column name (default: Dataset)")
+    parser.add_argument("--dataset_col", default="Library", help="Dataset column name (default: Library)")
     parser.add_argument("--type_col", default="cpd_type", help="Type/label column name (default: cpd_type)")
     parser.add_argument("--cluster_col", default="Cluster", help="Cluster label column name (default: Cluster)")
 
@@ -562,6 +566,8 @@ def main() -> None:
     args = parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     logger = setup_logging(output_dir=args.output_dir, log_name="clipn_post_analysis")
+
+
 
     logger.info("Arguments: %s", vars(args))
     logger.info("Reading latent TSV: %s", args.latent_csv)
