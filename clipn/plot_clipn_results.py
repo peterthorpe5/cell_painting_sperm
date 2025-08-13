@@ -40,6 +40,24 @@ Outputs (all under --plots)
 - umap.pdf (+ umap_coords.tsv) if requested/available
 - phate.pdf (+ phate_coords.tsv) if requested/available
 - plot.log
+
+
+--mapper_lens: pca is fast & stable; umap can separate non-linear structure (slower).
+
+--mapper_n_cubes: number of bins across the lens; small data (~50 pts): 6–12; larger (1k+): 10–20.
+
+--mapper_overlap: 0.3–0.6; more overlap → more node connectivity (and potentially hairier graphs).
+
+--mapper_cluster: dbscan is fine; hdbscan gives nicer clusters if available.
+
+--mapper_eps (DBSCAN radius): if you get too many tiny nodes, increase eps; if one giant node, decrease eps.
+
+--mapper_min_samples: 2–10; higher = stricter clusters (fewer nodes).
+
+If you ever see 0 edges, try raising overlap or eps, or increasing --mapper_n_cubes.
+
+
+
 """
 
 from __future__ import annotations
@@ -403,26 +421,9 @@ def build_topological_graph(
             clusterer=clusterer,
         )
 
-        # Nodes/edges TSV
-        node_rows = []
-        for nid, members in graph["nodes"].items():
-            members = list(members)
-            colour_val = None
-            if colour_by in df_meta.columns:
-                vals = df_meta.iloc[members][colour_by].astype(str)
-                if len(vals):
-                    colour_val = vals.value_counts().idxmax()
-            node_rows.append(
-                {
-                    "node_id": str(nid),
-                    "size": int(len(members)),
-                    "colour_value": colour_val if colour_val is not None else "",
-                    "members": ";".join(df_meta.iloc[members]["cpd_id"].astype(str).tolist()),
-                }
-            )
-        edge_rows = []
 
-        
+        edge_rows = []
+       
         # Deduplicate undirected edges using string node IDs
         edge_keys = set()
         # Nodes/edges TSV
