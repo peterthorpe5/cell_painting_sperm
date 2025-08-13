@@ -501,6 +501,13 @@ def _draw_graph_pdf(*, nodes: pd.DataFrame, edges: pd.DataFrame, output_pdf: Pat
     logger : logging.Logger
         Logger instance.
     """
+    # Gracefully skip if nothing to draw
+    if nodes is None or nodes.empty or ("node_id" not in nodes.columns):
+        logger.warning("No topo nodes to draw; skipping PDF: %s", output_pdf)
+        return
+    if edges is None or ("source" not in edges.columns) or ("target" not in edges.columns):
+        logger.warning("No topo edges to draw; skipping PDF: %s", output_pdf)
+        return
     # Build adjacency
     node_ids = nodes["node_id"].tolist()
     id_to_ix = {nid: i for i, nid in enumerate(node_ids)}
