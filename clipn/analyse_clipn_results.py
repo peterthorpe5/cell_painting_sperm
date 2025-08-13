@@ -566,6 +566,22 @@ def main() -> None:
     logger.info("Arguments: %s", vars(args))
     logger.info("Reading latent TSV: %s", args.latent_csv)
     df = pd.read_csv(filepath_or_buffer=args.latent_csv, sep="\t")
+    # make dataset_col optional/fallback ---
+    if args.dataset_col not in latent_df.columns:
+        if "Library" in latent_df.columns:
+            latent_df[args.dataset_col] = latent_df["Library"].astype(str)
+            logger.warning(
+                "Missing dataset column '%s' in %s; using 'Library' as fallback.",
+                args.dataset_col, args.latent_csv,
+            )
+        else:
+            latent_df[args.dataset_col] = "all"
+            logger.warning(
+                "Missing dataset column '%s' in %s; creating constant 'all'.",
+                args.dataset_col, args.latent_csv,
+            )
+
+
 
     # Validate expected columns exist
     validate_columns(
