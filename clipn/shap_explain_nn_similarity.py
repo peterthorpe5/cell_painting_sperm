@@ -329,6 +329,13 @@ def run_shap(features_df: pd.DataFrame,
     if shap_arr.ndim != 2 or shap_arr.shape[1] != X.shape[1]:
         logger.error(f"SHAP shape {shap_arr.shape} incompatible with X {X.shape}.")
         return
+    
+    base_value = None
+    try:
+        ev = explainer.expected_value
+        base_value = ev[1] if isinstance(ev, (list, np.ndarray)) and len(np.ravel(ev)) >= 2 else ev
+    except Exception:
+        base_value = 0.0
 
     # Rank features by mean |SHAP|
     mean_abs = np.abs(shap_arr).mean(axis=0)
@@ -372,6 +379,7 @@ def run_shap(features_df: pd.DataFrame,
     plot_waterfall_for_median_query(X, shap_arr, feature_cols, features_df["target"],
                                     os.path.join(out_dir, f"{query_id}_shap_waterfall_query_median.pdf"),
                                     logger, max_display=n_top_features)
+    
 
     plot_heatmap(X, shap_arr, feature_cols,
                  os.path.join(out_dir, f"{query_id}_shap_heatmap.pdf"),
@@ -394,23 +402,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Explain NN similarity (SHAP) for Cell Painting.")
     parser.add_argument("--features", required=True, help="TSV of well-level features or file-of-files with 'path'.")
     parser.add_argument("--nn_file", required=True, help="Nearest-neighbours TSV.")
-    parser.add_argument(
-    "--query_ids",
-    nargs="+",
-    help="Alias for --query_id. Provide one or more IDs; names with spaces must be quoted."
-    )
 
-    parser.add_argument("--query_id", required=False,
-                        default="DDD02387619,DDD02948916,DDD02955130,DDD02958365",
-                        help="Comma list or file with one ID per line.")
+    parser.add_argument("--query_id", required=False, default=None,
+                    help="Comma list or file with one ID per line.")
+    parser.add_argument("--query_ids", nargs="+",
+                    help="Alias for --query_id. Provide one or more IDs; "
+                         "names with spaces must be quoted.")   #  default="DDD02387619,DDD02948916,DDD02955130,DDD02958365",
+
     parser.add_argument("--output_dir", required=True, help="Output directory.")
     parser.add_argument("--n_neighbors", type=int, default=5, help="Number of neighbours per query.")
     parser.add_argument("--n_top_features", type=int, default=10, help="Top-N features to plot/report.")
     parser.add_argument("--log_file", default="shap_explain.log", help="Log filename (inside output_dir).")
     args = parser.parse_args()
 
-    if args.query_ids and not args.query_id:
-        args.query_id = ",".join(args.query_ids)
+    # Fold --query_ids into --query_id
+    if args.query_ids:
+        merged = ",".join(args.query_ids)
+        args.query_id = merged if args.query_id in (None, "") else f"{args.query_id},{merged}"
+
+    if not args.query_id:
+        parser.error("Provide queries via --query_id (comma list or file) or --query_ids.")
+
+
 
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.output_dir, args.log_file))
@@ -429,8 +442,10 @@ def main() -> None:
         logger.info(f"=== Query: {q} ===")
         try:
             nn_ids = load_neighbours(args.nn_file, q, args.n_neighbors, logger)
-            ids = [q] + list(nn_ids)
-            subset = features_all[features_all["cpd_id"].astype(str).isin(ids)].copy()
+            ids_upper = {s.upper() for s in ([q] + list(nn_ids))}
+            subset = features_all[
+                features_all["cpd_id"].astype(str).str.upper().isin(ids_upper)].copy()
+
             if subset.empty:
                 logger.warning(f"No wells found for {q} and its NNs in feature table; skipping.")
                 continue
