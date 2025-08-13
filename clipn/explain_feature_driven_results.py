@@ -481,6 +481,68 @@ def run_query_background(
     return stats
 
 
+def _read_ids_from_file(path: str, logger: logging.Logger) -> List[str]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Query file not found: {path}")
+    # Try table first (detects , or \t); falls back to raw text lines
+    try:
+        df = pd.read_csv(path, sep=None, engine="python")
+        col = "cpd_id" if "cpd_id" in df.columns else df.columns[0]
+        vals = df[col].astype(str).tolist()
+    except Exception:
+        with open(path, "r", encoding="utf-8") as fh:
+            vals = [line.strip() for line in fh]
+    cleaned = []
+    for v in vals:
+        if not v or v.startswith("#"):
+            continue
+        # also split comma-separated items within cells/lines
+        parts = [p.strip() for p in v.split(",") if p.strip()]
+        cleaned.extend(parts if parts else [v])
+    out = sorted(set(s.upper() for s in cleaned if s))
+    logger.info("Loaded %d unique query IDs from file.", len(out))
+    return out
+
+
+def collect_query_ids(
+    inline_ids: Optional[List[str]],
+    query_file: Optional[str],
+    logger: logging.Logger
+) -> List[str]:
+    """
+    Accepts: - repeated --query_ids values (also tolerates comma-separated)
+             - or --query_file pointing to txt/CSV/TSV (col 'cpd_id' or first col)
+    Returns uppercased, deduplicated list.
+    """
+    ids: List[str] = []
+    if query_file:
+        ids.extend(_read_ids_from_file(query_file, logger))
+
+    if inline_ids:
+        # Expand any comma-separated tokens in inline arguments
+        expanded = []
+        for tok in inline_ids:
+            expanded.extend([p for p in (t.strip() for t in tok.split(",")) if p])
+        ids.extend(expanded)
+
+    ids = [s.strip().upper() for s in ids if s and not s.startswith("#")]
+    ids = sorted(set(ids))
+
+    if not ids:
+        raise ValueError("No query IDs provided. Use --query_ids (one or more), "
+                         "or --query_file pointing to a list/table.")
+
+    # Helpful hint for very short tokens that might be split words
+    maybe_split = [s for s in ids if len(s) <= 4]
+    if maybe_split and inline_ids and not query_file:
+        logger.warning(
+            "Some very short query tokens detected (%s). If any compound names contain spaces, "
+            "you must quote them or supply them in --query_file.",
+            ", ".join(maybe_split[:6]) + ("…" if len(maybe_split) > 6 else "")
+        )
+    return ids
+
+
 def run_query_vs_neighbours(
     *,
     df_num: pd.DataFrame,
@@ -565,8 +627,22 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Feature attribution for CLIPn neighbourhoods.")
     p.add_argument("--ungrouped_list", required=True,
                    help="Either a single TSV/CSV of well-level features, or a manifest with a 'path' column.")
-    p.add_argument("--query_ids", required=True,
-                   help="Comma-separated query IDs OR a path to a text file (one ID per line).")
+  
+    parser.add_argument(
+        "--query_ids",
+        nargs="+",
+        default=None,
+        help=("One or more compound IDs (repeat the flag values). "
+            "Comma-separated tokens are also accepted. "
+            "For names with spaces, quote them or use --query_file.")
+    )
+    parser.add_argument(
+        "--query_file",
+        default=None,
+        help=("Optional txt/TSV/CSV listing query IDs. If a table, uses 'cpd_id' "
+            "column if present; otherwise the first column. Comments (#) and blank lines ignored.")
+    )
+
     p.add_argument("--nn_file", default=None,
                    help="Nearest-neighbour TSV/CSV with columns: cpd_id (or query_id), neighbour_id, [distance].")
     p.add_argument("--output_dir", required=True, help="Output folder.")
