@@ -149,6 +149,11 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
 
     # Main latent+metadata table (TSV from run_clipn)
     df = pd.read_csv(filepath_or_buffer=input_path, sep="\t")
+    
+    # NORMALISE IDs EARLY
+    if "cpd_id" in df.columns:
+        df["cpd_id"] = df["cpd_id"].astype(str).str.upper().str.strip()
+        
     compound_columns: List[str] = []
 
     print(f"[DEBUG] Input data shape: {df.shape}")
@@ -164,6 +169,9 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
 
         compound_meta = ensure_cpd_id(df=compound_meta)
 
+        compound_meta["cpd_id"] = compound_meta["cpd_id"].astype(str).str.upper().str.strip()
+        compound_meta = compound_meta.drop_duplicates(subset=["cpd_id"])
+
         # Avoid duplicate lowercase/uppercase 'Library' clashes
         if "Library" in df.columns and "library" in compound_meta.columns:
             compound_meta = compound_meta.drop(columns=["library"])
@@ -178,6 +186,7 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
 
     # Detect latent feature columns robustly
     latent_cols = [c for c in df.columns if str(c).isdigit()]
+    df = df.drop_duplicates(subset=["cpd_id"] + latent_cols)
     latent_features = df[latent_cols].copy()
     n_lat = latent_features.shape[1]
     if n_lat < 2:
