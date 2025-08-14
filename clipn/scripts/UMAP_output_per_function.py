@@ -30,12 +30,10 @@ import matplotlib.pyplot as plt
 # Robust colormap import (supports older Matplotlib)
 try:
     from matplotlib import colormaps as _mpl_cmaps
-
     def _get_cmap(name: str):
         return _mpl_cmaps[name]
 except Exception:  # pragma: no cover
     import matplotlib.cm as cm
-
     def _get_cmap(name: str):
         return cm.get_cmap(name)
 
@@ -44,24 +42,12 @@ import umap.umap_ as umap
 from sklearn.cluster import AgglomerativeClustering, KMeans
 
 
+# ---------------- I/O helpers ----------------
+
 def read_table_auto(file_path: str) -> pd.DataFrame:
-    """
-    Read a delimited text table with automatic delimiter detection.
-
-    Parameters
-    ----------
-    file_path : str
-        Path to a CSV/TSV file.
-
-    Returns
-    -------
-    pandas.DataFrame
-        DataFrame with cleaned column names (BOM/whitespace stripped) and
-        correct delimiter even for comma-delimited CSVs.
-    """
+    """Read CSV/TSV with automatic delimiter detection and tidy headers."""
     df = pd.read_csv(filepath_or_buffer=file_path, sep=None, engine="python")
     if df.shape[1] == 1 and "," in df.columns[0]:
-        # Header swallowed as a single column -> enforce comma
         df = pd.read_csv(filepath_or_buffer=file_path, sep=",")
     df.columns = [c.strip().lstrip("\ufeff") for c in df.columns]
     return df
@@ -70,50 +56,37 @@ def read_table_auto(file_path: str) -> pd.DataFrame:
 def ensure_cpd_id(df: pd.DataFrame) -> pd.DataFrame:
     """
     Ensure a single string 'cpd_id' column exists.
-    - Deduplicates columns.
+    - Drop duplicate column names.
     - If multiple cpd_id-like columns exist, coalesce to first non-null.
     - Cast to string and strip whitespace.
     """
     df = df.copy()
 
-    # 1) Drop duplicate column names globally (keep first)
+    # Drop duplicate column names (keep first)
     if df.columns.duplicated().any():
         df = df.loc[:, ~df.columns.duplicated()]
 
-    # 2) Find candidate columns that could be the ID
+    # Find candidate ID columns
     candidates = [c for c in df.columns
                   if c.lower() in {"cpd_id", "compound_id", "compound", "cpd"}]
-
     if not candidates:
-        raise ValueError("No 'cpd_id'-like column found in metadata (looked for cpd_id/compound_id/compound/cpd).")
+        raise ValueError("No 'cpd_id'-like column found (cpd_id/compound_id/compound/cpd).")
 
-    # 3) If more than one candidate, coalesce left→right (first non-null)
     if len(candidates) > 1:
         s = df[candidates].bfill(axis=1).iloc[:, 0]
     else:
         s = df[candidates[0]]
-        # If duplicate name slipped through and we got a DataFrame, take first col
         if isinstance(s, pd.DataFrame):
             s = s.iloc[:, 0]
 
-    # 4) Finalise as clean string
     df["cpd_id"] = s.astype(str).str.strip()
     return df
 
 
-def summarise_clusters(df: pd.DataFrame, outdir: str, compound_columns: List[str]) -> None:
-    """
-    Summarise cluster composition by cpd_type, marker symbol, and extra metadata.
+# --------------- summaries -------------------
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame containing UMAP coordinates and cluster labels.
-    outdir : str
-        Directory to save cluster summary TSV files.
-    compound_columns : list of str
-        Additional compound annotation columns to summarise per cluster.
-    """
+def summarise_clusters(df: pd.DataFrame, outdir: str, compound_columns: List[str]) -> None:
+    """Summarise cluster composition by cpd_type, marker symbol, and extra metadata."""
     if "Cluster" not in df.columns or df["Cluster"].nunique(dropna=True) <= 1:
         return
 
@@ -121,7 +94,6 @@ def summarise_clusters(df: pd.DataFrame, outdir: str, compound_columns: List[str
         cpd_summary = df.groupby("Cluster", dropna=False)["cpd_type"].value_counts().unstack(fill_value=0)
         cpd_summary.to_csv(os.path.join(outdir, "cluster_summary_by_cpd_type.tsv"), sep="\t")
 
-    # Only produce marker symbol summary if you later add a 'marker_symbol' column to df
     if "marker_symbol" in df.columns:
         marker_summary = df.groupby("Cluster", dropna=False)["marker_symbol"].value_counts().unstack(fill_value=0)
         marker_summary.to_csv(os.path.join(outdir, "cluster_summary_by_marker_symbol.tsv"), sep="\t")
@@ -132,34 +104,27 @@ def summarise_clusters(df: pd.DataFrame, outdir: str, compound_columns: List[str
             func_summary.to_csv(os.path.join(outdir, f"cluster_summary_by_{col}.tsv"), sep="\t")
 
 
+# --------------- main analysis ---------------
+
 def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace) -> None:
     """
     Perform UMAP projection and optional clustering, save results and plots.
-
-    Parameters
-    ----------
-    input_path : str
-        Path to input latent space TSV file (with latent dims named '0','1',...).
-    output_dir : str
-        Directory where results will be saved.
-    args : argparse.Namespace
-        Parsed command-line arguments controlling UMAP, colouring, and metadata merge.
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Main latent+metadata table (TSV from run_clipn)
+    # Latent + metadata table (TSV from run_clipn)
     df = pd.read_csv(filepath_or_buffer=input_path, sep="\t")
-    
-    # NORMALISE IDs EARLY
+
+    # Normalize IDs EARLY (fixes “many points per compound” issue downstream)
     if "cpd_id" in df.columns:
         df["cpd_id"] = df["cpd_id"].astype(str).str.upper().str.strip()
-        
+
     compound_columns: List[str] = []
 
     print(f"[DEBUG] Input data shape: {df.shape}")
     print(f"[DEBUG] Input columns: {list(df.columns)}")
 
-    # Merge compound metadata if provided (CSV/TSV auto-detected)
+    # Optional metadata merge
     if args.compound_metadata:
         compound_meta = read_table_auto(file_path=args.compound_metadata)
         print(f"[DEBUG] Compound metadata columns before harmonise: {list(compound_meta.columns)}")
@@ -168,11 +133,10 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
             compound_meta = compound_meta.rename(columns={"publish own other": "published_other"})
 
         compound_meta = ensure_cpd_id(df=compound_meta)
-
         compound_meta["cpd_id"] = compound_meta["cpd_id"].astype(str).str.upper().str.strip()
         compound_meta = compound_meta.drop_duplicates(subset=["cpd_id"])
 
-        # Avoid duplicate lowercase/uppercase 'Library' clashes
+        # Avoid Library/library case clash
         if "Library" in df.columns and "library" in compound_meta.columns:
             compound_meta = compound_meta.drop(columns=["library"])
 
@@ -184,15 +148,21 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
         else:
             print("[WARN] 'cpd_id' not present in input table; skipping compound metadata merge.")
 
-    # Detect latent feature columns robustly
+    # Detect latent feature columns (named '0','1',...)
     latent_cols = [c for c in df.columns if str(c).isdigit()]
-    df = df.drop_duplicates(subset=["cpd_id"] + latent_cols)
+
+    # Ensure one row per compound+latent vector
+    if "cpd_id" in df.columns:
+        df = df.drop_duplicates(subset=["cpd_id"] + latent_cols)
+    else:
+        df = df.drop_duplicates(subset=latent_cols)
+
     latent_features = df[latent_cols].copy()
     n_lat = latent_features.shape[1]
     if n_lat < 2:
         raise ValueError(
-            f"No sufficient latent columns detected for UMAP. "
-            f"Found {n_lat}; expected >=2. Columns seen: {latent_cols}"
+            f"No sufficient latent columns detected for UMAP. Found {n_lat}; expected >=2. "
+            f"Columns seen: {latent_cols}"
         )
     print(f"[INFO] Using {n_lat} numeric columns for UMAP:")
     print(latent_features.columns.tolist())
@@ -215,33 +185,41 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
             clustering = AgglomerativeClustering(n_clusters=args.num_clusters, linkage="ward")
             df["Cluster"] = clustering.fit_predict(latent_umap)
         else:
-            kmeans = KMeans(n_clusters=args.num_clusters, random_state=42, n_init="auto")
+            # Compatibility: avoid n_init="auto"
+            kmeans = KMeans(n_clusters=args.num_clusters, random_state=42, n_init=10)
             df["Cluster"] = kmeans.fit_predict(latent_umap)
     else:
         df["Cluster"] = np.nan
 
-    # Highlighting logic
+    # Highlight rules
     if args.highlight_list:
         highlight_set = {str(c).upper() for c in args.highlight_list}
-        name_cols = [c for c in ["cpd_id", "Compound", "compound_name"] if c in df.columns]
+        name_cols = [c for c in ["cpd_id", "Compound", "compound_name", "COMPOUND_NAME"] if c in df.columns]
+
         def _row_is_highlighted(row) -> bool:
             for col in name_cols:
                 if str(row[col]).upper() in highlight_set:
                     return True
             return False
+
         df["is_highlighted"] = df.apply(func=_row_is_highlighted, axis=1) if name_cols else False
     else:
         df["is_highlighted"] = (
             df["cpd_id"].astype(str).str.upper().str.startswith(args.highlight_prefix.upper())
-            if "cpd_id" in df.columns and args.highlight_prefix
-            else False
+            if "cpd_id" in df.columns and args.highlight_prefix else False
         )
 
-    # Library normalisation and MCP marker flag
+    # Library normalization and MCP marker flag (diamond)
     if "Library" not in df.columns and "library" in df.columns:
         df["Library"] = df["library"]
     df["is_library_mcp"] = df.get("Library", pd.Series("", index=df.index)).astype(str).str.upper().str.contains("MCP")
     print(f"[DEBUG] MCP in Library (diamond shape): {df['is_library_mcp'].sum()}/{len(df)} entries")
+
+    # Precompute Plotly marker arrays so we control symbol/size precisely
+    df["marker_symbol"] = np.where(df["is_highlighted"], "star",
+                                   np.where(df["is_library_mcp"], "diamond", "circle"))
+    df["marker_size"] = np.where(df["is_highlighted"], 14, 6)
+    df["marker_line_width"] = np.where(df["is_highlighted"], 2, 0)
 
     colour_fields = args.colour_by if args.colour_by else [None]
 
@@ -250,28 +228,34 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
         label_folder = os.path.join(output_dir, label)
         os.makedirs(label_folder, exist_ok=True)
 
-        # Save UMAP coordinates
+        # Save full coordinates/metadata
         coord_filename = f"clipn_umap_coordinates_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"
         coords_file = os.path.join(label_folder, coord_filename)
         df.to_csv(coords_file, sep="\t", index=False)
 
-        # Static Matplotlib plot
+        # ---------- Static Matplotlib plot ----------
         plt.figure(figsize=(12, 8))
         if colour_col and colour_col in df.columns:
-            unique_vals = pd.unique(df[colour_col])
-            colour_map = {val: idx for idx, val in enumerate(unique_vals)}
-            colours = df[colour_col].map(colour_map)
+            # Discrete legend for categorical variables
+            cats = pd.Categorical(df[colour_col])
+            colours = cats.codes
             cmap = _get_cmap("tab10")
-        else:
-            colours = "grey"
-            cmap = None
+            plt.scatter(df["UMAP1"], df["UMAP2"], s=5, alpha=0.6, c=colours, cmap=cmap)
 
-        scatter = plt.scatter(df["UMAP1"], df["UMAP2"], s=5, alpha=0.6, c=colours, cmap=cmap)
+            from matplotlib.lines import Line2D
+            handles = [
+                Line2D([0], [0], marker='o', linestyle='',
+                       markerfacecolor=cmap(i % cmap.N), markeredgecolor='none',
+                       label=str(cat))
+                for i, cat in enumerate(cats.categories)
+            ]
+            plt.legend(handles=handles, title=colour_col, bbox_to_anchor=(1.02, 1), loc="upper left")
+        else:
+            plt.scatter(df["UMAP1"], df["UMAP2"], s=5, alpha=0.6, c="grey")
+
         plt.xlabel("UMAP 1")
         plt.ylabel("UMAP 2")
         plt.title(f"CLIPn UMAP coloured by {label}")
-        if colour_col and colour_col in df.columns:
-            plt.colorbar(scatter, label=label)  # continuous legend; adequate for quick-look
         plt.tight_layout()
 
         plot_filename = f"clipn_umap_plot_{label}_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.pdf"
@@ -279,7 +263,7 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
         plt.savefig(plot_path, dpi=300)
         plt.close()
 
-        # Interactive Plotly plot
+        # ---------- Interactive Plotly plot ----------
         base_hover = ["cpd_id", "cpd_type", "Library"]
         hover_cols = [col for col in base_hover + compound_columns if col in df.columns]
 
@@ -287,52 +271,47 @@ def run_umap_analysis(input_path: str, output_dir: str, args: argparse.Namespace
             df,
             x="UMAP1",
             y="UMAP2",
-            color=colour_col if (colour_col and colour_col in df.columns) else None,
+            color=(colour_col if (colour_col and colour_col in df.columns) else None),
             hover_data=hover_cols,
             title=f"CLIPn UMAP (Interactive, coloured by {label})",
             template="plotly_white",
+            text=("cpd_id" if args.add_labels and "cpd_id" in df.columns else None),
         )
-
-        # Markers: star for highlighted, diamond if Library contains MCP, else circle
-        # Plotly accepts sequence values for size/line.width/symbol
-        sizes = df["is_highlighted"].apply(lambda x: 14 if x else 6)
-        widths = df["is_highlighted"].apply(lambda x: 2 if x else 0)
-        symbols = df.apply(
-            lambda row: "star" if row["is_highlighted"]
-            else ("diamond" if row["is_library_mcp"] else "circle"),
-            axis=1,
-        )
-
+        # Apply per-point markers
         fig.update_traces(
             marker=dict(
-                size=sizes,
-                symbol=symbols,
-                line=dict(width=widths, color="black"),
+                symbol=df["marker_symbol"],
+                size=df["marker_size"],
+                line=dict(width=df["marker_line_width"], color="black"),
             )
         )
-
         if args.add_labels and "cpd_id" in df.columns:
-            fig.update_traces(text=df["cpd_id"], textposition="top center")
+            fig.update_traces(textposition="top center")
 
         html_filename = f"clipn_umap_plot_{label}_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.html"
         fig.write_html(os.path.join(label_folder, html_filename))
 
+        # Cluster summaries
         summarise_clusters(df, label_folder, compound_columns)
+
+        # Minimal coords export
+        cols = (["cpd_id"] if "cpd_id" in df.columns else []) + ["UMAP1", "UMAP2", "Cluster"]
+        if colour_col and colour_col in df.columns:
+            cols.append(colour_col)
+        coords_min = df[cols]
+        coords_min.to_csv(
+            os.path.join(label_folder, f"umap_coords_min_{args.umap_metric}_n{args.umap_n_neighbors}_d{args.umap_min_dist}.tsv"),
+            sep="\t", index=False
+        )
 
         print(f"Saved UMAP plot: {plot_path}")
         print(f"Saved interactive UMAP: {os.path.join(label_folder, html_filename)}")
         print(f"Saved coordinates: {coords_file}")
 
 
-def parse_args() -> argparse.Namespace:
-    """
-    Parse command-line arguments for UMAP plotting script.
+# --------------- CLI ------------------------
 
-    Returns
-    -------
-    argparse.Namespace
-        Parsed arguments object.
-    """
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flexible UMAP Projection for CLIPn Latent Data")
     parser.add_argument("--input", required=True, help="Path to input TSV with latent + metadata")
     parser.add_argument("--output_dir", required=True, help="Directory to save UMAP plot and coordinates")
@@ -357,11 +336,6 @@ def parse_args() -> argparse.Namespace:
             "MCP05",
             "DDD02387619",
             "DDD02454019",
-            "DDD02591200",
-            "DDD02591362",
-            "DDD02941115",
-            "DDD02941193",
-            "DDD02947912",
             "DDD02947919",
             "DDD02948915",
             "DDD02948916",
