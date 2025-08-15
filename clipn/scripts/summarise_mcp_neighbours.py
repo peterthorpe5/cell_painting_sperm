@@ -126,7 +126,7 @@ def find_nearest_from_nn(df, target_id, top_n, max_dist=None):
         print(f"[WARNING] Target compound '{target_id}' not found in nearest neighbour data")
         return pd.DataFrame()
     if max_dist is not None:
-    target_rows = target_rows[target_rows["distance"] <= max_dist]
+        target_rows = target_rows[target_rows["distance"] <= max_dist]
 
     # sort by distance and keep one row per neighbour compound
     target_rows = target_rows.sort_values("distance", ascending=True)
@@ -187,14 +187,11 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
                     break
         if "cpd_id" in meta.columns:
             meta["cpd_id"] = meta["cpd_id"].astype(str).str.upper().str.strip()
-        # Ensure compound-level metadata to avoid join fan-out
-        if meta is not None:
+            # Ensure compound-level metadata to avoid join fan-out
             meta = meta.drop_duplicates(subset=["cpd_id"])
-
         else:
             print("[WARNING] Metadata has no cpd_id-like column; skipping metadata merge.")
             meta = None
-        
 
 
     nn_df = pd.read_csv(nn_path, sep="\t")
