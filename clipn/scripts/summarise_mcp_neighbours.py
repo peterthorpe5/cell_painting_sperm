@@ -85,11 +85,17 @@ def find_nearest_umap(df, target_id, top_n, max_dist=None):
     df["distance_metric_UMAP"] = dists
     if max_dist is not None:
         df = df[df["distance_metric_UMAP"] <= max_dist]
-    nearest = df.sort_values("distance_metric_UMAP").iloc[1:top_n + 1]  # skip self
+
+    # sort by distance then keep one row per compound
+    df = df.sort_values("distance_metric_UMAP")
+    df = df.drop_duplicates(subset=["cpd_id"], keep="first")
+    # drop self explicitly, then take top-N unique compounds
+    nearest = df[df["cpd_id"].str.upper() != target_id.upper()].head(top_n).copy()
     nearest["source"] = "UMAP"
     nearest = nearest.rename(columns={"cpd_id": "nearest_cpd_id"})
     nearest["cpd_id"] = target_id.upper()
     return nearest[["cpd_id", "nearest_cpd_id", "distance_metric_UMAP", "source"]]
+
 
 
 def find_nearest_from_nn(df, target_id, top_n, max_dist=None):
@@ -120,8 +126,13 @@ def find_nearest_from_nn(df, target_id, top_n, max_dist=None):
         print(f"[WARNING] Target compound '{target_id}' not found in nearest neighbour data")
         return pd.DataFrame()
     if max_dist is not None:
-        target_rows = target_rows[target_rows["distance"] <= max_dist]
-    top_hits = target_rows.sort_values("distance", ascending=True).head(top_n)
+    target_rows = target_rows[target_rows["distance"] <= max_dist]
+
+    # sort by distance and keep one row per neighbour compound
+    target_rows = target_rows.sort_values("distance", ascending=True)
+    target_rows = target_rows.drop_duplicates(subset=["neighbour_id"], keep="first")
+
+    top_hits = target_rows.head(top_n).copy()
     top_hits["source"] = "NN"
     top_hits = top_hits.rename(columns={"neighbour_id": "nearest_cpd_id", "distance": "distance_metric_NN"})
     return top_hits[["cpd_id", "nearest_cpd_id", "distance_metric_NN", "source"]]
@@ -176,9 +187,14 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
                     break
         if "cpd_id" in meta.columns:
             meta["cpd_id"] = meta["cpd_id"].astype(str).str.upper().str.strip()
+        # Ensure compound-level metadata to avoid join fan-out
+        if meta is not None:
+            meta = meta.drop_duplicates(subset=["cpd_id"])
+
         else:
             print("[WARNING] Metadata has no cpd_id-like column; skipping metadata merge.")
             meta = None
+        
 
 
     nn_df = pd.read_csv(nn_path, sep="\t")
@@ -198,12 +214,16 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
         top_umap = find_nearest_umap(umap_df, target_upper, top_n, max_dist=max_dist)
 
         combined = pd.concat([top_nn, top_umap], ignore_index=True)
+        # keep unique neighbour per source to avoid accidental duplicates
+        combined = combined.drop_duplicates(subset=["cpd_id", "nearest_cpd_id", "source"], keep="first")
+
         if meta is not None and not combined.empty:
             combined = combined.merge(meta, left_on="nearest_cpd_id", right_on="cpd_id", how="left", suffixes=("", "_meta"))
             combined.drop(columns=["cpd_id_meta"], inplace=True, errors="ignore")
 
         if extra_meta is not None and not combined.empty:
             combined = combined.merge(extra_meta, left_on="nearest_cpd_id", right_on="COMPOUND_NAME", how="left", suffixes=("", "_extra"))
+
 
         all_summaries.append(combined)
 
