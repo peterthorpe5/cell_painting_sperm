@@ -1807,11 +1807,17 @@ def main():
         # Apply variance threshold filter
         # This will also generate a PDF with variance diagnostics
         filtered_var = variance_threshold_selector(
-                                            data=fs_df[feature_cols],
-                                            threshold=args.variance_threshold,
-                                            pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics.pdf",
-                                            title="Variance diagnostics (post-normalisation)",
-                                            log_x=False)
+                                data=fs_df[feature_cols],
+                                threshold=args.variance_threshold,
+                                pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics.pdf",
+                                log_pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics_log.pdf",
+                                title="Variance diagnostics (pre-filter, post-normalisation)",
+                                bins=None,            # let it choose automatically
+                                bin_scale=3.0,        # triple the base heuristic
+                                max_bins=240,         # sensible cap
+                                log_sorted_x=False    # set True to log rank on the sorted plot
+                            )
+
         logger.info("Feature selection summary: start=%d → after variance=%d",
                     len(feature_cols), filtered_var.shape[1]
 )

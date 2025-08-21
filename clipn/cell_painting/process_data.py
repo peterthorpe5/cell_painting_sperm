@@ -172,63 +172,74 @@ def optimise_clipn(X, y, n_trials=40):
     return study.best_trial.params
 
 
+
+from typing import Optional
+
 def variance_threshold_selector(
-    data: pd.DataFrame,
     *,
+    data: pd.DataFrame,
     threshold: float = 0.05,
     pdf_path: Optional[str] = None,
+    log_pdf_path: Optional[str] = None,
     title: Optional[str] = None,
     log_x: bool = False,
-    bins: Optional[int] = None
+    bins: Optional[int] = None,
+    bin_scale: float = 3.0,
+    max_bins: Optional[int] = 240,
+    log_sorted_x: bool = False
 ) -> pd.DataFrame:
     """
-    Select features based on a variance threshold and optionally emit a
-    diagnostic PDF illustrating the variance distribution and threshold.
+    Select features by variance threshold and optionally emit diagnostics PDFs.
+
+    Behaviour
+    ---------
+    - Returns columns whose population variance (ddof=0) is strictly greater
+      than ``threshold`` (matches scikit-learn's VarianceThreshold).
+    - If ``pdf_path`` is provided, writes a two-page linear-scale PDF:
+        1) Histogram of variances with threshold marked.
+        2) Sorted variances with a horizontal threshold line.
+    - If ``log_pdf_path`` is provided, writes a two-page log-scale PDF:
+        1) Histogram of log10(variance) with a log-scaled y-axis (counts).
+           The threshold line is drawn at log10(threshold) when threshold > 0.
+        2) Sorted variances with a log10 y-axis; optionally use a log10 x-axis
+           for the rank if ``log_sorted_x=True``.
 
     Parameters
     ----------
     data : pandas.DataFrame
-        Input feature matrix. Non-numeric columns (if any) are ignored for
-        variance calculation and filtering.
+        Input feature matrix. Non-numeric columns are ignored for variance
+        calculation and filtering.
     threshold : float, optional
-        Keep features with variance strictly greater than this value.
-        Default is 0.05.
+        Keep features with variance strictly greater than this value. Default 0.05.
     pdf_path : str or None, optional
-        If provided, write a PDF with:
-          - Page 1: Histogram of feature variances with the threshold marked.
-          - Page 2: Sorted variances with a horizontal threshold line.
-        The PDF is written only when this is not None.
+        Output path for the linear-scale diagnostics PDF.
+    log_pdf_path : str or None, optional
+        Output path for the log-scale diagnostics PDF (see Behaviour).
     title : str or None, optional
-        Optional title used on the plots. If None, a default is used.
+        Optional title used on plots; a default is used if None.
     log_x : bool, optional
-        If True, plot the histogram on a log10 variance axis (helps when many
-        features have very small variances). Default is False.
+        For the linear PDF only: plot histogram on log10(variance) (x) instead
+        of raw variance. Default False.
     bins : int or None, optional
-        Number of bins for the histogram. If None, a data-dependent default is
-        chosen.
+        If set, use this exact bin count for histograms. If None, choose
+        automatically and scale by ``bin_scale`` with an upper cap ``max_bins``.
+    bin_scale : float, optional
+        Multiplier for the automatic bin choice. Default 3.0.
+    max_bins : int or None, optional
+        Maximum number of bins when auto-choosing. Default 240.
+    log_sorted_x : bool, optional
+        Apply log10 scale to the rank axis on the log-scale sorted plot.
+        Default False.
 
     Returns
     -------
     pandas.DataFrame
-        DataFrame containing only features with variance greater than
-        ``threshold``. Column order is preserved for the kept features.
+        Columns with variance greater than ``threshold`` (order preserved).
 
     Notes
     -----
-    - Variances for the diagnostic plots are computed with ``ddof=0`` (population
-      variance) to match scikit-learn's ``VarianceThreshold`` behaviour.
-    - The selector itself is performed by ``VarianceThreshold(threshold)`` on the
-      numeric subset of ``data`` cast to float32.
-
-    Examples
-    --------
-    >>> filtered = variance_threshold_selector(
-    ...     data=fs_df[feature_cols],
-    ...     threshold=0.05,
-    ...     pdf_path="variance_diagnostics.pdf",
-    ...     title="Variance diagnostics (post-normalisation)",
-    ...     log_x=False
-    ... )
+    - Variances for plotting use ddof=0 (population variance) to match the
+      selector. The selection itself is performed via VarianceThreshold.
     """
     import os
     import logging
@@ -245,104 +256,156 @@ def variance_threshold_selector(
     if X.shape[1] == 0:
         raise ValueError("No numeric columns found for variance selection.")
 
-    # --- Selection using scikit-learn (matches your existing behaviour) ---
+    # Selection
     selector = VarianceThreshold(threshold=threshold)
     mask = selector.fit(X).get_support()
     kept_cols = X.columns[mask]
     result = X.loc[:, kept_cols]
 
-    # --- Optional diagnostics PDF ---
+    # Common stats (pre-filter, so plots show the full set)
+    variances = X.var(axis=0, ddof=0).astype(np.float64)
+    n_total = variances.size
+    n_kept = int(mask.sum())
+    n_dropped = int(n_total - n_kept)
+    pct_kept = 100.0 * n_kept / max(n_total, 1)
+    pct_drop = 100.0 * n_dropped / max(n_total, 1)
+
+    def _auto_bins(n_features: int) -> int:
+        base = min(80, max(12, int(np.sqrt(n_features) * 2)))
+        scaled = max(1, int(round(base * bin_scale)))
+        return min(scaled, max_bins) if max_bins is not None else scaled
+
+    # --------------------------
+    # Linear-scale diagnostics
+    # --------------------------
     if pdf_path is not None:
-        # Create parent directory if needed
-        parent = os.path.dirname(pdf_path) or "."
-        os.makedirs(parent, exist_ok=True)
-
-        variances = X.var(axis=0, ddof=0).astype(np.float64)  # match VarianceThreshold
-        n_total = variances.size
-        n_kept = int(mask.sum())
-        n_dropped = int(n_total - n_kept)
-        pct_kept = 100.0 * n_kept / max(n_total, 1)
-        pct_drop = 100.0 * n_dropped / max(n_total, 1)
-
+        os.makedirs(os.path.dirname(pdf_path) or ".", exist_ok=True)
+        vals = variances.values
         fig_title = title or "Feature variance distribution"
-        bin_count = bins if bins is not None else min(80, max(12, int(np.sqrt(n_total) * 2)))
+        bin_count = int(bins) if bins is not None else _auto_bins(n_total)
 
         with PdfPages(pdf_path) as pdf:
-            # Page 1: Histogram
+            # Page 1: histogram (linear or log-x if log_x=True)
             fig, ax = plt.subplots(figsize=(8, 5))
-            vals = variances.values
-
             if log_x:
-                # Avoid non-positive values on log scale
                 safe = vals[vals > 0]
                 if safe.size == 0:
-                    ax.text(
-                        0.5, 0.5,
-                        "All variances ≤ 0; cannot plot log10 histogram.",
-                        ha="center", va="center", transform=ax.transAxes
-                    )
+                    ax.text(0.5, 0.5, "All variances ≤ 0; cannot plot log10 histogram.",
+                            ha="center", va="center", transform=ax.transAxes)
                     ax.set_xlabel("log10(variance)")
                     ax.set_ylabel("Number of features")
                 else:
                     ax.hist(np.log10(safe), bins=bin_count, edgecolor="black", alpha=0.75)
                     ax.set_xlabel("log10(variance)")
-                    # Threshold marker on log scale (only if threshold > 0)
                     if threshold > 0:
-                        ax.axvline(x=np.log10(threshold), linestyle="--", linewidth=1.5)
-                        ax.text(
-                            np.log10(threshold), ax.get_ylim()[1] * 0.95,
-                            f"threshold = {threshold:g}",
-                            rotation=90, va="top", ha="right"
-                        )
+                        ax.axvline(np.log10(threshold), linestyle="--", linewidth=1.5)
+                        ax.text(np.log10(threshold), ax.get_ylim()[1] * 0.95,
+                                f"threshold = {threshold:g}", rotation=90, va="top", ha="right")
             else:
                 ax.hist(vals, bins=bin_count, edgecolor="black", alpha=0.75)
                 ax.set_xlabel("Variance")
-                ax.axvline(x=threshold, linestyle="--", linewidth=1.5)
-                ax.text(
-                    threshold, ax.get_ylim()[1] * 0.95,
-                    f"threshold = {threshold:g}",
-                    rotation=90, va="top", ha="right"
-                )
+                ax.axvline(threshold, linestyle="--", linewidth=1.5)
+                ax.text(threshold, ax.get_ylim()[1] * 0.95,
+                        f"threshold = {threshold:g}", rotation=90, va="top", ha="right")
 
             ax.set_ylabel("Number of features")
             ax.set_title(fig_title)
-            summary_txt = (
-                f"Features: {n_total:,}\n"
-                f"Kept (> {threshold:g}): {n_kept:,} ({pct_kept:.1f}%)\n"
-                f"Dropped (≤ {threshold:g}): {n_dropped:,} ({pct_drop:.1f}%)"
-            )
             ax.annotate(
-                summary_txt, xy=(0.98, 0.98), xycoords="axes fraction",
-                xytext=(-5, -5), textcoords="offset points",
-                ha="right", va="top",
+                f"Features: {n_total:,}\nKept (> {threshold:g}): {n_kept:,} ({pct_kept:.1f}%)\n"
+                f"Dropped (≤ {threshold:g}): {n_dropped:,} ({pct_drop:.1f}%)\nBins: {bin_count}",
+                xy=(0.98, 0.98), xycoords="axes fraction", xytext=(-5, -5),
+                textcoords="offset points", ha="right", va="top",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="grey", alpha=0.9)
             )
             pdf.savefig(fig)
             plt.close(fig)
 
-            # Page 2: Sorted variances with threshold line
+            # Page 2: sorted variances (linear y)
             fig2, ax2 = plt.subplots(figsize=(8, 5))
             sorted_vals = np.sort(vals)
             ax2.plot(sorted_vals, linewidth=1.25)
-            ax2.axhline(y=threshold, linestyle="--", linewidth=1.5)
+            ax2.axhline(threshold, linestyle="--", linewidth=1.5)
             ax2.set_xlabel("Feature rank (sorted by variance)")
             ax2.set_ylabel("Variance")
             ax2.set_title(f"{fig_title} (sorted)")
-            ax2.text(
-                x=len(sorted_vals) * 0.99, y=threshold,
-                s=f"threshold = {threshold:g}",
-                ha="right", va="bottom"
-            )
+            ax2.text(x=len(sorted_vals) * 0.99, y=threshold,
+                     s=f"threshold = {threshold:g}", ha="right", va="bottom")
             pdf.savefig(fig2)
             plt.close(fig2)
 
         logger.info(
-            "Variance diagnostics written to %s (kept %d / %d, %.1f%%).",
-            pdf_path, n_kept, n_total, pct_kept
+            "Variance diagnostics (linear) → %s (kept %d / %d, %.1f%%; bins=%d).",
+            pdf_path, n_kept, n_total, pct_kept, bin_count
+        )
+
+    # --------------------------
+    # Log-scale diagnostics
+    # --------------------------
+    if log_pdf_path is not None:
+        os.makedirs(os.path.dirname(log_pdf_path) or ".", exist_ok=True)
+        vals = variances.values
+        fig_title = (title or "Feature variance distribution") + " [log scales]"
+        bin_count = int(bins) if bins is not None else _auto_bins(n_total)
+
+        with PdfPages(log_pdf_path) as pdf:
+            # Page 1: histogram on log10(variance), y on log scale
+            fig, ax = plt.subplots(figsize=(8, 5))
+            safe = vals[vals > 0]
+            if safe.size == 0:
+                ax.text(0.5, 0.5, "All variances ≤ 0; cannot plot log10 histogram.",
+                        ha="center", va="center", transform=ax.transAxes)
+                ax.set_xlabel("log10(variance)")
+                ax.set_ylabel("Number of features (log scale)")
+            else:
+                counts, edges, _ = ax.hist(
+                    np.log10(safe), bins=bin_count, edgecolor="black", alpha=0.75
+                )
+                ax.set_yscale("log")  # log(counts)
+                ax.set_xlabel("log10(variance)")
+                ax.set_ylabel("Number of features (log scale)")
+                if threshold > 0:
+                    thr_log = np.log10(threshold)
+                    ax.axvline(thr_log, linestyle="--", linewidth=1.5)
+                    ax.text(thr_log, ax.get_ylim()[1],
+                            f"threshold = {threshold:g}",
+                            rotation=90, va="top", ha="right")
+
+            ax.set_title(fig_title)
+            ax.annotate(
+                f"Features: {n_total:,}\nKept (> {threshold:g}): {n_kept:,} ({pct_kept:.1f}%)\n"
+                f"Dropped (≤ {threshold:g}): {n_dropped:,} ({pct_drop:.1f}%)\nBins: {bin_count}",
+                xy=(0.98, 0.98), xycoords="axes fraction", xytext=(-5, -5),
+                textcoords="offset points", ha="right", va="top",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="grey", alpha=0.9)
+            )
+            pdf.savefig(fig)
+            plt.close(fig)
+
+            # Page 2: sorted variances with log10 y-axis; optional log x-axis
+            fig2, ax2 = plt.subplots(figsize=(8, 5))
+            sorted_vals = np.sort(vals)
+            ax2.plot(sorted_vals, linewidth=1.25)
+            ax2.set_yscale("log")
+            ax2.set_ylabel("Variance (log scale)")
+            if log_sorted_x:
+                ax2.set_xscale("log")
+                ax2.set_xlabel("Feature rank (log scale)")
+            else:
+                ax2.set_xlabel("Feature rank (sorted by variance)")
+            if threshold > 0:
+                ax2.axhline(threshold, linestyle="--", linewidth=1.5)
+                ax2.text(x=ax2.get_xlim()[1], y=threshold,
+                         s=f"threshold = {threshold:g}", ha="right", va="bottom")
+            ax2.set_title(f"{fig_title} (sorted)")
+            pdf.savefig(fig2)
+            plt.close(fig2)
+
+        logger.info(
+            "Variance diagnostics (log) → %s (kept %d / %d, %.1f%%; bins=%d; log_sorted_x=%s).",
+            log_pdf_path, n_kept, n_total, pct_kept, bin_count, str(log_sorted_x)
         )
 
     return result
-
 
 
 
