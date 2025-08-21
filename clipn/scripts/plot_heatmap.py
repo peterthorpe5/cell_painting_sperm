@@ -401,8 +401,13 @@ def draw_heatmap(
     logger: logging.Logger,
     cmap: str,
     vcenter: Optional[float],
+    row_Z: Optional[np.ndarray],
+    col_Z: Optional[np.ndarray],
+    show_dendrograms: bool,
+    dendro_width: float,
+    dendro_height: float,
 ) -> None:
-    """Render a heatmap with optional row-side categorical colour bars.
+    """Render a heatmap with optional dendrograms and row-side categorical colour bars.
 
     Parameters
     ----------
@@ -416,67 +421,137 @@ def draw_heatmap(
         Optional row annotations (categorical) with index aligned to X rows.
     out_pdf : pathlib.Path
         Output path for the PDF image.
-    out_png : pathlib.Path
-        Output path for the PNG image.
+    out_png : pathlib.Path | None
+        Output path for the PNG image, if requested.
     title : str
         Title for the figure.
     logger : logging.Logger
         Logger instance.
+    cmap : str
+        Matplotlib colour map name (e.g., 'bwr').
+    vcenter : float | None
+        Centre value for diverging colour map; None disables centring.
+    row_Z : numpy.ndarray | None
+        Linkage matrix for rows (SciPy). Required to draw row dendrograms.
+    col_Z : numpy.ndarray | None
+        Linkage matrix for columns (SciPy). Required to draw column dendrograms.
+    show_dendrograms : bool
+        Whether to draw dendrograms at left (rows) and top (columns).
+    dendro_width : float
+        Width in inches allocated to the left dendrogram.
+    dendro_height : float
+        Height in inches allocated to the top dendrogram.
     """
     n_rows, n_cols = X.shape
 
-    # Dynamic figure size with sensible caps
-    width = max(6.0, min(0.12 * n_cols + 2.0, 22.0))
-    height = max(6.0, min(0.18 * n_rows + 2.0, 28.0))
+    # Dynamic figure size with sensible caps for the heatmap panel
+    heat_w = max(6.0, min(0.12 * n_cols + 2.0, 22.0))
+    heat_h = max(6.0, min(0.18 * n_rows + 2.0, 28.0))
 
-    # GridSpec: optional narrow strip for row annotations
+    # Annotation strip width
     if row_ann is not None and not row_ann.empty:
-        ann_width = 0.30 * len(row_ann.columns)  # ~0.3 inch per annotation
+        ann_cols = len(row_ann.columns)
+        ann_w = 0.30 * ann_cols  # ~0.3 inch per annotation
     else:
-        ann_width = 0.0
+        ann_w = 0.0
 
-    fig = plt.figure(figsize=(width + ann_width, height))
-    gs = fig.add_gridspec(nrows=1, ncols=2 if ann_width > 0 else 1, width_ratios=[ann_width, 1.0] if ann_width > 0 else [1.0], wspace=0.02)
+    use_dendro = show_dendrograms and SCIPY_AVAILABLE and (row_Z is not None or col_Z is not None)
 
-    # Row annotation panel (left)
-    if ann_width > 0:
-        ax_ann = fig.add_subplot(gs[0, 0])
+    # Build figure + layout
+    if use_dendro:
+        fig_w = heat_w + ann_w + (dendro_width if row_Z is not None else 0.0)
+        fig_h = heat_h + (dendro_height if col_Z is not None else 0.0)
+
+        if ann_w > 0:
+            gs = plt.figure(figsize=(fig_w, fig_h)).add_gridspec(
+                nrows=2,
+                ncols=3,
+                width_ratios=[dendro_width if row_Z is not None else 0.01, ann_w, 1.0],
+                height_ratios=[dendro_height if col_Z is not None else 0.01, 1.0],
+                wspace=0.02,
+                hspace=0.02,
+            )
+            fig = plt.gcf()
+            ax_row_d = fig.add_subplot(gs[1, 0]) if row_Z is not None else None
+            ax_ann = fig.add_subplot(gs[1, 1])
+            ax_heat = fig.add_subplot(gs[1, 2])
+            ax_col_d = fig.add_subplot(gs[0, 2]) if col_Z is not None else None
+        else:
+            gs = plt.figure(figsize=(fig_w, fig_h)).add_gridspec(
+                nrows=2,
+                ncols=2,
+                width_ratios=[dendro_width if row_Z is not None else 0.01, 1.0],
+                height_ratios=[dendro_height if col_Z is not None else 0.01, 1.0],
+                wspace=0.02,
+                hspace=0.02,
+            )
+            fig = plt.gcf()
+            ax_row_d = fig.add_subplot(gs[1, 0]) if row_Z is not None else None
+            ax_heat = fig.add_subplot(gs[1, 1])
+            ax_ann = None
+            ax_col_d = fig.add_subplot(gs[0, 1]) if col_Z is not None else None
+    else:
+        # No dendrograms: keep a simpler layout (annotations left, heatmap right)
+        fig = plt.figure(figsize=(heat_w + ann_w, heat_h))
+        gs = fig.add_gridspec(
+            nrows=1,
+            ncols=2 if ann_w > 0 else 1,
+            width_ratios=[ann_w, 1.0] if ann_w > 0 else [1.0],
+            wspace=0.02,
+        )
+        ax_ann = fig.add_subplot(gs[0, 0]) if ann_w > 0 else None
+        ax_heat = fig.add_subplot(gs[0, -1])
+        ax_row_d = None
+        ax_col_d = None
+
+    # Row annotations (if present)
+    if ax_ann is not None:
         # Build colour blocks for each annotation column
         ann_mat_list = []
-        legends: List[Tuple[str, dict]] = []
         for col in row_ann.columns:
             cats = row_ann[col].astype(str).fillna("nan").tolist()
             uniq = sorted(set(cats))
-            cmap = mpl.colormaps.get("tab20", mpl.colormaps["tab20"])  # categorical palette
-            colour_map = {c: cmap(i % cmap.N) for i, c in enumerate(uniq)}
-            legends.append((col, colour_map))
+            cat_cmap = mpl.colormaps.get("tab20", mpl.colormaps["tab20"])  # categorical palette
+            colour_map = {c: cat_cmap(i % cat_cmap.N) for i, c in enumerate(uniq)}
             ann_mat_list.append(np.array([colour_map[c] for c in cats]).reshape(-1, 1, 4))
-        ann_mat = np.concatenate(ann_mat_list, axis=1)  # shape: rows × ann_cols × rgba
-        # Display as image (transpose ann_cols to width)
+        ann_mat = np.concatenate(ann_mat_list, axis=1) if ann_mat_list else np.zeros((n_rows, 1, 4))
         ax_ann.imshow(ann_mat, aspect="auto", interpolation="nearest")
         ax_ann.set_xticks([])
         ax_ann.set_yticks([])
-    else:
-        ax_ann = None
 
-    # Heatmap panel (right or only)
-    ax_heat = fig.add_subplot(gs[0, -1])
+    # Heatmap
     norm = TwoSlopeNorm(vcenter=vcenter) if vcenter is not None else None
     im = ax_heat.imshow(X.values, aspect="auto", interpolation="nearest", cmap=cmap, norm=norm)
     ax_heat.set_title(title)
     ax_heat.set_xticks(np.arange(n_cols))
     ax_heat.set_xticklabels(col_labels, rotation=90, fontsize=7)
 
-    # Row labels: only if not too many
+    # Row labels on the RIGHT (per your request)
     if n_rows <= 80:
         ax_heat.set_yticks(np.arange(n_rows))
+        ax_heat.tick_params(left=False, right=True, labelleft=False, labelright=True)
         ax_heat.set_yticklabels(row_labels, fontsize=7)
     else:
         ax_heat.set_yticks([])
 
-    # Colourbar
-    cbar = fig.colorbar(im, ax=ax_heat, fraction=0.025, pad=0.02)
+    # Colourbar (right of heatmap)
+    cbar = fig.colorbar(im, ax=ax_heat, fraction=0.025, pad=0.06)
     cbar.ax.set_ylabel("value", rotation=-90, va="bottom")
+
+    # Dendrograms
+    if use_dendro:
+        if col_Z is not None and ax_col_d is not None:
+            sch.dendrogram(col_Z, ax=ax_col_d, orientation="top", no_labels=True, color_threshold=None)
+            ax_col_d.set_xticks([])
+            ax_col_d.set_yticks([])
+            for spine in ax_col_d.spines.values():
+                spine.set_visible(False)
+        if row_Z is not None and ax_row_d is not None:
+            sch.dendrogram(row_Z, ax=ax_row_d, orientation="left", no_labels=True, color_threshold=None)
+            ax_row_d.set_xticks([])
+            ax_row_d.set_yticks([])
+            for spine in ax_row_d.spines.values():
+                spine.set_visible(False)
 
     fig.tight_layout()
 
@@ -485,10 +560,6 @@ def draw_heatmap(
     if out_png is not None:
         fig.savefig(out_png, dpi=200)
     plt.close(fig)
-
-    # Log legends for annotations (textual mapping only)
-    if row_ann is not None and not row_ann.empty and ax_ann is not None:
-        logger.info("Row annotation columns: %s", list(row_ann.columns))
 
 
 # =============================================================
@@ -527,6 +598,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cluster_cols", action=argparse.BooleanOptionalAction, default=True, help="Enable hierarchical clustering of columns (default: enabled).")
     p.add_argument("--distance", default="cosine", help="Distance metric for clustering (default: cosine).")
     p.add_argument("--linkage", default="average", help="Linkage method for clustering (default: average).")
+
+    # Dendrogram display
+    p.add_argument("--show_dendrograms", action=argparse.BooleanOptionalAction, default=True, help="Draw dendrograms above (columns) and left (rows); disable with --no-show-dendrograms.")
+    p.add_argument("--dendro_width", type=float, default=1.2, help="Width in inches for the left row dendrogram (default: 1.2).")
+    p.add_argument("--dendro_height", type=float, default=1.2, help="Height in inches for the top column dendrogram (default: 1.2).")
 
     # Colour map and centring
     p.add_argument("--cmap", default="bwr", help="Matplotlib colour map for the heatmap (default: bwr).")
@@ -694,6 +770,11 @@ def main() -> None:
         logger=logger,
         cmap=args.cmap,
         vcenter=None if args.no_vcenter else args.vcenter,
+        row_Z=row_Z,
+        col_Z=col_Z,
+        show_dendrograms=args.show_dendrograms,
+        dendro_width=float(args.dendro_width),
+        dendro_height=float(args.dendro_height),
     )
 
     if png_path is not None:
