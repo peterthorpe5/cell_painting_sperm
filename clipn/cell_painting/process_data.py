@@ -164,29 +164,178 @@ def optimise_clipn(X, y, n_trials=40):
     return study.best_trial.params
 
 
-
-def variance_threshold_selector(data: pd.DataFrame, threshold: float = 0.05) -> pd.DataFrame:
+def variance_threshold_selector(
+    data: pd.DataFrame,
+    *,
+    threshold: float = 0.05,
+    pdf_path: Optional[str] = None,
+    title: Optional[str] = None,
+    log_x: bool = False,
+    bins: Optional[int] = None
+) -> pd.DataFrame:
     """
-    Select features based on a variance threshold.
+    Select features based on a variance threshold and optionally emit a
+    diagnostic PDF illustrating the variance distribution and threshold.
 
     Parameters
     ----------
     data : pandas.DataFrame
-        Input feature matrix (numeric).
+        Input feature matrix. Non-numeric columns (if any) are ignored for
+        variance calculation and filtering.
     threshold : float, optional
-        Features with variance below this value are dropped. Default is 0.05.
+        Keep features with variance strictly greater than this value.
+        Default is 0.05.
+    pdf_path : str or None, optional
+        If provided, write a PDF with:
+          - Page 1: Histogram of feature variances with the threshold marked.
+          - Page 2: Sorted variances with a horizontal threshold line.
+        The PDF is written only when this is not None.
+    title : str or None, optional
+        Optional title used on the plots. If None, a default is used.
+    log_x : bool, optional
+        If True, plot the histogram on a log10 variance axis (helps when many
+        features have very small variances). Default is False.
+    bins : int or None, optional
+        Number of bins for the histogram. If None, a data-dependent default is
+        chosen.
 
     Returns
     -------
     pandas.DataFrame
-        DataFrame containing only features with variance above the threshold.
+        DataFrame containing only features with variance greater than
+        ``threshold``. Column order is preserved for the kept features.
+
+    Notes
+    -----
+    - Variances for the diagnostic plots are computed with ``ddof=0`` (population
+      variance) to match scikit-learn's ``VarianceThreshold`` behaviour.
+    - The selector itself is performed by ``VarianceThreshold(threshold)`` on the
+      numeric subset of ``data`` cast to float32.
+
+    Examples
+    --------
+    >>> filtered = variance_threshold_selector(
+    ...     data=fs_df[feature_cols],
+    ...     threshold=0.05,
+    ...     pdf_path="variance_diagnostics.pdf",
+    ...     title="Variance diagnostics (post-normalisation)",
+    ...     log_x=False
+    ... )
     """
-    # Defensive: Convert to float32 (if not already)
-    data = data.astype(np.float32, copy=False)
-    selector = VarianceThreshold(threshold)
-    mask = selector.fit(data).get_support()
-    # Defensive: keep column names (iloc preserves order)
-    return data.loc[:, mask]
+    import os
+    import logging
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from sklearn.feature_selection import VarianceThreshold
+
+    logger = logging.getLogger(__name__)
+
+    # Keep only numeric columns; cast to float32 for efficiency
+    X = data.select_dtypes(include=[np.number]).astype(np.float32, copy=False)
+    if X.shape[1] == 0:
+        raise ValueError("No numeric columns found for variance selection.")
+
+    # --- Selection using scikit-learn (matches your existing behaviour) ---
+    selector = VarianceThreshold(threshold=threshold)
+    mask = selector.fit(X).get_support()
+    kept_cols = X.columns[mask]
+    result = X.loc[:, kept_cols]
+
+    # --- Optional diagnostics PDF ---
+    if pdf_path is not None:
+        # Create parent directory if needed
+        parent = os.path.dirname(pdf_path) or "."
+        os.makedirs(parent, exist_ok=True)
+
+        variances = X.var(axis=0, ddof=0).astype(np.float64)  # match VarianceThreshold
+        n_total = variances.size
+        n_kept = int(mask.sum())
+        n_dropped = int(n_total - n_kept)
+        pct_kept = 100.0 * n_kept / max(n_total, 1)
+        pct_drop = 100.0 * n_dropped / max(n_total, 1)
+
+        fig_title = title or "Feature variance distribution"
+        bin_count = bins if bins is not None else min(80, max(12, int(np.sqrt(n_total) * 2)))
+
+        with PdfPages(pdf_path) as pdf:
+            # Page 1: Histogram
+            fig, ax = plt.subplots(figsize=(8, 5))
+            vals = variances.values
+
+            if log_x:
+                # Avoid non-positive values on log scale
+                safe = vals[vals > 0]
+                if safe.size == 0:
+                    ax.text(
+                        0.5, 0.5,
+                        "All variances ≤ 0; cannot plot log10 histogram.",
+                        ha="center", va="center", transform=ax.transAxes
+                    )
+                    ax.set_xlabel("log10(variance)")
+                    ax.set_ylabel("Number of features")
+                else:
+                    ax.hist(np.log10(safe), bins=bin_count, edgecolor="black", alpha=0.75)
+                    ax.set_xlabel("log10(variance)")
+                    # Threshold marker on log scale (only if threshold > 0)
+                    if threshold > 0:
+                        ax.axvline(x=np.log10(threshold), linestyle="--", linewidth=1.5)
+                        ax.text(
+                            np.log10(threshold), ax.get_ylim()[1] * 0.95,
+                            f"threshold = {threshold:g}",
+                            rotation=90, va="top", ha="right"
+                        )
+            else:
+                ax.hist(vals, bins=bin_count, edgecolor="black", alpha=0.75)
+                ax.set_xlabel("Variance")
+                ax.axvline(x=threshold, linestyle="--", linewidth=1.5)
+                ax.text(
+                    threshold, ax.get_ylim()[1] * 0.95,
+                    f"threshold = {threshold:g}",
+                    rotation=90, va="top", ha="right"
+                )
+
+            ax.set_ylabel("Number of features")
+            ax.set_title(fig_title)
+            summary_txt = (
+                f"Features: {n_total:,}\n"
+                f"Kept (> {threshold:g}): {n_kept:,} ({pct_kept:.1f}%)\n"
+                f"Dropped (≤ {threshold:g}): {n_dropped:,} ({pct_drop:.1f}%)"
+            )
+            ax.annotate(
+                summary_txt, xy=(0.98, 0.98), xycoords="axes fraction",
+                xytext=(-5, -5), textcoords="offset points",
+                ha="right", va="top",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="grey", alpha=0.9)
+            )
+            pdf.savefig(fig)
+            plt.close(fig)
+
+            # Page 2: Sorted variances with threshold line
+            fig2, ax2 = plt.subplots(figsize=(8, 5))
+            sorted_vals = np.sort(vals)
+            ax2.plot(sorted_vals, linewidth=1.25)
+            ax2.axhline(y=threshold, linestyle="--", linewidth=1.5)
+            ax2.set_xlabel("Feature rank (sorted by variance)")
+            ax2.set_ylabel("Variance")
+            ax2.set_title(f"{fig_title} (sorted)")
+            ax2.text(
+                x=len(sorted_vals) * 0.99, y=threshold,
+                s=f"threshold = {threshold:g}",
+                ha="right", va="bottom"
+            )
+            pdf.savefig(fig2)
+            plt.close(fig2)
+
+        logger.info(
+            "Variance diagnostics written to %s (kept %d / %d, %.1f%%).",
+            pdf_path, n_kept, n_total, pct_kept
+        )
+
+    return result
+
+
 
 
 def correlation_filter(data: pd.DataFrame, threshold: float = 0.99) -> pd.DataFrame:

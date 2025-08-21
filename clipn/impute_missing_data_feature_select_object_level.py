@@ -1804,7 +1804,18 @@ def main():
     # 10) Variance filter
     if args.variance_threshold and args.variance_threshold > 0.0:
         logger.info(f"Applying variance threshold: {args.variance_threshold}")
-        filtered_var = variance_threshold_selector(fs_df[feature_cols], threshold=args.variance_threshold)
+        # Apply variance threshold filter
+        # This will also generate a PDF with variance diagnostics
+        filtered_var = variance_threshold_selector(
+                                            data=fs_df[feature_cols],
+                                            threshold=args.variance_threshold,
+                                            pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics.pdf",
+                                            title="Variance diagnostics (post-normalisation)",
+                                            log_x=False)
+        logger.info("Feature selection summary: start=%d → after variance=%d",
+                    len(feature_cols), filtered_var.shape[1]
+)
+
     else:
         logger.info("Variance threshold filter disabled.")
         filtered_var = fs_df[feature_cols]
