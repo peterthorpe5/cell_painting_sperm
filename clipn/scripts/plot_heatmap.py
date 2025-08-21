@@ -594,7 +594,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--outdir", required=True, help="Output directory for images and TSVs.")
     p.add_argument("--sep", choices=["auto", "tab", "comma", "semicolon", "pipe", "space"], default="auto", help="Field separator for --latent_csv (default: auto-detect).")
     p.add_argument("--also_png", action="store_true", help="Also save a PNG alongside the PDF.")
-    p.add_argument("--cbar_location", choices=["top", "right", "bottom"], default="top", help="Location of colourbar/key (default: top).")
+    p.add_argument("--cbar_location", choices=["top", "right", "bottom"], default="bottom", help="Location of colourbar/key (default: top).")
 
     # Columns and selection
     p.add_argument("--id_col", default="cpd_id", help="Identifier column name (default: cpd_id).")
@@ -617,8 +617,8 @@ def parse_args() -> argparse.Namespace:
 
     # Dendrogram display
     p.add_argument("--show_dendrograms", action=argparse.BooleanOptionalAction, default=True, help="Draw dendrograms above (columns) and left (rows); disable with --no-show-dendrograms.")
-    p.add_argument("--dendro_width", type=float, default=1.2, help="Width in inches for the left row dendrogram (default: 1.2).")
-    p.add_argument("--dendro_height", type=float, default=1.2, help="Height in inches for the top column dendrogram (default: 1.2).")
+    p.add_argument("--dendro_width", type=float, default=0.5, help="Width in inches for the left row dendrogram (default: 1.2).")
+    p.add_argument("--dendro_height", type=float, default=0.5, help="Height in inches for the top column dendrogram (default: 1.2).")
     p.add_argument("--ann_width_per_col", type=float, default=0.12, help="Width in inches allocated per annotation column (default: 0.12).")
 
     # Colour map and centring
