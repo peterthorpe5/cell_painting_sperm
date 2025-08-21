@@ -1806,21 +1806,24 @@ def main():
         logger.info(f"Applying variance threshold: {args.variance_threshold}")
         # Apply variance threshold filter
         # This will also generate a PDF with variance diagnostics
-        filtered_var = variance_threshold_selector(
-                                data=fs_df[feature_cols],
-                                threshold=args.variance_threshold,
-                                pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics.pdf",
-                                log_pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics_log.pdf",
-                                title="Variance diagnostics (pre-filter, post-normalisation)",
-                                bins=None,            # let it choose automatically
-                                bin_scale=3.0,        # triple the base heuristic
-                                max_bins=240,         # sensible cap
-                                log_sorted_x=False    # set True to log rank on the sorted plot
-                            )
 
+        filtered_var = variance_threshold_selector(
+                                    data=fs_df[feature_cols],
+                                    threshold=args.variance_threshold,
+                                    pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics.pdf",
+                                    log_pdf_path=os.path.splitext(args.output_file)[0] + "_variance_diagnostics_log.pdf",
+                                    title="Variance diagnostics (pre-filter, post-normalisation)",
+                                    bins=None,
+                                    bin_scale=3.0,
+                                    max_bins=240,
+                                    log_sorted_x=False,
+                                    log_x_linear_pdf=False
+                                )
         logger.info("Feature selection summary: start=%d → after variance=%d",
-                    len(feature_cols), filtered_var.shape[1]
-)
+                    len(feature_cols), filtered_var.shape[1])
+        if filtered_var.empty:
+            logger.error("Variance threshold filtering resulted in no features remaining. "
+                         "Please check your threshold or input data.")
 
     else:
         logger.info("Variance threshold filter disabled.")
