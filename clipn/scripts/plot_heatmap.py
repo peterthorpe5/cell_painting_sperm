@@ -35,7 +35,7 @@ Outputs (under --outdir)
 - heatmap_matrix.tsv        : matrix used in the heatmap (rows × latent dims)
 - row_order.tsv             : order of `cpd_id` used in the heatmap
 - col_order.tsv             : order of latent columns used in the heatmap
-- row_clusters.tsv          : optional row cluster labels if --k_rows is set
+- cpd_id_clusters.tsv          : optional row cluster labels if --k_rows is set
 - col_clusters.tsv          : optional column cluster labels if --k_cols is set
 - heatmap.log               : log file
 
@@ -50,7 +50,7 @@ Notes
 - Clustering: Requires SciPy. If unavailable or disabled, rows/cols are
   ordered as-is (or by variance for columns).
 - Annotation bars: optional row-side categorical colour bars for columns like
-  `Dataset` or `cpd_type`.
+  `Dataset` or `cpd_type` (narrow by default; adjustable via `--ann_width_per_col`).
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.colors import TwoSlopeNorm
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 # Optional SciPy for hierarchical clustering
 try:
@@ -406,6 +407,8 @@ def draw_heatmap(
     show_dendrograms: bool,
     dendro_width: float,
     dendro_height: float,
+    ann_width_per_col: float,
+    cbar_location: str,
 ) -> None:
     """Render a heatmap with optional dendrograms and row-side categorical colour bars.
 
@@ -448,10 +451,10 @@ def draw_heatmap(
     heat_w = max(6.0, min(0.12 * n_cols + 2.0, 22.0))
     heat_h = max(6.0, min(0.18 * n_rows + 2.0, 28.0))
 
-    # Annotation strip width
+    # Annotation strip width (narrower by default; user-adjustable)
     if row_ann is not None and not row_ann.empty:
         ann_cols = len(row_ann.columns)
-        ann_w = 0.30 * ann_cols  # ~0.3 inch per annotation
+        ann_w = ann_width_per_col * ann_cols
     else:
         ann_w = 0.0
 
@@ -534,9 +537,21 @@ def draw_heatmap(
     else:
         ax_heat.set_yticks([])
 
-    # Colourbar (right of heatmap)
-    cbar = fig.colorbar(im, ax=ax_heat, fraction=0.025, pad=0.06)
-    cbar.ax.set_ylabel("value", rotation=-90, va="bottom")
+    # Colourbar positioning
+    if cbar_location.lower() == "top":
+        # Place a horizontal colourbar above the heatmap axis without overlapping labels
+        pos = ax_heat.get_position()
+        cax = fig.add_axes([pos.x0, min(0.98, pos.y1 + 0.01), pos.width, 0.02])
+        cbar = fig.colorbar(im, cax=cax, orientation='horizontal')
+        cbar.ax.set_xlabel("value")
+        cbar.ax.xaxis.set_label_position('top')
+        cbar.ax.xaxis.tick_top()
+    elif cbar_location.lower() == "bottom":
+        cbar = fig.colorbar(im, ax=ax_heat, orientation='horizontal', fraction=0.04, pad=0.10)
+        cbar.ax.set_xlabel("value")
+    else:  # right (default fallback)
+        cbar = fig.colorbar(im, ax=ax_heat, fraction=0.025, pad=0.06)
+        cbar.ax.set_ylabel("value", rotation=-90, va="bottom")
 
     # Dendrograms
     if use_dendro:
@@ -579,6 +594,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--outdir", required=True, help="Output directory for images and TSVs.")
     p.add_argument("--sep", choices=["auto", "tab", "comma", "semicolon", "pipe", "space"], default="auto", help="Field separator for --latent_csv (default: auto-detect).")
     p.add_argument("--also_png", action="store_true", help="Also save a PNG alongside the PDF.")
+    p.add_argument("--cbar_location", choices=["top", "right", "bottom"], default="top", help="Location of colourbar/key (default: top).")
 
     # Columns and selection
     p.add_argument("--id_col", default="cpd_id", help="Identifier column name (default: cpd_id).")
@@ -603,6 +619,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--show_dendrograms", action=argparse.BooleanOptionalAction, default=True, help="Draw dendrograms above (columns) and left (rows); disable with --no-show-dendrograms.")
     p.add_argument("--dendro_width", type=float, default=1.2, help="Width in inches for the left row dendrogram (default: 1.2).")
     p.add_argument("--dendro_height", type=float, default=1.2, help="Height in inches for the top column dendrogram (default: 1.2).")
+    p.add_argument("--ann_width_per_col", type=float, default=0.12, help="Width in inches allocated per annotation column (default: 0.12).")
 
     # Colour map and centring
     p.add_argument("--cmap", default="bwr", help="Matplotlib colour map for the heatmap (default: bwr).")
@@ -736,7 +753,7 @@ def main() -> None:
         row_clusters_o = [int(row_cluster_labels[i]) for i in row_order]
         write_tsv(
             df=pd.DataFrame({"cpd_id": row_labels_o, "Cluster": row_clusters_o}),
-            path=outdir / "row_clusters.tsv",
+            path=outdir / "cpd_id_clusters.tsv",
             logger=logger,
             index=False,
         )
@@ -775,6 +792,8 @@ def main() -> None:
         show_dendrograms=args.show_dendrograms,
         dendro_width=float(args.dendro_width),
         dendro_height=float(args.dendro_height),
+        ann_width_per_col=float(args.ann_width_per_col),
+        cbar_location=args.cbar_location,
     )
 
     if png_path is not None:
