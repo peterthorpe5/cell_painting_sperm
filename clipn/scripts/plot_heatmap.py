@@ -30,10 +30,13 @@ Inputs
 
 Outputs (under --outdir)
 ------------------------
-- heatmap.pdf / heatmap.png : the rendered heatmap
+- heatmap.pdf : the rendered heatmap (default)
+- heatmap.png : only if --also_png is provided
 - heatmap_matrix.tsv        : matrix used in the heatmap (rows × latent dims)
 - row_order.tsv             : order of `cpd_id` used in the heatmap
 - col_order.tsv             : order of latent columns used in the heatmap
+- row_clusters.tsv          : optional row cluster labels if --k_rows is set
+- col_clusters.tsv          : optional column cluster labels if --k_cols is set
 - heatmap.log               : log file
 
 Notes
@@ -57,10 +60,12 @@ import logging
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
+import csv
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+from matplotlib.colors import TwoSlopeNorm
 
 # Optional SciPy for hierarchical clustering
 try:
@@ -114,6 +119,32 @@ def setup_logging(*, output_dir: str | Path) -> logging.Logger:
 # Helpers
 # =============================================================
 
+def detect_separator(*, file_path: str | Path, logger: logging.Logger) -> str:
+    """Auto-detect the field separator for a delimited text file.
+
+    Parameters
+    ----------
+    file_path : str | Path
+        Path to the input file.
+    logger : logging.Logger
+        Logger for messages.
+
+    Returns
+    -------
+    str
+        Detected delimiter character. Falls back to "	" if unsure.
+    """
+    try:
+        with open(file=file_path, mode="r", encoding="utf-8", errors="ignore") as fh:
+            sample = fh.read(1024 * 1024)
+        dialect = csv.Sniffer().sniff(sample, delimiters="	,;| ")
+        sep = dialect.delimiter
+        return sep
+    except Exception:
+        logger.warning("Could not auto-detect delimiter; defaulting to tab (\t).")
+        return "	"
+
+
 def validate_columns(*, df: pd.DataFrame, required: Iterable[str], logger: logging.Logger) -> None:
     """Validate the presence of required columns in a DataFrame.
 
@@ -161,9 +192,9 @@ def select_latent_columns(*, df: pd.DataFrame, prefix: Optional[str], logger: lo
         If no latent columns are found.
     """
     if prefix:
-        cols = [c for c in df.columns if isinstance(c, str) and c.startswith(prefix) and pd.api.types.is_numeric_dtype(df[c])]
+        cols = [c for c in df.columns if isinstance(c, str) and c.startswith(prefix)]
     else:
-        cols = [c for c in df.columns if isinstance(c, str) and c.isdigit() and pd.api.types.is_numeric_dtype(df[c])]
+        cols = [c for c in df.columns if isinstance(c, str) and c.isdigit()]
 
     if not cols:
         logger.error("No latent feature columns found (prefix=%s).", prefix)
@@ -289,7 +320,7 @@ def robust_clip(*, X: pd.DataFrame, lower_q: float, upper_q: float, logger: logg
 
 def hierarchical_order(
     *, X: pd.DataFrame, distance: str, linkage: str, axis: int, logger: logging.Logger
-) -> List[int]:
+) -> Tuple[List[int], Optional[np.ndarray]]:
     """Compute hierarchical clustering order of rows or columns.
 
     Parameters
@@ -307,12 +338,12 @@ def hierarchical_order(
 
     Returns
     -------
-    list[int]
-        Order (indices) for rows or columns.
+    tuple[list[int], numpy.ndarray | None]
+        (Order indices for rows/cols, linkage matrix or None if SciPy unavailable).
     """
     if not SCIPY_AVAILABLE:
         logger.warning("SciPy not available; skipping hierarchical clustering.")
-        return list(range(X.shape[axis]))
+        return list(range(X.shape[axis])), None
 
     if axis == 0:
         data = X.values
@@ -331,7 +362,7 @@ def hierarchical_order(
 
     Z = sch.linkage(pdist, method=linkage)
     order = sch.leaves_list(Z).tolist()
-    return order
+    return order, Z
 
 
 def write_tsv(*, df: pd.DataFrame, path: str | Path, logger: logging.Logger, index: bool = False) -> None:
@@ -365,9 +396,11 @@ def draw_heatmap(
     col_labels: List[str],
     row_ann: Optional[pd.DataFrame],
     out_pdf: Path,
-    out_png: Path,
+    out_png: Optional[Path],
     title: str,
     logger: logging.Logger,
+    cmap: str,
+    vcenter: Optional[float],
 ) -> None:
     """Render a heatmap with optional row-side categorical colour bars.
 
@@ -428,7 +461,8 @@ def draw_heatmap(
 
     # Heatmap panel (right or only)
     ax_heat = fig.add_subplot(gs[0, -1])
-    im = ax_heat.imshow(X.values, aspect="auto", interpolation="nearest")
+    norm = TwoSlopeNorm(vcenter=vcenter) if vcenter is not None else None
+    im = ax_heat.imshow(X.values, aspect="auto", interpolation="nearest", cmap=cmap, norm=norm)
     ax_heat.set_title(title)
     ax_heat.set_xticks(np.arange(n_cols))
     ax_heat.set_xticklabels(col_labels, rotation=90, fontsize=7)
@@ -448,7 +482,8 @@ def draw_heatmap(
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf, dpi=300)
-    fig.savefig(out_png, dpi=200)
+    if out_png is not None:
+        fig.savefig(out_png, dpi=200)
     plt.close(fig)
 
     # Log legends for annotations (textual mapping only)
@@ -471,6 +506,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Render a heatmap of CLIPn latent dimensions with optional aggregation and clustering.")
     p.add_argument("--latent_csv", required=True, help="Input TSV with latent features + metadata.")
     p.add_argument("--outdir", required=True, help="Output directory for images and TSVs.")
+    p.add_argument("--sep", choices=["auto", "tab", "comma", "semicolon", "pipe", "space"], default="auto", help="Field separator for --latent_csv (default: auto-detect).")
+    p.add_argument("--also_png", action="store_true", help="Also save a PNG alongside the PDF.")
 
     # Columns and selection
     p.add_argument("--id_col", default="cpd_id", help="Identifier column name (default: cpd_id).")
@@ -491,6 +528,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--distance", default="cosine", help="Distance metric for clustering (default: cosine).")
     p.add_argument("--linkage", default="average", help="Linkage method for clustering (default: average).")
 
+    # Colour map and centring
+    p.add_argument("--cmap", default="bwr", help="Matplotlib colour map for the heatmap (default: bwr).")
+    p.add_argument("--vcenter", type=float, default=0.0, help="Centre value for diverging colour map (default: 0.0).")
+    p.add_argument("--no_vcenter", action="store_true", help="Disable centring the colour map at the given value.")
+
+    # Cluster cuts
+    p.add_argument("--k_rows", type=int, default=None, help="Cut the row dendrogram into K clusters and write row_clusters.tsv.")
+    p.add_argument("--k_cols", type=int, default=None, help="Cut the column dendrogram into K clusters and write col_clusters.tsv.")
+
     # Row annotations
     p.add_argument("--row_annotations", nargs="*", default=None, help="Optional categorical columns to show as row-side annotation bars (e.g., Dataset cpd_type).")
 
@@ -509,7 +555,22 @@ def main() -> None:
 
     logger.info("Args: %s", vars(args))
     logger.info("Reading: %s", args.latent_csv)
-    df = pd.read_csv(filepath_or_buffer=args.latent_csv, sep="\t")
+    # Auto-detect separator unless overridden
+    if args.sep == "auto":
+        sep_detected = detect_separator(file_path=args.latent_csv, logger=logger)
+        if sep_detected == " ":
+            df = pd.read_csv(filepath_or_buffer=args.latent_csv, sep=r"\s+", engine="python")
+        else:
+            df = pd.read_csv(filepath_or_buffer=args.latent_csv, sep=sep_detected)
+        logger.info("Detected field separator: %r", sep_detected)
+    else:
+        sep_map = {"tab": "	", "comma": ",", "semicolon": ";", "pipe": "|", "space": r"\s+"}
+        chosen = sep_map.get(args.sep, "	")
+        if args.sep == "space":
+            df = pd.read_csv(filepath_or_buffer=args.latent_csv, sep=chosen, engine="python")
+        else:
+            df = pd.read_csv(filepath_or_buffer=args.latent_csv, sep=chosen)
+        logger.info("Using field separator: %s", args.sep)
 
     # Ensure id_col exists
     validate_columns(df=df, required=[args.id_col], logger=logger)
@@ -519,6 +580,7 @@ def main() -> None:
 
     # Fill NaNs in latent with per-column medians, then 0 as last resort
     Xfull = df[latent_cols].copy()
+    Xfull = Xfull.apply(pd.to_numeric, errors='coerce')
     Xfull = Xfull.apply(func=lambda s: s.fillna(value=s.median()), axis=0)
     Xfull = Xfull.fillna(value=0)
     df[latent_cols] = Xfull
@@ -548,12 +610,12 @@ def main() -> None:
 
     # Determine row/column orders
     if args.cluster_rows:
-        row_order = hierarchical_order(X=X, distance=args.distance, linkage=args.linkage, axis=0, logger=logger)
+        row_order, row_Z = hierarchical_order(X=X, distance=args.distance, linkage=args.linkage, axis=0, logger=logger)
     else:
-        row_order = list(range(X.shape[0]))
+        row_order, row_Z = list(range(X.shape[0])), None
 
     if args.cluster_cols:
-        col_order = hierarchical_order(X=X, distance=args.distance, linkage=args.linkage, axis=1, logger=logger)
+        col_order, col_Z = hierarchical_order(X=X, distance=args.distance, linkage=args.linkage, axis=1, logger=logger)
     else:
         # Order columns by decreasing variance (helps readability)
         col_order = (
@@ -591,9 +653,30 @@ def main() -> None:
     mat_out.insert(loc=0, column="cpd_id", value=row_labels_o)
     write_tsv(df=mat_out, path=outdir / "heatmap_matrix.tsv", logger=logger, index=False)
 
+    # Optional cluster cuts output
+    if args.k_rows is not None and row_Z is not None and SCIPY_AVAILABLE:
+        row_cluster_labels = sch.fcluster(row_Z, t=int(args.k_rows), criterion='maxclust')
+        # Align to heatmap order
+        row_clusters_o = [int(row_cluster_labels[i]) for i in row_order]
+        write_tsv(
+            df=pd.DataFrame({"cpd_id": row_labels_o, "Cluster": row_clusters_o}),
+            path=outdir / "row_clusters.tsv",
+            logger=logger,
+            index=False,
+        )
+    if args.k_cols is not None and col_Z is not None and SCIPY_AVAILABLE:
+        col_cluster_labels = sch.fcluster(col_Z, t=int(args.k_cols), criterion='maxclust')
+        col_clusters_o = [int(col_cluster_labels[i]) for i in col_order]
+        write_tsv(
+            df=pd.DataFrame({"latent_dim": col_labels_o, "Cluster": col_clusters_o}),
+            path=outdir / "col_clusters.tsv",
+            logger=logger,
+            index=False,
+        )
+
     # Draw heatmap
     pdf_path = outdir / "heatmap.pdf"
-    png_path = outdir / "heatmap.png"
+    png_path = (outdir / "heatmap.png") if args.also_png else None
     title = "CLIPn latent heatmap"
     if args.zscore != "none":
         title += f" (zscore={args.zscore})"
@@ -609,9 +692,14 @@ def main() -> None:
         out_png=png_path,
         title=title,
         logger=logger,
+        cmap=args.cmap,
+        vcenter=None if args.no_vcenter else args.vcenter,
     )
 
-    logger.info("Saved heatmap to %s and %s", pdf_path, png_path)
+    if png_path is not None:
+        logger.info("Saved heatmap to %s and %s", pdf_path, png_path)
+    else:
+        logger.info("Saved heatmap to %s", pdf_path)
 
 
 if __name__ == "__main__":
