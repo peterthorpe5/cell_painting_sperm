@@ -1,0 +1,119 @@
+name: clipn_gpu
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - bioconda
+  - etetoolkit
+
+dependencies:
+  # Core runtime
+  - python=3.10
+  - pip
+
+  # GPU PyTorch stack (conda-managed; do NOT install torch via pip)
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1   # requires NVIDIA driver ≥ 525
+
+  # Scientific stack (compiled libs best via conda)
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - numba
+  - llvmlite
+  - umap-learn
+  - hdbscan
+  - networkx
+  - jinja2
+  - openpyxl
+  - pyyaml
+  - ffmpeg
+
+  # Everything else via pip (unversioned; safe to tweak later)
+  - pip:
+      - ace-tools-open
+      - alembic
+      - asttokens
+      - blinker
+      - certifi
+      - charset-normalizer
+      - click
+      - clipn
+      - cloudpickle
+      - colorcet
+      - coloredlogs
+      - colorlog
+      - community
+      - contourpy
+      - copairs
+      - cycler
+      - decorator
+      - deprecated
+      - duckdb
+      - et-xmlfile
+      - exceptiongroup
+      - executing
+      - flask
+      - flatbuffers
+      - fonttools
+      - fsspec
+      - future
+      - graphtools
+      - greenlet
+      - humanfriendly
+      - idna
+      - ipython
+      - itables
+      - itsdangerous
+      - jedi
+      - joblib
+      - jsonpickle
+      - kiwisolver
+      - kmapper
+      - mako
+      - matplotlib
+      - matplotlib-inline
+      - narwhals
+      - natsort
+      - onnx
+      - onnxruntime
+      - optuna
+      - packaging
+      - parso
+      - patsy
+      - pexpect
+      - phate
+      - pillow
+      - plotly
+      - prompt-toolkit
+      - protobuf
+      - psutil
+      - ptyprocess
+      - pure-eval
+      - pygments
+      - pygsp
+      - pynndescent
+      - pyparsing
+      - python-louvain
+      - pyvis
+      - requests
+      - s-gd2
+      - scprep
+      - seaborn
+      - shap
+      - slicer
+      - sqlalchemy
+      - stack-data
+      - statsmodels
+      - tasklogger
+      - threadpoolctl
+      - tomli
+      - tqdm
+      - traitlets
+      - wcwidth
+      - werkzeug
+      - wrapt
+      - xlsxwriter
