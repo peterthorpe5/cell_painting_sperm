@@ -7,17 +7,17 @@ channels:
   - etetoolkit
 
 dependencies:
-  # Core runtime
+  # Core
   - python=3.10
   - pip
 
-  # GPU PyTorch stack (conda-managed; do NOT install torch via pip)
+  # GPU PyTorch stack (conda-managed)
   - pytorch
   - torchvision
   - torchaudio
-  - pytorch-cuda=12.1   # requires NVIDIA driver ≥ 525
+  - pytorch-cuda=12.1     # requires NVIDIA driver >= 525
 
-  # Scientific stack (compiled libs best via conda)
+  # Numerics / scientific
   - numpy
   - pandas
   - scipy
@@ -32,7 +32,11 @@ dependencies:
   - pyyaml
   - ffmpeg
 
-  # Everything else via pip (unversioned; safe to tweak later)
+  # Move these from pip to conda to avoid builds
+  - duckdb                 # from conda-forge
+  - python-louvain         # from conda-forge
+
+  # The rest via pip (Python-only / wheels)
   - pip:
       - ace-tools-open
       - alembic
@@ -52,7 +56,6 @@ dependencies:
       - cycler
       - decorator
       - deprecated
-      - duckdb
       - et-xmlfile
       - exceptiongroup
       - executing
@@ -97,7 +100,6 @@ dependencies:
       - pygsp
       - pynndescent
       - pyparsing
-      - python-louvain
       - pyvis
       - requests
       - s-gd2
