@@ -88,17 +88,20 @@ import gzip
 import pandas as pd
 import numpy as np
 from itertools import islice
-from typing import Optional
+from typing import Optional, Tuple
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from scipy.stats import shapiro
 import gc
 from typing import Optional, Iterable
 from cell_painting.process_data import (
-    variance_threshold_selector,
-    correlation_filter)
+    variance_threshold_selector)
 
 _script_start_time = time.time()
+
+IMAGE_GLOB_PATTERNS = ("*Image.csv.gz", "*_Image.csv.gz", "*Image.csv", "*_Image.csv")
+EXCLUDE_PAT = re.compile(r"(?i)(image|normalis(e|ed)|NOT_USED)")  # exclude in object discovery
+
 
 def parse_args():
     """
@@ -371,6 +374,124 @@ def _rank_features_for_corr_filter(
 
     # Protected features first (original order), then ranked others
     return protect + ranked
+
+
+def attach_plate_well_with_fallback(
+    *,
+    obj_df: pd.DataFrame,
+    input_dir: Path,
+    obj_filename: str,
+    image_cache: Optional[pd.DataFrame],
+    logger: logging.Logger,
+) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+    """
+    Attach plate/well metadata to an object-level table using an image table.
+
+    Behaviour
+    ---------
+    1) If 'Plate_Metadata' and 'Well_Metadata' are already present in obj_df, return as-is.
+    2) Try a sibling image table: <basename>_Image.csv[.gz].
+    3) Otherwise, if exactly one image table exists in the folder (e.g. 'MyExpt_test_Image.csv.gz'),
+       use it as a fallback for all object files (cached to avoid re-reading).
+    4) Left-join on 'ImageNumber' and standardise column names to 'Plate_Metadata' and
+       'Well_Metadata' if equivalents are found.
+
+    Parameters
+    ----------
+    obj_df : pandas.DataFrame
+        Object-level DataFrame (must contain 'ImageNumber' for merging).
+    input_dir : pathlib.Path
+        Directory containing object and image CSVs.
+    obj_filename : str
+        Filename of the object CSV (used to look for a sibling image file).
+    image_cache : pandas.DataFrame or None
+        Cached image table (subset of columns) to reuse across files. If None, this function
+        may populate it when a single-folder image is discovered.
+    logger : logging.Logger
+        Logger for status and warnings.
+
+    Returns
+    -------
+    (pandas.DataFrame, pandas.DataFrame or None)
+        Tuple of (possibly augmented) object DataFrame and the (possibly updated) image_cache.
+    """
+    # Already have plate/well? Nothing to do.
+    if ("Plate_Metadata" in obj_df.columns) and ("Well_Metadata" in obj_df.columns):
+        return obj_df, image_cache
+
+    # We need ImageNumber to merge
+    if "ImageNumber" not in obj_df.columns:
+        logger.error("Object file '%s' has no 'ImageNumber' column; cannot attach image metadata.", obj_filename)
+        return obj_df, image_cache
+
+    # Candidate plate/well names within image table
+    plate_cands = ["Plate_Metadata", "Metadata_Plate", "Plate", "plate", "Image_Metadata_Plate"]
+    well_cands  = ["Well_Metadata", "Metadata_Well", "Well", "well", "Image_Metadata_Well"]
+
+    # 1) Try sibling: <basename>_Image.csv[.gz]
+    base = obj_filename
+    for suff in (".csv.gz", ".csv"):
+        if base.endswith(suff):
+            base = base[: -len(suff)]
+            break
+    sibling_candidates = [input_dir / f"{base}_Image.csv.gz", input_dir / f"{base}_Image.csv"]
+
+    image_path = next((p for p in sibling_candidates if p.exists()), None)
+
+    # 2) Otherwise use (or build) folder-wide fallback cache if there is exactly one image file
+    if image_path is None:
+        if image_cache is None:
+            # Find all image tables in the folder
+            image_files = []
+            for pat in ("*Image.csv.gz", "*_Image.csv.gz", "*Image.csv", "*_Image.csv"):
+                image_files.extend(sorted(input_dir.glob(pat)))
+            # Deduplicate
+            seen = set()
+            uniq = [p for p in image_files if not (p in seen or seen.add(p))]
+            if len(uniq) == 1:
+                logger.info("Using single-folder image table as fallback: %s", uniq[0].name)
+                # Read a small peek to detect which plate/well columns exist
+                head = pd.read_csv(uniq[0], nrows=5, low_memory=False)
+                plate_col = next((c for c in plate_cands if c in head.columns), None)
+                well_col  = next((c for c in well_cands  if c in head.columns), None)
+                usecols = ["ImageNumber"] + [c for c in (plate_col, well_col) if c]
+                if len(usecols) == 1:
+                    logger.warning("Fallback image '%s' lacks plate/well columns; proceeding without attachment.", uniq[0].name)
+                    return obj_df, image_cache
+                image_cache = pd.read_csv(uniq[0], usecols=usecols, low_memory=False)
+            elif len(uniq) == 0:
+                logger.error("No image table found in %s and no sibling for '%s'.", str(input_dir), obj_filename)
+                return obj_df, image_cache
+            else:
+                logger.warning("Multiple image tables found in %s; no unique fallback. Candidates: %s",
+                               str(input_dir), ", ".join(p.name for p in uniq[:10]))
+                return obj_df, image_cache
+        # Use the cached fallback
+        image_df = image_cache
+    else:
+        # Read only necessary columns from sibling file
+        head = pd.read_csv(image_path, nrows=5, low_memory=False)
+        plate_col = next((c for c in plate_cands if c in head.columns), None)
+        well_col  = next((c for c in well_cands  if c in head.columns), None)
+        usecols = ["ImageNumber"] + [c for c in (plate_col, well_col) if c]
+        if len(usecols) == 1:
+            logger.warning("Image file '%s' lacks plate/well columns; proceeding without attachment.", image_path.name)
+            return obj_df, image_cache
+        image_df = pd.read_csv(image_path, usecols=usecols, low_memory=False)
+
+    # Merge and standardise names
+    merged = obj_df.merge(image_df, how="left", on="ImageNumber", suffixes=("", "_img"))
+
+    if "Plate_Metadata" not in merged.columns:
+        cand = next((c for c in plate_cands if c in merged.columns), None)
+        if cand:
+            merged = merged.rename(columns={cand: "Plate_Metadata"})
+    if "Well_Metadata" not in merged.columns:
+        cand = next((c for c in well_cands if c in merged.columns), None)
+        if cand:
+            merged = merged.rename(columns={cand: "Well_Metadata"})
+
+    return merged, image_cache
 
 
 def correlation_filter_smart(
@@ -1358,7 +1479,9 @@ def main():
     csv_files = [
         f for f in all_files
         if "image" not in f.name.lower() and "normalised" not in f.name.lower()
-    ]
+        ]
+
+    csv_files = [f for f in csv_files if not EXCLUDE_PAT.search(f.name)]
     excluded_files = [f.name for f in all_files if f not in csv_files]
     logger.info(f"Looking for CellProfiler CSV files in {input_dir}...")
     logger.info("Excluding files with 'image' or 'normalised' in their names.")
@@ -1373,6 +1496,7 @@ def main():
 
     # Read each file (compressed or not), and add plate/well metadata if missing
     dataframes = []
+    image_cache: Optional[pd.DataFrame] = None
 
     for f in csv_files:
         logger.info(f"Reading file: {f.name}")
@@ -1381,7 +1505,15 @@ def main():
 
         # Add Plate/Well from the matching *_Image file if needed,
         # and coerce to a single, clean pair of Plate_Metadata/Well_Metadata
-        df = add_plate_well_metadata_if_missing(df, input_dir, f.name, logger)
+        df, image_cache = attach_plate_well_with_fallback(
+            obj_df=df,
+            input_dir=input_dir,
+            obj_filename=f.name,
+            image_cache=image_cache,
+            logger=logger
+        )
+
+
         df = select_single_plate_well(df, logger=logger)
 
         log_memory_usage(logger, prefix=f" [After {f.name} loaded] ")
