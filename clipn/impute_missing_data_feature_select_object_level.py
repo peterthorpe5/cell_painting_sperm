@@ -4,78 +4,156 @@
 """
 merge_cellprofiler_with_metadata_featureselect.py
 
-Prepare CellProfiler per-object data for analysis with optional well-level aggregation.
+Prepare CellProfiler per-object (single-cell) profiles for analysis with optional
+robust outlier trimming and well-level aggregation.
 
-This script merges raw CellProfiler per-object (single cell) output files with metadata (e.g., plate map),
-imputes missing data, applies optional per-plate feature scaling, and performs feature selection using
-variance and correlation filters. Optionally, it can aggregate features to the well level by taking the median
-of all objects within each well.
+This script:
+  • Loads CellProfiler per-object CSV/CSV.GZ files, auto-attaches plate/well metadata,
+    merges in a plate map, cleans metadata, optionally trims per-object outliers (robust),
+    imputes missing values, optionally normalises to DMSO, optionally scales per plate,
+    performs feature selection (variance + correlation), and writes the final table.
+  • Can output either per-object rows (default) or per-well medians (with --aggregate_per_well).
+  • Avoids using image/normalised tables as input and tolerates missing ImageNumber/ObjectNumber.
 
-Workflow:
----------
-1. Load all CellProfiler per-object CSV or CSV.GZ files from a specified directory,
-   excluding files with 'image' or 'normalised' in the filename.
-2. Merge with metadata (e.g., plate map) using harmonised plate and well columns.
-3. Clean and standardise metadata columns (cpd_id, cpd_type, Library).
-4. Impute missing data using KNN or median (or skip, as specified).
-5. Optionally normalise features to the DMSO control (robust z-score).
-6. Optionally scale features per plate.
-7. Perform feature selection by correlation and variance thresholding.
-8. Output the final table:
-   - By default, one row per object (cell).
-   - If --aggregate_per_well is set, aggregate features to the median per well.
+Workflow (high level)
+---------------------
+1) Discover & load per-object tables from --input_dir (excluding files whose names match /image|normalis(e|ed)|NOT_USED/i).
+2) Ensure Plate/Well columns exist:
+   - If missing, pull them from a sibling *_Image.csv[.gz] (or a unique folder-wide Image table).
+   - Harmonise to canonical names: Plate_Metadata, Well_Metadata.
+3) Read --metadata_file (plate map), harmonise Plate/Well, clean metadata (cpd_id, cpd_type, Library).
+4) Merge metadata many-to-one into the per-object table on Plate×Well.
+5) (Optional) Robust per-object outlier trimming (default: before imputation), within each plate×well:
+   - Compute per-feature median/MAD, convert to robust z-scores, aggregate |z| to one distance per object.
+   - Keep the most central fraction (default: central 90%) per group; drop the rest.
+   - Writes an optional per-group QC summary if --trim_qc_file is provided.
+6) (Optional) Impute missing numeric values (median or KNN).
+7) (Optional) DMSO normalisation per plate (robust z to DMSO med/MAD) unless --no_dmso_normalisation.
+8) (Optional) Scale numeric features per plate (standard, robust, or auto).
+9) Feature selection:
+   - Variance threshold filter.
+   - Correlation filter with selectable strategy and optional “protected” features.
+10) (Optional) Aggregate to per-well medians (if --aggregate_per_well).
+11) Write the final table (compressed if the filename ends with .gz). Optionally also write per-object output.
 
-Inputs:
--------
-- --input_dir:        Directory containing CellProfiler per-object CSV or CSV.GZ files.
-- --metadata_file:    CSV/TSV file with plate and well metadata (e.g., plate map).
-- --output_file:      Path to output file (tab- or comma-separated).
-- --merge_keys:       Comma-separated list of plate and well column names for merging (default: Plate,Well).
-- --impute:           Missing value imputation method: none, median, or knn.
-- --knn_neighbours:   Number of neighbours for KNN imputation (default: 5).
-- --scale_per_plate:  Flag to apply scaling per plate (default: off).
-- --scale_method:     Scaling method: standard, robust, auto, or none.
-- --no_dmso_normalisation:  Flag to skip DMSO normalisation (default: ON).
-- --correlation_threshold:  Correlation threshold for feature filtering (default: 0.99).
-- --variance_threshold:     Variance threshold for feature filtering (default: 0.05).
-- --aggregate_per_well:     If set, output one row per well (median of all objects in the well).
-- --sep:              Output file delimiter (default: tab).
-- --log_level:        Logging level.
+Key behaviors & notes
+---------------------
+• Outlier trimming ("robust z-distance"):
+  - Scope (--trim_scope): per_well (default), per_plate, or global.
+  - Metric (--trim_metric): 
+      - "q95" (recommended): 95th percentile of |z| across features.
+      - "l2": sqrt(mean(z^2)).
+      - "max": max(|z|).
+  - Keep fraction (--keep_central_fraction): default 0.90 keeps the central 90% within each group.
+  - Feature usability within a group is data-driven:
+      - Drop features from distance calc if > --trim_nan_feature_frac are NaN (default 0.5).
+      - Drop objects that have < --trim_min_features_per_cell fraction of the usable features (default 0.5).
+  - If a group yields no usable features (e.g., all MAD==0), the group is returned unchanged.
+  - Trimming stage (--trim_stage): "pre_impute" (default) or "post_impute".
+  - QC: if --trim_qc_file is provided, a small TSV with per-group {n_rows, n_kept, frac_kept, cutoff_distance} is written.
 
-Requirements:
+• DMSO normalisation:
+  - For each plate and feature: robust-z = (x − median_DMSO) / MAD_DMSO (MAD computed as median(|x − median|)).
+  - Skips scaling for features with MAD_DMSO == 0 (centering only).
+  - Disable with --no_dmso_normalisation.
+
+• Per-plate scaling:
+  - --scale_per_plate with --scale_method {standard, robust, auto}. 
+  - "auto" chooses standard vs robust via simple normality heuristics.
+
+• Feature selection:
+  - Variance filter: drop low-variance features (threshold configurable).
+  - Correlation filter: greedy removal above --correlation_threshold, with ranking strategy
+    (--corr_strategy {variance|min_redundancy}) and optional --protect_features to always keep.
+
+• Column handling:
+  - Plate/Well names are harmonised and zero-padded wells (e.g., A1→A01).
+  - Known bad strings (#VALUE!, #DIV/0!, NA, etc.) → NaN; all-NaN columns are dropped.
+  - "ImageNumber" and "ObjectNumber" are safe to be absent; if present they are removed from the final output.
+
+Inputs / Command-line arguments
+-------------------------------
+Core I/O
+  --input_dir                Directory with CellProfiler per-object CSV/CSV.GZ files.
+  --metadata_file            CSV/TSV plate map with plate/well metadata.
+  --output_file              Output path (TSV/CSV; gz compression if name ends with .gz).
+  --sep                      Output delimiter (default: tab).
+
+Merging / Harmonisation
+  --merge_keys               Comma-separated plate,well header names to prefer (default: Plate,Well).
+  --library                  If metadata lacks 'Library', set all rows to this value (else error).
+
+Trimming (optional; robust outlier removal)
+  --trim_objects             Enable robust per-object trimming (default: off).
+  --keep_central_fraction    Fraction to keep per group (default: 0.90).
+  --trim_scope               per_well | per_plate | global (default: per_well).
+  --trim_metric              q95 | l2 | max (default: q95).
+  --trim_stage               pre_impute | post_impute (default: pre_impute).
+  --trim_nan_feature_frac    Max NaN fraction per feature within a group (default: 0.5).
+  --trim_min_features_per_cell  Min fraction of usable features required per object (default: 0.5).
+  --trim_qc_file             Optional TSV path for trimming QC summary.
+
+Imputation / Normalisation / Scaling
+  --impute                   none | median | knn (default: knn).
+  --knn_neighbours           Neighbours for KNN (default: 5).
+  --no_dmso_normalisation    Skip DMSO normalisation (default: OFF → normalisation ON).
+  --scale_per_plate          Apply per-plate scaling (default: off).
+  --scale_method             standard | robust | auto | none (default: robust).
+
+Feature Selection
+  --variance_threshold       Drop features below variance threshold (default: 0.05).
+  --correlation_threshold    Drop features correlated ≥ threshold (default: 0.99).
+  --corr_strategy            variance | min_redundancy (default: variance).
+  --protect_features         Comma-separated list of features to always keep.
+
+Aggregation & Extra Outputs
+  --aggregate_per_well       Output one row per well (median of objects).
+  --per_well_output_file     Optional explicit path for the per-well output.
+  --per_object_output        Additionally write a per-object table aligned to selected features.
+  --no_compress_output       Force uncompressed output even if filename ends with .gz.
+
+Misc
+  --log_level                DEBUG | INFO | WARNING | ERROR (default: INFO).
+
+Requirements
+------------
+• Python 3.7+
+• pandas, numpy, scikit-learn, scipy, psutil
+• cell_painting.process_data.variance_threshold_selector in PYTHONPATH
+
+Example usage
 -------------
-- Python 3.7+
-- pandas, numpy, scikit-learn, scipy, psutil
-- cell_painting.process_data.py with required helper functions (in PYTHONPATH)
-
-Example usage:
---------------
-# Per-object output (default)
+# Default per-object pipeline with robust trimming (keep central 90%), DMSO normalisation, and feature selection
 python merge_cellprofiler_with_metadata_featureselect.py \
-    --input_dir ./raw_cp/ \
-    --output_file combined_raw_profiles.tsv \
-    --metadata_file plate_map.csv \
-    --merge_keys Plate,Well \
-    --impute knn \
-    --knn_neighbours 5 \
-    --scale_per_plate \
-    --scale_method auto \
-    --correlation_threshold 0.99 \
-    --variance_threshold 0.05 \
-    --sep '\t'
+  --input_dir ./raw_cp/ \
+  --metadata_file plate_map.csv \
+  --output_file per_object_selected.tsv.gz \
+  --merge_keys Plate,Well \
+  --trim_objects \
+  --keep_central_fraction 0.90 \
+  --trim_scope per_well \
+  --trim_metric q95 \
+  --impute knn \
+  --scale_per_plate \
+  --scale_method auto \
+  --correlation_threshold 0.99 \
+  --variance_threshold 0.05 \
+  --sep '\t'
 
-# Median-aggregated per-well output
+# Per-well output (median of objects), with trimming and a QC report
 python merge_cellprofiler_with_metadata_featureselect.py \
-    --input_dir ./raw_cp/ \
-    --output_file median_per_well.tsv \
-    --metadata_file plate_map.csv \
-    --aggregate_per_well \
-    --sep '\t'
+  --input_dir ./raw_cp/ \
+  --metadata_file plate_map.csv \
+  --output_file per_well_selected.tsv.gz \
+  --aggregate_per_well \
+  --trim_objects \
+  --keep_central_fraction 0.90 \
+  --trim_qc_file trim_qc.tsv \
+  --sep '\t'
 
-Author: Pete Thorpe, 2025
 
 """
-
+from __future__ import annotations
 import argparse
 import logging
 import os
@@ -155,6 +233,57 @@ def parse_args():
     parser.add_argument('--per_object_output',
                         action='store_true',
                         help='If set, output per-object (single cell) data as well as per-well aggregated. Default: False (only per-well output).')
+
+
+    # --- Outlier trimming (per-object) ---
+    parser.add_argument(
+        '--trim_objects',
+        action='store_true',
+        help='Trim per-object outliers by keeping the most central fraction within groups.'
+    )
+    parser.add_argument(
+        '--keep_central_fraction',
+        type=float,
+        default=0.90,
+        help='Fraction of objects to keep within each group (e.g., 0.90 keeps central 90%%).'
+    )
+    parser.add_argument(
+        '--trim_scope',
+        choices=['per_well', 'per_plate', 'global'],
+        default='per_well',
+        help='Grouping for robust centre estimation.'
+    )
+    parser.add_argument(
+        '--trim_metric',
+        choices=['q95', 'l2', 'max'],
+        default='q95',
+        help='How to aggregate per-feature |z| into one distance per object.'
+    )
+    parser.add_argument(
+        '--trim_stage',
+        choices=['pre_impute', 'post_impute'],
+        default='pre_impute',
+        help='Whether to trim before or after imputation.'
+    )
+    parser.add_argument(
+        '--trim_nan_feature_frac',
+        type=float,
+        default=0.5,
+        help='Drop features from the distance calculation if > this fraction is NaN within the group.'
+    )
+    parser.add_argument(
+        '--trim_min_features_per_cell',
+        type=float,
+        default=0.5,
+        help='Require at least this fraction of the usable features present for a cell; else the cell is dropped.'
+    )
+    parser.add_argument(
+        '--trim_qc_file',
+        type=str,
+        default=None,
+        help='Optional path to write a small QC table (TSV) with per-group trimming stats.'
+    )
+
 
     parser.add_argument('--no_compress_output',
                         action='store_true',
@@ -492,6 +621,207 @@ def attach_plate_well_with_fallback(
             merged = merged.rename(columns={cand: "Well_Metadata"})
 
     return merged, image_cache
+
+def trim_objects_by_robust_distance(
+    *,
+    df: pd.DataFrame,
+    groupby: Optional[list[str]],
+    feature_cols: Optional[list[str]],
+    keep_central_fraction: float = 0.90,
+    metric: str = "q95",
+    nan_feature_frac: float = 0.5,
+    min_features_per_cell: float = 0.5,
+    logger: Optional[logging.Logger] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Trim per-object outliers by keeping the most central fraction within groups.
+
+    The method is robust z-distance trimming:
+        - Within each group (e.g., per well), compute per-feature median and MAD.
+        - Convert values to robust z-scores: (x - median) / MAD.
+        - Aggregate |z| across features to one distance per object using:
+            'q95' (recommended), 'l2', or 'max'.
+        - Keep objects whose distance is at or below the group-specific
+          quantile implied by `keep_central_fraction`.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input per-object table, already cleaned/merged with metadata.
+    groupby : list[str] or None
+        Column names to define groups (e.g., ['Plate_Metadata', 'Well_Metadata']),
+        or None to treat all rows as one group.
+    feature_cols : list[str] or None
+        Numeric feature columns to consider. If None, they will be inferred
+        as numeric columns excluding common metadata fields.
+    keep_central_fraction : float, default 0.90
+        Fraction of objects to keep within each group (0 < f ≤ 1).
+    metric : {'q95', 'l2', 'max'}, default 'q95'
+        Aggregation of per-feature |z| into a single per-object distance.
+    nan_feature_frac : float, default 0.5
+        Drop a feature from the distance calculation within a group if the
+        fraction of NaNs in that group exceeds this threshold.
+    min_features_per_cell : float, default 0.5
+        Require that each object has at least this fraction of the usable
+        features non-NaN for the distance calculation; otherwise it is dropped.
+    logger : logging.Logger or None
+        Logger for messages.
+
+    Returns
+    -------
+    (pandas.DataFrame, pandas.DataFrame)
+        A tuple of (trimmed_df, qc_df), where qc_df reports, per group:
+        n_rows, n_kept, frac_kept, cutoff_distance.
+
+    Notes
+    -----
+    - Features with MAD==0 within a group are skipped for distance computation.
+    - If a group ends up with no usable features, the group is returned unchanged.
+    - Ties at the cutoff are kept (stable behaviour).
+    """
+    logger = logger or logging.getLogger("trim_logger")
+    # At the start of trim_objects_by_robust_distance(...)
+    if groupby:
+        missing = [g for g in groupby if g not in df.columns]
+        if missing:
+            (logger or logging.getLogger("trim_logger")
+            ).warning("Trimming: missing groupby columns %s; falling back to global.", missing)
+            groupby = None
+
+
+    if not (0.0 < keep_central_fraction <= 1.0):
+        raise ValueError("keep_central_fraction must be in (0, 1].")
+
+    # Infer feature columns if not provided
+    if feature_cols is None:
+        meta_like = {"cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata", "ImageNumber", "ObjectNumber"}
+        feature_cols = [
+            c for c in df.columns
+            if pd.api.types.is_numeric_dtype(df[c]) and c not in meta_like
+        ]
+    if not feature_cols:
+        logger.warning("No numeric feature columns to use for trimming; returning input unchanged.")
+        return df, pd.DataFrame(columns=["group_key", "n_rows", "n_kept", "frac_kept", "cutoff_distance"])
+
+    # Group iterator
+    if groupby and len(groupby) > 0:
+        groups = df.groupby(groupby, sort=False, observed=False, group_keys=False)
+    else:
+        # Single pseudo-group covering all rows
+        groups = [((), df)]
+
+    kept_masks = []
+    qc_rows = []
+
+    # Process each group independently
+    for key, g in (groups if isinstance(groups, list) else groups):
+        g_index = g.index
+
+        # Select usable features in this group
+        sub = g[feature_cols].astype('float32', copy=False)
+
+        # Drop features that are too missing in this group
+        missing_frac = sub.isna().mean(axis=0).values  # ndarray
+        use_feat_mask = missing_frac <= float(nan_feature_frac)
+        use_feats = [f for f, ok in zip(feature_cols, use_feat_mask) if ok]
+
+        if not use_feats:
+            # Cannot compute distances; keep group unchanged
+            kept_masks.append(pd.Series(True, index=g_index))
+            cutoff_val = np.nan
+            qc_rows.append((key, int(g.shape[0]), int(g.shape[0]), 1.0, cutoff_val))
+            continue
+
+        X = sub[use_feats].values  # 2D float32 with NaNs as needed
+
+        # Medians and MADs per feature within the group (ignore NaNs)
+        med = np.nanmedian(X, axis=0)
+        abs_dev = np.abs(X - med)
+        mad = np.nanmedian(abs_dev, axis=0)
+
+        # Skip features with MAD==0
+        nonzero = mad > 0
+        if not np.any(nonzero):
+            kept_masks.append(pd.Series(True, index=g_index))
+            cutoff_val = np.nan
+            qc_rows.append((key, int(g.shape[0]), int(g.shape[0]), 1.0, cutoff_val))
+            continue
+
+        med = med[nonzero]
+        mad = mad[nonzero]
+        Xnz = X[:, nonzero]
+
+        # Robust z
+        Z = (Xnz - med) / mad
+
+        # Count available features per cell
+        valid_counts = np.sum(~np.isnan(Z), axis=1)
+        min_req = int(np.ceil(float(min_features_per_cell) * Z.shape[1]))
+        # Cells with too-few features become NaN distance → filtered out below
+        too_few = valid_counts < max(min_req, 1)
+
+        # Distance per object
+        with np.errstate(invalid='ignore', divide='ignore'):
+            if metric == "q95":
+                dist = np.nanpercentile(np.abs(Z), 95, axis=1)
+            elif metric == "l2":
+                dist = np.sqrt(np.nanmean(Z * Z, axis=1))
+            elif metric == "max":
+                dist = np.nanmax(np.abs(Z), axis=1)
+            else:
+                raise ValueError(f"Unknown metric: {metric}")
+
+        # Invalidate rows with too few features
+        dist[too_few] = np.nan
+
+        # If everything is NaN, keep group unchanged
+        finite_mask = np.isfinite(dist)
+        if not np.any(finite_mask):
+            kept_masks.append(pd.Series(True, index=g_index))
+            cutoff_val = np.nan
+            qc_rows.append((key, int(g.shape[0]), int(g.shape[0]), 1.0, cutoff_val))
+            continue
+
+        # Keep central fraction
+        cutoff_val = np.nanquantile(dist[finite_mask], float(keep_central_fraction))
+        keep_mask = (dist <= cutoff_val) | ~finite_mask  # keep NaN-distance rows? No: drop them
+        # We will drop NaN-distance rows:
+        keep_mask = (dist <= cutoff_val) & finite_mask
+
+        n_rows = int(g.shape[0])
+        n_kept = int(np.sum(keep_mask))
+        frac_kept = (n_kept / n_rows) if n_rows else 1.0
+
+        kept_masks.append(pd.Series(keep_mask, index=g_index))
+        qc_rows.append((key, n_rows, n_kept, frac_kept, float(cutoff_val)))
+
+    # Combine masks
+    keep = pd.concat(kept_masks).reindex(df.index).fillna(False).astype(bool)
+    trimmed = df.loc[keep].copy()
+
+    # Build QC frame
+    def _key_to_tuple(k):
+        if isinstance(k, tuple):
+            return k
+        if k == ():
+            return ("__global__",)
+        return (k,)
+
+    qc_cols = (groupby if groupby and len(groupby) > 0 else ["__global__"]) + \
+              ["n_rows", "n_kept", "frac_kept", "cutoff_distance"]
+    qc_records = []
+    for k, n_rows, n_kept, frac_kept, cutoff in qc_rows:
+        k_tuple = _key_to_tuple(k)
+        qc_records.append(tuple(k_tuple) + (n_rows, n_kept, frac_kept, cutoff))
+    qc_df = pd.DataFrame.from_records(qc_records, columns=qc_cols)
+
+    logger.info(
+        "Trimming complete: kept %d / %d objects (%.1f%%).",
+        trimmed.shape[0], df.shape[0],
+        100.0 * (trimmed.shape[0] / max(df.shape[0], 1))
+    )
+    return trimmed, qc_df
+
 
 
 def correlation_filter_smart(
@@ -963,7 +1293,8 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None,
     else:
         logger.info("Imputation skipped.")
         return df
-    df[numeric_cols] = imputer.fit_transform(df[numeric_cols].astype(np.float32))
+    df[numeric_cols] = imputer.fit_transform(df[numeric_cols].astype(np.float32)).astype(np.float32)
+
     after_na = df[numeric_cols].isna().sum().sum()
     gc.collect()
     logger.info(f"Imputation complete (nans after: {after_na}).")
@@ -1796,6 +2127,50 @@ def main():
     # 5. Add row_number  - currently commented out. add if required, plus then alter the metadata_cols = [   ... too
     # merged_df.insert(0, "row_number", range(1, len(merged_df) + 1))
 
+    # --- 5b. Optional per-object trimming (robust z-distance) ---
+    if args.trim_objects and args.trim_stage == "pre_impute":
+        if args.trim_scope == "per_well":
+            trim_groups = ["Plate_Metadata", "Well_Metadata"]
+        elif args.trim_scope == "per_plate":
+            trim_groups = ["Plate_Metadata"]
+        else:
+            trim_groups = None  # global
+
+        # Define feature columns (numeric, excluding metadata fields)
+
+        # Right before building trim_features in main()
+        present_meta = set(merged_df.columns)
+        meta_like = present_meta.intersection({
+            "cpd_id", "cpd_type", "Library",
+            "Plate_Metadata", "Well_Metadata",
+            "ImageNumber", "ObjectNumber"
+        })
+        trim_features = [
+            c for c in merged_df.columns
+            if pd.api.types.is_numeric_dtype(merged_df[c]) and c not in meta_like
+        ]
+        logger.info(f"Trimming objects using features: {len(trim_features)} numeric columns.")
+
+        merged_df, trim_qc = trim_objects_by_robust_distance(
+            df=merged_df,
+            groupby=trim_groups,
+            feature_cols=trim_features,
+            keep_central_fraction=args.keep_central_fraction,
+            metric=args.trim_metric,
+            nan_feature_frac=args.trim_nan_feature_frac,
+            min_features_per_cell=args.trim_min_features_per_cell,
+            logger=logger,
+        )
+
+        if args.trim_qc_file:
+            # Always write TSV (never comma), and do not compress the tiny QC
+            trim_qc.to_csv(args.trim_qc_file, sep=args.sep, index=False)
+            logger.info("Wrote trimming QC to %s", args.trim_qc_file)
+    else:
+        logger.info("Per-object trimming not requested at this stage.")
+    log_memory_usage(logger, prefix=" [After trimming ] ")
+
+
     # 6. Impute missing data (if requested)
     # Replace inf, -inf, and very large values with NaN before imputation
     numeric_cols = merged_df.select_dtypes(include=[np.number]).columns
@@ -1826,6 +2201,41 @@ def main():
         merged_df = impute_missing(merged_df, method=args.impute, knn_neighbours=args.knn_neighbours, logger=logger)
     else:
         logger.info("Imputation skipped (impute=none).")
+
+    # --- 6b. Optional per-object trimming (post-impute) ---
+    if args.trim_objects and args.trim_stage == "post_impute":
+        if args.trim_scope == "per_well":
+            trim_groups = ["Plate_Metadata", "Well_Metadata"]
+        elif args.trim_scope == "per_plate":
+            trim_groups = ["Plate_Metadata"]
+        else:
+            trim_groups = None  # global
+
+        present_meta = set(merged_df.columns)
+        meta_like = present_meta.intersection({
+            "cpd_id", "cpd_type", "Library",
+            "Plate_Metadata", "Well_Metadata",
+            "ImageNumber", "ObjectNumber"
+        })
+        trim_features = [
+            c for c in merged_df.columns
+            if pd.api.types.is_numeric_dtype(merged_df[c]) and c not in meta_like
+        ]
+        logger.info(f"[post-impute] Trimming objects using {len(trim_features)} numeric columns.")
+        merged_df, trim_qc = trim_objects_by_robust_distance(
+            df=merged_df,
+            groupby=trim_groups,
+            feature_cols=trim_features,
+            keep_central_fraction=args.keep_central_fraction,
+            metric=args.trim_metric,
+            nan_feature_frac=args.trim_nan_feature_frac,
+            min_features_per_cell=args.trim_min_features_per_cell,
+            logger=logger,
+        )
+        if args.trim_qc_file:
+            trim_qc.to_csv(args.trim_qc_file, sep=args.sep, index=False)
+            logger.info("Wrote post-impute trimming QC to %s", args.trim_qc_file)
+        
 
 
     # 7a. default DMSO normalisation (then scaling, before feature selection)
@@ -1964,11 +2374,18 @@ def main():
     # Correlation filter
     if args.correlation_threshold and args.correlation_threshold > 0.0:
         logger.info(f"Applying correlation threshold: {args.correlation_threshold}")
+        # Apply correlation threshold filter
+        # This will also generate a PDF with correlation diagnostics
+        # Strategy: "mean", "median", "max", "min", "random"
+
+        
         filtered_corr = correlation_filter_smart(filtered_var,
-                                                threshold=args.correlation_threshold, 
-                                                strategy="variance",
-                                                logger=logger
-                                            )
+                                                 threshold=args.correlation_threshold,
+                                                 strategy=args.corr_strategy,
+                                                 protect=args.protect_features,
+                                                 logger=logger,
+                                                 )
+
         logger.info("Feature selection summary: start=%d → after variance=%d → after correlation=%d",
                     len(feature_cols), filtered_var.shape[1], filtered_corr.shape[1])
 
