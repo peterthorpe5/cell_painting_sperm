@@ -89,8 +89,8 @@ Trimming (optional; robust outlier removal)
   --trim_scope               per_well | per_plate | global (default: per_well).
   --trim_metric              q95 | l2 | max (default: q95).
   --trim_stage               pre_impute | post_impute (default: pre_impute).
-  --trim_nan_feature_frac    Max NaN fraction per feature within a group (default: 0.5).
-  --trim_min_features_per_cell  Min fraction of usable features required per object (default: 0.5).
+  --trim_nan_feature_frac    Max NaN fraction per feature within a group (default: 0.7).
+  --trim_min_features_per_cell  Min fraction of usable features required per object (default: 0.25).
   --trim_qc_file             Optional TSV path for trimming QC summary.
 
 Imputation / Normalisation / Scaling
@@ -268,13 +268,13 @@ def parse_args():
     parser.add_argument(
         '--trim_nan_feature_frac',
         type=float,
-        default=0.5,
+        default=0.7,
         help='Drop features from the distance calculation if > this fraction is NaN within the group.'
     )
     parser.add_argument(
         '--trim_min_features_per_cell',
         type=float,
-        default=0.5,
+        default=0.25,
         help='Require at least this fraction of the usable features present for a cell; else the cell is dropped.'
     )
     parser.add_argument(
