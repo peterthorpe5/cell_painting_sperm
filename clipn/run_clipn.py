@@ -63,6 +63,7 @@ import psutil
 import concurrent.futures
 import torch
 import torch.serialization
+import gzip
 from clipn.model import CLIPn
 from sklearn import set_config
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
@@ -190,6 +191,7 @@ def torch_load_compat(model_path: str, *, map_location: str | None = None, weigh
 def detect_csv_delimiter(csv_path: str) -> str:
     """
     Detect the delimiter of a small text file (prefer tab if ambiguous).
+    Transparently supports gzip (.gz) inputs.
 
     Parameters
     ----------
@@ -201,7 +203,8 @@ def detect_csv_delimiter(csv_path: str) -> str:
     str
         Detected delimiter, one of: '\\t' or ','.
     """
-    with open(csv_path, "r", newline="") as handle:
+    opener = gzip.open if str(csv_path).endswith(".gz") else open
+    with opener(csv_path, "r", newline="") as handle:
         sample = handle.read(4096)
     has_tab = "\t" in sample
     has_comma = "," in sample
@@ -919,11 +922,11 @@ def merge_annotations(
 
 
 def _read_csv_fast(path: str, delimiter: str) -> pd.DataFrame:
-    # Try pyarrow engine (fast); fall back to default
+    # Try pyarrow engine (fast); fall back to pandas' python engine.
     try:
         return pd.read_csv(path, delimiter=delimiter, engine="pyarrow")
     except Exception:
-        return pd.read_csv(path, delimiter=delimiter)
+        return pd.read_csv(path, delimiter=delimiter, engine="python", compression="infer")
 
 
 def read_table_auto(path: str) -> pd.DataFrame:
