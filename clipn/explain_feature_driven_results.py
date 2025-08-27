@@ -403,6 +403,17 @@ def per_feature_stats(
     for feat in feature_cols:
         a = df[feat].values[a_idx]
         b = df[feat].values[b_idx]
+        # Guard: skip empty distributions
+        if a.size == 0 or b.size == 0:
+            rows.append({
+                "feature": feat,
+                "median_A": np.nan,
+                "median_B": np.nan,
+                "median_diff": np.nan,
+                "emd": np.nan,
+                "p": 1.0  # neutral
+            })
+            continue
         med_a = float(np.median(a))
         med_b = float(np.median(b))
         med_diff = med_a - med_b
@@ -476,6 +487,18 @@ def run_query_background(
 
     if n_a < 3 or n_b < 10:
         logger.warning("Too few wells for robust stats (query<3 or background<10). Proceeding anyway.")
+
+    if n_a == 0:
+        logger.error("No wells found for query %s; skipping.", query_id)
+        return pd.DataFrame(columns=["feature","median_A","median_B","median_diff","emd","p","q"])
+
+    if n_b == 0:
+        logger.error("No background wells available; skipping %s.", query_id)
+        return pd.DataFrame(columns=["feature","median_A","median_B","median_diff","emd","p","q"])
+
+    if n_a < 3 or n_b < 10:
+        logger.warning("Too few wells for robust stats (query<3 or background<10). Proceeding anyway.")
+
 
     stats = per_feature_stats(df=df_num, feature_cols=feature_cols, mask_a=mask_a, mask_b=mask_b, test=test)
     return stats
@@ -577,9 +600,12 @@ def run_query_vs_neighbours(
     nn_dir = Path(out_dir) / "nn_compare"
     nn_dir.mkdir(parents=True, exist_ok=True)
 
+    MIN_Q = 2
+    MIN_N = 2
+
     for nid in neighbour_ids:
         nmask = df_num["cpd_id"].astype(str).str.upper() == str(nid).upper()
-        if qmask.sum() < 3 or nmask.sum() < 3:
+        if qmask.sum() < MIN_Q or nmask.sum() < MIN_N:
             logger.info("Skipping neighbour %s due to low sample counts (query=%d, neighbour=%d).",
                         nid, int(qmask.sum()), int(nmask.sum()))
             continue
@@ -667,6 +693,19 @@ def main() -> None:
     queries = collect_query_ids(args.query_ids, args.query_file, logger)
     logger.info("Queries: %s", queries)
 
+    # Ensure queries exist in the feature table (case-insensitive)
+
+    present = set(df_num["cpd_id"].astype(str).str.upper())
+    original_queries = list(queries)
+    queries = [q for q in original_queries if q.upper() in present]
+    missing = [q for q in original_queries if q.upper() not in present]
+    if missing:
+        logger.warning("Skipping queries not present in the feature table: %s", missing)
+    if not queries:
+        logger.error("No valid queries remain after presence check; exiting.")
+        return
+
+
     # Load features (single table or manifest), keep numeric + cpd_id
     df_raw = load_feature_manifest(list_or_single=args.ungrouped_list, logger=logger)
     df_num, feature_cols = ensure_numeric_features(df=df_raw, logger=logger)
@@ -697,6 +736,8 @@ def main() -> None:
             test=args.test,
             logger=logger,
         )
+
+
         write_tsv(df=stats, path=q_dir / "query_vs_background_stats.tsv", logger=logger)
         write_top_enriched_depleted(stats=stats, out_dir=q_dir, top_n=args.top_features, logger=logger)
 
