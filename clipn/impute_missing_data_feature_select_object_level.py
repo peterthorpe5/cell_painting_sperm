@@ -36,12 +36,12 @@ Workflow (high level)
 10) (Optional) Aggregate to per-well medians (if --aggregate_per_well).
 11) Write the final table (compressed if the filename ends with .gz). Optionally also write per-object output.
 
-Key behaviors & notes
+Key behaviours & notes
 ---------------------
 • Outlier trimming ("robust z-distance"):
   - Scope (--trim_scope): per_well (default), per_plate, or global.
   - Metric (--trim_metric): 
-      - "q95" (recommended): 95th percentile of |z| across features.
+      - "q95" (recommended): 95th qunatile of |z| across features.
       - "l2": sqrt(mean(z^2)).
       - "max": max(|z|).
   - Keep fraction (--keep_central_fraction): default 0.90 keeps the central 90% within each group.
@@ -255,10 +255,17 @@ def parse_args():
     )
     parser.add_argument(
         '--trim_metric',
-        choices=['q95', 'l2', 'max'],
+        choices=['q', 'q95', 'l2', 'max'],
         default='q95',
-        help='How to aggregate per-feature |z| into one distance per object.'
+        help='How to aggregate per-feature |z| into one distance per object.e '
     )
+    parser.add_argument(
+        '--trim_quantile',
+        type=float,
+        default=0.90,
+        help='Quantile in (0, 1] used when --trim_metric is q/q95 (default: 0.90). '
+    )
+
     parser.add_argument(
         '--trim_stage',
         choices=['pre_impute', 'post_impute'],
@@ -631,6 +638,7 @@ def trim_objects_by_robust_distance(
     metric: str = "q95",
     nan_feature_frac: float = 0.5,
     min_features_per_cell: float = 0.5,
+    trim_quantile: float = 0.90,
     logger: Optional[logging.Logger] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -642,7 +650,10 @@ def trim_objects_by_robust_distance(
         - Aggregate |z| across features to one distance per object using:
             'q95' (recommended), 'l2', or 'max'.
         - Keep objects whose distance is at or below the group-specific
-          quantile implied by `keep_central_fraction`.
+    
+    quantile implied by `keep_central_fraction`.
+              trim_quantile : float, optional
+        Quantile in (0, 1] used when `metric == "q95"`. Defaults to 0.90.
 
     Parameters
     ----------
@@ -691,6 +702,9 @@ def trim_objects_by_robust_distance(
 
     if not (0.0 < keep_central_fraction <= 1.0):
         raise ValueError("keep_central_fraction must be in (0, 1].")
+    
+    if not (0.0 < trim_quantile <= 1.0):
+        raise ValueError("trim_quantile must be in (0, 1].")
 
     # Infer feature columns if not provided
     if feature_cols is None:
@@ -763,7 +777,7 @@ def trim_objects_by_robust_distance(
         # Distance per object
         with np.errstate(invalid='ignore', divide='ignore'):
             if metric == "q95":
-                dist = np.nanpercentile(np.abs(Z), 95, axis=1)
+                dist = np.nanquantile(np.abs(Z), trim_quantile, axis=1)
             elif metric == "l2":
                 dist = np.sqrt(np.nanmean(Z * Z, axis=1))
             elif metric == "max":
@@ -1288,7 +1302,7 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None,
     if method == "median":
         imputer = SimpleImputer(strategy="median")
     elif method == "knn":
-        logger.info("Running KNN imputation (may be memory-intensive).")
+        logger.info("Running KNN imputation (may be memory-intensive and CPU ... ).")
         imputer = KNNImputer(n_neighbors=knn_neighbours)
     else:
         logger.info("Imputation skipped.")
@@ -1375,6 +1389,7 @@ def find_merge_columns(feature_cols, meta_cols, candidates=None):
                     if cand.replace('_','').lower() == mcol.replace('_','').lower():
                         found[cand] = (fcol, mcol)
     return found
+
 
 def robust_merge_features_and_metadata(features_df, meta_df, logger=None):
     """
@@ -1648,6 +1663,7 @@ def auto_select_scaler(df, feature_cols, logger):
     scaler = "standard" if normal_fraction > 0.5 else "robust"
     logger.info(f"Normality fraction={normal_fraction:.2f}. Using scaler: {scaler}.")
     return scaler
+
 
 def infer_dtypes(filename, nrows=1000):
     """
@@ -1999,7 +2015,7 @@ def main():
     meta_df[meta_plate_col] = _norm_plate(meta_df[meta_plate_col])
     meta_df[meta_well_col]  = _norm_well(meta_df[meta_well_col])
 
-    # --- 1) Audit duplicates by PlatexWell ---
+    # --- 1) Audit duplicates by Plate x Well ---
     dup_mask = meta_df.duplicated([meta_plate_col, meta_well_col], keep=False)
     if dup_mask.any():
         dup_preview = meta_df.loc[
@@ -2159,6 +2175,7 @@ def main():
             metric=args.trim_metric,
             nan_feature_frac=args.trim_nan_feature_frac,
             min_features_per_cell=args.trim_min_features_per_cell,
+            trim_quantile=args.trim_quantile,
             logger=logger,
         )
 
@@ -2230,6 +2247,7 @@ def main():
             metric=args.trim_metric,
             nan_feature_frac=args.trim_nan_feature_frac,
             min_features_per_cell=args.trim_min_features_per_cell,
+            trim_quantile=args.trim_quantile,
             logger=logger,
         )
         if args.trim_qc_file:
