@@ -199,6 +199,13 @@ def parse_args():
                         help='Impute missing values: "none", "median", or "knn" (default: knn).')
     parser.add_argument('--knn_neighbours', type=int, default=5,
                         help='Neighbours for KNN imputation (default: 5).')
+    parser.add_argument('--impute_scope',
+                        choices=['global', 'per_plate', 'per_well'],
+                        default='per_plate',
+                        help='Scope for imputation. Median is fully vectorised for all scopes; '
+                            'KNN runs per group for memory/speed if a grouped scope is chosen.'
+                    )
+
     parser.add_argument('--scale_per_plate', action='store_true', help='Apply scaling per plate (default: False).')
     parser.add_argument('--scale_method', choices=['standard', 'robust', 'auto', 'none'], default='robust',
                         help='Scaling method: "standard", "robust", "auto", or "none" (default: robust).')
@@ -1249,8 +1256,16 @@ def harmonise_column_names(df, candidates, target, logger):
 
 
 
-def impute_missing(df, method="knn", knn_neighbours=5, logger=None,
-                   max_cells=100000000, max_features=300000):
+def impute_missing(
+    df: pd.DataFrame,
+    method: str = "knn",
+    knn_neighbours: int = 5,
+    logger=None,
+    scope: str = "global",
+    max_cells: int = 100_000_000,
+    max_features: int = 300_000,
+) -> pd.DataFrame:
+
     """
     Impute missing values for all numeric columns.
 
@@ -1269,50 +1284,132 @@ def impute_missing(df, method="knn", knn_neighbours=5, logger=None,
     logger : logging.Logger or None
         Logger for status messages.
 
+        Impute missing values for numeric columns.
+
+    - median: fully vectorised (global / per-plate / per-well) via groupby.transform
+              + a global safety fill for any leftover NaNs.
+    - knn:    uses sklearn KNNImputer; if scope != global, runs per group to
+              reduce memory + improve locality. Falls back to median when groups
+              are too small for KNN.
+
+    'scope' requires columns:
+        per_plate -> Plate_Metadata
+        per_well  -> Plate_Metadata, Well_Metadata
+        
+
     Returns
     -------
     pandas.DataFrame
         DataFrame with imputed numeric columns.
     """
     logger = logger or logging.getLogger("impute_logger")
-    n_cells, n_cols = df.shape
+    n_rows, n_cols_total = df.shape
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-    if n_cells > max_cells or len(numeric_cols) > max_features:
+    if n_rows > max_cells or len(numeric_cols) > max_features:
         logger.warning(
-            f"Imputation skipped: dataset too large for safe in-memory imputation "
-            f"({n_cells:,} rows, {len(numeric_cols)} numeric columns; "
-            f"thresholds: {max_cells:,} rows, {max_features} columns)."
+            "Imputation skipped: dataset too large (%s rows, %s numeric cols; "
+            "thresholds: %s rows, %s cols).", f"{n_rows:,}", len(numeric_cols),
+            f"{max_cells:,}", max_features
         )
         return df
 
     if not numeric_cols:
         logger.warning("No numeric columns found for imputation.")
         return df
-    
-    # Drop columns that are all-NaN
-    nan_all = [col for col in numeric_cols if df[col].isnull().all()]
-    if nan_all:
-        logger.warning(f"Dropping {len(nan_all)} all-NaN columns before imputation: {nan_all}")
-        df = df.drop(columns=nan_all)
-        numeric_cols = [col for col in numeric_cols if col not in nan_all]
 
-    before_na = df[numeric_cols].isna().sum().sum()
-    logger.info(f"Imputing missing values in {len(numeric_cols)} numeric columns (nans before: {before_na})...")
+    # Drop columns that are all-NaN (imputers cannot recover these)
+    all_nan = [c for c in numeric_cols if df[c].isna().all()]
+    if all_nan:
+        logger.warning("Dropping %d all-NaN columns before imputation (e.g. %s...)",
+                       len(all_nan), all_nan[:5])
+        df = df.drop(columns=all_nan)
+        numeric_cols = [c for c in numeric_cols if c not in all_nan]
+        if not numeric_cols:
+            return df
+
+    # Replace inf/-inf/huge with NaN, and downcast for speed
+    df.loc[:, numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan).astype(np.float32)
+
+    # -------- median (fully vectorised) --------
     if method == "median":
-        imputer = SimpleImputer(strategy="median")
-    elif method == "knn":
-        logger.info("Running KNN imputation (may be memory-intensive and CPU ... ).")
-        imputer = KNNImputer(n_neighbors=knn_neighbours)
-    else:
-        logger.info("Imputation skipped.")
-        return df
-    df[numeric_cols] = imputer.fit_transform(df[numeric_cols].astype(np.float32)).astype(np.float32)
+        logger.info("Median imputation (%s scope) on %d numeric columns.", scope, len(numeric_cols))
 
-    after_na = df[numeric_cols].isna().sum().sum()
-    gc.collect()
-    logger.info(f"Imputation complete (nans after: {after_na}).")
-    return df
+        if scope == "global":
+            med = df[numeric_cols].median(numeric_only=True)
+            df.loc[:, numeric_cols] = df[numeric_cols].fillna(med)
+
+        elif scope == "per_plate":
+            if "Plate_Metadata" not in df.columns:
+                raise ValueError("per_plate median imputation requires 'Plate_Metadata'.")
+            med = df.groupby("Plate_Metadata", observed=False)[numeric_cols].transform("median")
+            df.loc[:, numeric_cols] = df[numeric_cols].where(~df[numeric_cols].isna(), med)
+
+        elif scope == "per_well":
+            keys = ["Plate_Metadata", "Well_Metadata"]
+            missing = [k for k in keys if k not in df.columns]
+            if missing:
+                raise ValueError(f"per_well median imputation requires {missing}.")
+            med = df.groupby(keys, observed=False)[numeric_cols].transform("median")
+            df.loc[:, numeric_cols] = df[numeric_cols].where(~df[numeric_cols].isna(), med)
+
+        else:
+            raise ValueError(f"Unknown impute_scope: {scope}")
+
+        # global safety fill for any columns that were entirely NaN within a group
+        global_med = df[numeric_cols].median(numeric_only=True)
+        df.loc[:, numeric_cols] = df[numeric_cols].fillna(global_med).astype(np.float32)
+        return df
+
+    # -------- knn (vectorised inside sklearn; optionally grouped) --------
+    if method == "knn":
+        from sklearn.impute import KNNImputer
+        logger.info("KNN imputation (k=%d, scope=%s) on %d numeric columns.",
+                    knn_neighbours, scope, len(numeric_cols))
+
+        def _knn_block(block: pd.DataFrame) -> pd.DataFrame:
+            # if too small for KNN, fallback to median (vectorised)
+            if block.shape[0] <= 1:
+                return block
+            k = min(knn_neighbours, max(1, block.shape[0] - 1))
+            try:
+                imputer = KNNImputer(n_neighbors=k)
+                vals = imputer.fit_transform(block[numeric_cols].astype(np.float32))
+                block.loc[:, numeric_cols] = vals.astype(np.float32)
+                return block
+            except Exception as e:
+                # fallback to median within the block
+                med = block[numeric_cols].median(numeric_only=True)
+                block.loc[:, numeric_cols] = block[numeric_cols].fillna(med).astype(np.float32)
+                logger.warning("KNN failed in a block (k=%d): %s; fell back to median.", k, e)
+                return block
+
+        if scope == "global":
+            df = _knn_block(df)
+        elif scope == "per_plate":
+            if "Plate_Metadata" not in df.columns:
+                raise ValueError("per_plate KNN requires 'Plate_Metadata'.")
+            parts = []
+            for _, g in df.groupby("Plate_Metadata", sort=False, observed=False):
+                parts.append(_knn_block(g))
+            df = pd.concat(parts, axis=0, ignore_index=False)
+        elif scope == "per_well":
+            keys = ["Plate_Metadata", "Well_Metadata"]
+            missing = [k for k in keys if k not in df.columns]
+            if missing:
+                raise ValueError(f"per_well KNN requires {missing}.")
+            parts = []
+            for _, g in df.groupby(keys, sort=False, observed=False):
+                parts.append(_knn_block(g))
+            df = pd.concat(parts, axis=0, ignore_index=False)
+        else:
+            raise ValueError(f"Unknown impute_scope: {scope}")
+
+        return df
+
+    # -------- none --------
+    logger.info("Imputation skipped (method=none).")
+    return df    
 
 
 def clean_metadata_columns(df, logger=None):
@@ -2215,9 +2312,16 @@ def main():
 
 
     if args.impute != "none":
-        merged_df = impute_missing(merged_df, method=args.impute, knn_neighbours=args.knn_neighbours, logger=logger)
+        merged_df = impute_missing(merged_df,
+                                    method=args.impute,
+                                    knn_neighbours=args.knn_neighbours,
+                                    logger=logger,
+                                    scope=args.impute_scope,
+                                )
     else:
         logger.info("Imputation skipped (impute=none).")
+
+
 
     # --- 6b. Optional per-object trimming (post-impute) ---
     if args.trim_objects and args.trim_stage == "post_impute":

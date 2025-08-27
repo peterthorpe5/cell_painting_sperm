@@ -746,6 +746,41 @@ def extend_model_encoders(
         logger.debug("Assigned encoder for dataset key %s using reference encoder %s", new_key, reference_key)
 
 
+
+def _apply_threads(n: int, logger):
+    n = max(1, int(n))
+
+    # Limit BLAS/OpenMP pools (works even without scheduler detection)
+    for var in (
+        "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS"
+    ):
+        os.environ[var] = str(n)
+
+    # PyTorch
+    torch.set_num_threads(n)
+    torch.set_num_interop_threads(max(1, n // 2))
+    try:
+        torch.backends.cudnn.benchmark = True
+    except Exception:
+        pass
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+    # (Optional, but nice) also cap NumPy/MKL/OpenBLAS at runtime if available
+    try:
+        from threadpoolctl import threadpool_limits
+        # keep the limiter alive for the process lifetime
+        globals()["_CLIPN_TPCTL"] = threadpool_limits(n, user_api=["blas", "openmp"])
+    except Exception:
+        pass
+
+    logger.info(f"CPU threads set to {n}")
+    return n
+
+
 def run_clipn_integration(
     df: pd.DataFrame,
     logger: logging.Logger,
@@ -1106,6 +1141,15 @@ def main(args: argparse.Namespace) -> None:
     configure_torch_performance(logger)
     logger.info("Starting CLIPn integration pipeline")
     logger.info("PyTorch Version: %s", getattr(torch, "__version__", "unknown"))
+
+    # pick a number without scheduler probing
+    _threads = (
+        args.cpu_threads or
+        int(os.environ.get("OMP_NUM_THREADS", "0")) or
+        (os.cpu_count() or 1)
+    )
+    _CLIPN_THREADS = _apply_threads(_threads, logger)
+    
 
     _register_clipn_for_pickle()
     post_clipn_dir = Path(args.out) / "post_clipn"
@@ -1639,5 +1683,8 @@ if __name__ == "__main__":
         default=None,
         help="Optional annotation TSV to merge using Plate/Well.",
     )
+    parser.add_argument("--cpu_threads", type=int, default=None,
+                    help="Force number of CPU threads (overrides env/SLURM).")
+
 
     main(parser.parse_args())
