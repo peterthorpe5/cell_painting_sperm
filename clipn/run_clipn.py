@@ -204,8 +204,9 @@ def detect_csv_delimiter(csv_path: str) -> str:
         Detected delimiter, one of: '\\t' or ','.
     """
     opener = gzip.open if str(csv_path).endswith(".gz") else open
-    with opener(csv_path, "r", newline="") as handle:
+    with opener(csv_path, mode="rt", encoding="utf-8", errors="replace", newline="") as handle:
         sample = handle.read(4096)
+
     has_tab = "\t" in sample
     has_comma = "," in sample
     if has_tab and has_comma:
@@ -214,7 +215,6 @@ def detect_csv_delimiter(csv_path: str) -> str:
         return "\t"
     if has_comma:
         return ","
-    # Default to TSV
     return "\t"
 
 
