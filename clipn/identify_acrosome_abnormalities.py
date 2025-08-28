@@ -5,7 +5,7 @@ Batch comparison: All compounds vs. DMSO — Acrosome Features
 ===========================================================
 
 For each compound, compare its wells to DMSO wells using a non-parametric test
-(Mann–Whitney U by default, or Kolmogorov–Smirnov) plus Earth Mover’s Distance.
+(Mann-Whitney U by default, or Kolmogorov-Smirnov) plus Earth Mover's Distance.
 Outputs per-compound:
 - Top N features (TSV + XLSX)
 - All significant features by FDR (TSV + XLSX)
@@ -45,7 +45,7 @@ import logging
 import os
 from collections import defaultdict
 from typing import Dict, List, Tuple
-
+import re
 import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp, mannwhitneyu, wasserstein_distance
@@ -140,6 +140,44 @@ def read_table_auto(path: str, logger: logging.Logger) -> pd.DataFrame:
     except Exception as exc:
         logger.error("Failed to read %s: %s", path, exc)
         raise
+
+
+import re
+
+# Columns to always treat as metadata (never as features)
+BANNED_FEATURES_EXACT = {
+    "ImageNumber",
+    "Number_Object_Number",
+    "ObjectNumber",
+    "TableNumber",
+}
+
+# Heuristics for metadata/housekeeping columns (case-insensitive)
+BANNED_FEATURES_REGEX = re.compile(
+    r"""(?ix)
+        ( ^metadata($|_)         # Metadata*, *_Metadata
+        | _metadata$
+        | ^filename_             # FileName_*
+        | ^pathname_             # PathName_*
+        | ^url_                  # URL_*
+        | ^parent_               # Parent_*
+        | ^children_             # Children_*
+        | (^|_)imagenumber$      # ImageNumber (allow a prefix_)
+        | ^number_object_number$ # Number_Object_Number
+        | ^objectnumber$         # ObjectNumber
+        | ^tablenumber$          # TableNumber
+        )
+    """
+)
+
+def _is_metadata_like(col: str) -> bool:
+    """
+    Return True if a column name is metadata/housekeeping and must not be used as a feature.
+    """
+    cname = str(col)
+    if cname in BANNED_FEATURES_EXACT:
+        return True
+    return bool(BANNED_FEATURES_REGEX.search(cname.lower()))
 
 
 def ensure_columns(df: pd.DataFrame, required_cols: List[str], fill_value="missing") -> pd.DataFrame:
@@ -322,15 +360,16 @@ def select_feature_columns(
     drop_constant: bool = True,
 ) -> List[str]:
     """
-    Select numeric feature columns, excluding ID/label metadata, and optionally
-    drop all-NaN or constant columns.
+    Select numeric feature columns, excluding ID/label metadata and any
+    housekeeping columns (e.g. ImageNumber, Number_Object_Number). Optionally
+    drop all-NaN or constant-variance columns.
 
     Parameters
     ----------
     df : pd.DataFrame
         Input data.
     id_cols : list[str]
-        Non-feature columns to exclude.
+        Non-feature columns to exclude (e.g. 'cpd_id', 'cpd_type').
     logger : logging.Logger
         Logger.
     drop_all_nan : bool
@@ -343,12 +382,27 @@ def select_feature_columns(
     list[str]
         Selected feature columns.
     """
-    feature_cols = [
-        c for c in df.columns
-        if pd.api.types.is_numeric_dtype(df[c]) and c not in id_cols
-    ]
+    # Start with numeric candidates
+    numeric_candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
 
-    if drop_all_nan:
+    # Exclude explicit ID/label columns and anything metadata-like
+    feature_cols = []
+    dropped = []
+    non_feature = set(id_cols)
+
+    for c in numeric_candidates:
+        if c in non_feature or _is_metadata_like(c):
+            dropped.append(c)
+        else:
+            feature_cols.append(c)
+
+    if dropped:
+        logger.info(
+            "Excluded %d metadata/housekeeping columns from feature set (first few: %s)",
+            len(dropped), ", ".join(map(str, dropped[:10]))
+        )
+
+    if drop_all_nan and feature_cols:
         before = len(feature_cols)
         feature_cols = [c for c in feature_cols if not df[c].isna().all()]
         logger.info("Dropped %d all-NaN feature columns.", before - len(feature_cols))
@@ -356,11 +410,19 @@ def select_feature_columns(
     if drop_constant and feature_cols:
         before = len(feature_cols)
         variances = df[feature_cols].var(numeric_only=True)
-        feature_cols = [c for c in feature_cols if variances.loc[c] > 0.0 or pd.isna(variances.loc[c]) is False]
+        feature_cols = [c for c in feature_cols if pd.notna(variances.loc[c]) and variances.loc[c] > 0.0]
         logger.info("Dropped %d constant-variance feature columns.", before - len(feature_cols))
 
     logger.info("Selected %d feature columns.", len(feature_cols))
+
+    if not feature_cols:
+        raise ValueError(
+            "No usable feature columns remain after excluding metadata/housekeeping "
+            "and dropping empty/constant columns. Please inspect inputs."
+        )
+
     return feature_cols
+
 
 
 def infer_acrosome_features(feature_cols: List[str], logger: logging.Logger) -> List[str]:

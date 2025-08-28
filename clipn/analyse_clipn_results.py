@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Iterable, List, Tuple
-
+import re
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -114,9 +114,58 @@ def validate_columns(df: pd.DataFrame, required: Iterable[str], logger: logging.
         raise ValueError(f"Missing required columns: {missing}")
 
 
+
+# Never treat these as features, even if numeric
+BANNED_FEATURES_EXACT = {
+    "ImageNumber",
+    "Number_Object_Number",
+    "ObjectNumber",
+    "TableNumber",
+}
+
+# Heuristics for metadata/housekeeping columns (case-insensitive)
+BANNED_FEATURES_REGEX = re.compile(
+    r"""(?ix)
+        ( ^metadata($|_)         # Metadata*, *_Metadata
+        | _metadata$
+        | ^filename_             # FileName_*
+        | ^pathname_             # PathName_*
+        | ^url_                  # URL_*
+        | ^parent_               # Parent_*
+        | ^children_             # Children_*
+        | (^|_)imagenumber$      # ImageNumber (optionally with a prefix_)
+        | ^number_object_number$ # Number_Object_Number
+        | ^objectnumber$         # ObjectNumber
+        | ^tablenumber$          # TableNumber
+        )
+    """
+)
+
+def _is_metadata_like(col: str) -> bool:
+    """
+    Return True if a column name should be treated as metadata/housekeeping and
+    excluded from feature analyses.
+
+    Parameters
+    ----------
+    col : str
+        Column name to test.
+
+    Returns
+    -------
+    bool
+        True if the column is metadata-like, otherwise False.
+    """
+    cname = str(col)
+    if cname in BANNED_FEATURES_EXACT:
+        return True
+    return bool(BANNED_FEATURES_REGEX.search(cname.lower()))
+
+
 def select_latent_features(df: pd.DataFrame, prefix: str | None, logger: logging.Logger) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Select latent numeric feature columns for neighbour analysis.
+    Select latent numeric feature columns for neighbour analysis, excluding
+    metadata/housekeeping columns such as ImageNumber and Number_Object_Number.
 
     Parameters
     ----------
@@ -124,26 +173,47 @@ def select_latent_features(df: pd.DataFrame, prefix: str | None, logger: logging
         Input DataFrame with latent features and metadata.
     prefix : str | None
         If provided, select columns that start with this prefix and are numeric.
-        Otherwise select digit-named columns (e.g. "0", "1", …) that are numeric.
+        Otherwise select digit-named columns (e.g. "0", "1", ...) that are numeric.
     logger : logging.Logger
         Logger instance.
 
     Returns
     -------
     tuple[pd.DataFrame, list[str]]
-        (Feature matrix copy, list of selected feature column names).
+        A copy of the feature matrix and the list of selected feature names.
+
+    Raises
+    ------
+    ValueError
+        If no usable latent feature columns are found after exclusions.
     """
     if prefix:
-        cols = [c for c in df.columns if isinstance(c, str) and c.startswith(prefix) and pd.api.types.is_numeric_dtype(df[c])]
-    else:
-        cols = [
+        candidates = [
             c for c in df.columns
-            if (isinstance(c, str) and c.isdigit()) and pd.api.types.is_numeric_dtype(df[c])
+            if isinstance(c, str) and c.startswith(prefix) and pd.api.types.is_numeric_dtype(df[c])
+        ]
+    else:
+        candidates = [
+            c for c in df.columns
+            if isinstance(c, str) and c.isdigit() and pd.api.types.is_numeric_dtype(df[c])
         ]
 
-    if not cols:
+    if not candidates:
         logger.error("No latent feature columns found (prefix=%s).", prefix)
         raise ValueError("No latent feature columns found. Check column names and --latent_prefix.")
+
+    # Drop metadata-like names defensively
+    cols = [c for c in candidates if not _is_metadata_like(c)]
+    dropped = [c for c in candidates if c not in cols]
+    if dropped:
+        logger.info(
+            "Excluded %d metadata/housekeeping columns from latent set (first few: %s)",
+            len(dropped), ", ".join(map(str, dropped[:10]))
+        )
+
+    if not cols:
+        logger.error("All candidate latent columns were excluded as metadata/housekeeping.")
+        raise ValueError("No usable latent features remain after exclusions.")
 
     X = df[cols].copy()
 

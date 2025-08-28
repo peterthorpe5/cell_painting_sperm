@@ -56,7 +56,7 @@ import os
 import sys
 import traceback
 from typing import Iterable, List
-
+import re
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -107,6 +107,45 @@ def setup_logger(log_file: str) -> logging.Logger:
 META_COLS_DEFAULT = {
     "cpd_id", "cpd_type", "Dataset", "Library", "Plate_Metadata", "Well_Metadata", "target"
 }
+
+
+
+
+# Columns to always treat as metadata (never as features)
+BANNED_FEATURES_EXACT = {
+    "ImageNumber",
+    "Number_Object_Number",
+    "ObjectNumber",
+    "TableNumber",
+}
+
+# Regex catching typical metadata/housekeeping columns (case-insensitive)
+BANNED_FEATURES_REGEX = re.compile(
+    r"""(?ix)
+        ( ^metadata($|_)         # Metadata*, or ..._Metadata
+        | _metadata$
+        | ^filename_             # FileName_*
+        | ^pathname_             # PathName_*
+        | ^url_                  # URL_*
+        | ^parent_               # Parent_*
+        | ^children_             # Children_*
+        | (^|_)imagenumber$      # ImageNumber (any prefix_ also)
+        | ^number_object_number$ # Number_Object_Number
+        | ^objectnumber$         # ObjectNumber
+        | ^tablenumber$          # TableNumber
+        )
+    """
+)
+
+def _is_metadata_like(col: str) -> bool:
+    """
+    Return True if a column name looks like metadata/housekeeping and
+    should be excluded from feature analyses (e.g. SHAP).
+    """
+    cname = str(col)
+    if cname in BANNED_FEATURES_EXACT:
+        return True
+    return bool(BANNED_FEATURES_REGEX.search(cname.lower()))
 
 
 def _read_table(path: str) -> pd.DataFrame:
@@ -510,22 +549,46 @@ def plot_shap_dependence_plots(X: pd.DataFrame,
 
 def _prepare_X_y(features_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, list[str]]:
     """
-    Select numeric feature columns (excluding known metadata) and target.
+    Select numeric feature columns (excluding known/heuristic metadata) and target.
 
     Parameters
     ----------
     features_df : pandas.DataFrame
-        Input features with metadata and 'target' column.
+        Input features with metadata and a 'target' column.
 
     Returns
     -------
     tuple
-        (X, y, feature_cols) where X is numeric feature matrix, y is target,
+        (X, y, feature_cols) where X is the numeric feature matrix, y is target,
         and feature_cols are the selected feature names.
     """
+    logger = logging.getLogger("shap_explain")
+
+    # Numeric candidates
     numeric_cols = [c for c in features_df.columns
                     if pd.api.types.is_numeric_dtype(features_df[c])]
-    feature_cols = [c for c in numeric_cols if c not in META_COLS_DEFAULT]
+
+    # Final feature filter: drop explicit metadata and metadata-like names
+    dropped = []
+    feature_cols = []
+    for c in numeric_cols:
+        if c in META_COLS_DEFAULT or _is_metadata_like(c):
+            dropped.append(c)
+        else:
+            feature_cols.append(c)
+
+    if dropped:
+        logger.info(
+            "Excluded %d metadata/non-feature columns (first few): %s",
+            len(dropped), ", ".join(map(str, dropped[:10]))
+        )
+
+    if not feature_cols:
+        raise ValueError(
+            "No numeric feature columns remain after excluding metadata-like columns. "
+            "Please inspect inputs."
+        )
+
     X = features_df[feature_cols]
     y = features_df["target"].astype(int)
     return X, y, feature_cols

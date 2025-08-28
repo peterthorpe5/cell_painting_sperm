@@ -68,7 +68,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
-
+import re
 import numpy as np
 import pandas as pd
 from sklearn import set_config
@@ -205,7 +205,7 @@ def clean_merge_artifacts(*, df: pd.DataFrame, logger: logging.Logger) -> pd.Dat
 
 def select_latent(*, df: pd.DataFrame, prefix: Optional[str], logger: logging.Logger) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Select latent numeric columns (digit-named by default).
+    Select latent numeric columns (digit-named by default) and drop metadata-like names.
 
     Parameters
     ----------
@@ -220,19 +220,33 @@ def select_latent(*, df: pd.DataFrame, prefix: Optional[str], logger: logging.Lo
         Feature matrix and column names (copy, numeric).
     """
     if prefix:
-        cols = [c for c in df.columns if isinstance(c, str) and c.startswith(prefix) and pd.api.types.is_numeric_dtype(df[c])]
+        raw_cols = [c for c in df.columns
+                    if isinstance(c, str) and c.startswith(prefix) and pd.api.types.is_numeric_dtype(df[c])]
     else:
-        cols = [c for c in df.columns if isinstance(c, str) and c.isdigit() and pd.api.types.is_numeric_dtype(df[c])]
+        raw_cols = [c for c in df.columns
+                    if isinstance(c, str) and c.isdigit() and pd.api.types.is_numeric_dtype(df[c])]
 
-    if not cols:
+    if not raw_cols:
         logger.error("No latent feature columns found (prefix=%s).", prefix)
         raise ValueError("No latent feature columns found. Check column names and --latent_prefix.")
+
+    # Drop any banned/metadata-like names defensively
+    cols = [c for c in raw_cols if not _is_metadata_like(c)]
+    dropped = [c for c in raw_cols if c not in cols]
+    if dropped:
+        logger.info("Excluded %d metadata/housekeeping columns from latent set (first few: %s)",
+                    len(dropped), ", ".join(map(str, dropped[:10])))
+
+    if not cols:
+        logger.error("All candidate columns were excluded as metadata/housekeeping.")
+        raise ValueError("No usable latent features remain after exclusions.")
 
     X = df[cols].copy()
     n_nans = int(X.isna().sum().sum())
     if n_nans:
         logger.warning("Latent matrix contains %d NaNs; filling with 0.", n_nans)
         X = X.fillna(value=0)
+
     logger.info("Selected %d latent columns; feature matrix shape=%s", len(cols), tuple(X.shape))
     return X, cols
 
@@ -321,6 +335,43 @@ def _build_tooltips_array(*, df_meta: pd.DataFrame, tooltip_cols: list[str]) -> 
         parts = [f"<b>{c}</b>: {r[c]}" for c in cols]
         rows.append("<br>".join(parts))
     return np.array(rows, dtype=object)
+
+
+
+# Columns we never want to treat as features (even if numeric)
+BANNED_FEATURES_EXACT = {
+    "ImageNumber",
+    "Number_Object_Number",
+    "ObjectNumber",
+    "TableNumber",
+}
+
+# Heuristics for metadata/housekeeping columns (case-insensitive)
+BANNED_FEATURES_REGEX = re.compile(
+    r"""(?ix)
+        ( ^metadata($|_)         # Metadata*, *_Metadata
+        | _metadata$
+        | ^filename_             # FileName_*
+        | ^pathname_             # PathName_*
+        | ^url_                  # URL_*
+        | ^parent_               # Parent_*
+        | ^children_             # Children_*
+        | (^|_)imagenumber$      # ImageNumber
+        | ^number_object_number$ # Number_Object_Number
+        | ^objectnumber$         # ObjectNumber
+        | ^tablenumber$          # TableNumber
+        )
+    """
+)
+
+def _is_metadata_like(col: str) -> bool:
+    """
+    Return True if a column name is metadata/housekeeping and must not be used as a feature.
+    """
+    cname = str(col)
+    if cname in BANNED_FEATURES_EXACT:
+        return True
+    return bool(BANNED_FEATURES_REGEX.search(cname.lower()))
 
 
 def _draw_graph_html_pyvis(

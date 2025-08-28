@@ -62,7 +62,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Optional
-
+import re
 import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu, ks_2samp, wasserstein_distance
@@ -174,32 +174,72 @@ def load_feature_manifest(*, list_or_single: str, logger: logging.Logger) -> pd.
 
 def ensure_numeric_features(*, df: pd.DataFrame, logger: logging.Logger) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Keep numeric feature columns and impute NaNs with column medians.
+    Keep numeric **feature** columns and impute NaNs with column medians.
+
+    This function:
+    - selects numeric columns,
+    - removes known metadata/ID columns (e.g. ImageNumber, Number_Object_Number),
+    - removes any column that matches metadata-like patterns,
+    - returns df with 'cpd_id' + filtered numeric features, imputing per-column medians.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Input well-level table.
+        Input well-level table. Must contain 'cpd_id'.
     logger : logging.Logger
         Logger instance.
 
     Returns
     -------
     (df_num, cols) : Tuple[pd.DataFrame, List[str]]
-        Clean numeric-only feature matrix and column names.
+        Clean numeric-only feature matrix (plus 'cpd_id') and the list of
+        feature column names actually used.
     """
     if "cpd_id" not in df.columns:
         raise ValueError("Feature table must contain 'cpd_id' column.")
+
+    # Start from numeric columns
     numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    if not numeric:
-        raise ValueError("No numeric feature columns found.")
-    df_num = df[["cpd_id"] + numeric].copy()
-    nans = df_num[numeric].isna().sum().sum()
-    if int(nans) > 0:
-        logger.warning("Found %d NaN values in features; imputing with column medians.", int(nans))
-        med = df_num[numeric].median(axis=0)
-        df_num[numeric] = df_num[numeric].fillna(value=med)
-    return df_num, numeric
+
+    # Hard-coded non-feature columns to exclude even if numeric
+    non_feature_always = {
+        "cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata",
+        "Library", "Dataset", "Sample"
+    }
+
+    # Drop banned + metadata-like columns
+    dropped: list[str] = []
+    feature_cols: list[str] = []
+    for c in numeric:
+        if c in non_feature_always or _is_metadata_like(c):
+            dropped.append(c)
+        else:
+            feature_cols.append(c)
+
+    if not feature_cols:
+        raise ValueError(
+            "No numeric feature columns remain after excluding metadata-like columns. "
+            "Please inspect inputs."
+        )
+
+    if dropped:
+        logger.info(
+            "Excluded %d metadata/non-feature columns from analysis (first few: %s)",
+            len(dropped), ", ".join(dropped[:10])
+        )
+
+    # Build df containing only cpd_id + chosen features
+    df_num = df[["cpd_id"] + feature_cols].copy()
+
+    # Impute any NaNs with column medians (per-feature)
+    nans = int(df_num[feature_cols].isna().sum().sum())
+    if nans > 0:
+        logger.warning("Found %d NaN values in features; imputing with column medians.", nans)
+        med = df_num[feature_cols].median(axis=0)
+        df_num[feature_cols] = df_num[feature_cols].fillna(value=med)
+
+    return df_num, feature_cols
+
 
 
 def parse_query_ids(*, arg: str) -> List[str]:
@@ -632,6 +672,45 @@ def load_feature_groups(*, feature_group_file: str, logger: logging.Logger) -> D
     mapping = dict(zip(df["feature"], df["group"]))
     logger.info("Loaded feature groups: %d mappings.", len(mapping))
     return mapping
+
+
+import re
+
+# Columns to always treat as metadata / never as features
+BANNED_FEATURES_EXACT = {
+    "ImageNumber",
+    "Number_Object_Number",
+    "ObjectNumber",
+    "TableNumber",
+}
+
+# Regex for metadata-like columns (case-insensitive)
+BANNED_FEATURES_REGEX = re.compile(
+    r"""(?ix)
+        ( ^metadata($|_)         # Metadata*, *-style
+        | _metadata$             # *_Metadata
+        | ^filename_             # FileName_*
+        | ^pathname_             # PathName_*
+        | ^url_                  # URL_*
+        | ^parent_               # Parent_*
+        | ^children_             # Children_*
+        | (^|_)imagenumber$      # ImageNumber (any case, with optional prefix_)
+        | ^number_object_number$ # Number_Object_Number
+        | ^objectnumber$         # ObjectNumber
+        | ^tablenumber$          # TableNumber
+        )
+    """
+)
+
+def _is_metadata_like(col: str) -> bool:
+    """
+    Return True if a column name should be treated as metadata and excluded
+    from feature analyses (SHAP, tests, etc.).
+    """
+    cname = str(col)
+    if cname in BANNED_FEATURES_EXACT:
+        return True
+    return bool(BANNED_FEATURES_REGEX.search(cname.lower()))
 
 
 def write_top_enriched_depleted(*, stats: pd.DataFrame, out_dir: Path, top_n: int, logger: logging.Logger) -> None:
