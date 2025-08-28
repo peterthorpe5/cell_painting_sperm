@@ -316,6 +316,17 @@ def aggregate_latent_from_decoded(
     return out.loc[:, ordered]
 
 
+# Technical, non-biological columns that must never be used as features
+TECHNICAL_FEATURE_BLOCKLIST = {"ImageNumber", "Number_Object_Number"}
+
+def _exclude_technical_features(cols, logger):
+    """Remove any technical columns from a list of feature columns."""
+    dropped = sorted(c for c in cols if c in TECHNICAL_FEATURE_BLOCKLIST)
+    kept = [c for c in cols if c not in TECHNICAL_FEATURE_BLOCKLIST]
+    if dropped:
+        logger.info("Excluding technical feature columns: %s", ", ".join(dropped))
+    return kept
+
 
 def ensure_library_column(
     df: pd.DataFrame,
@@ -848,6 +859,7 @@ def harmonise_numeric_columns(
     """
     numeric_cols_sets = [set(df.select_dtypes(include=[np.number]).columns) for df in dataframes.values()]
     common_cols = sorted(set.intersection(*numeric_cols_sets)) if numeric_cols_sets else []
+    common_cols = _exclude_technical_features(common_cols, logger)
     logger.info("Harmonised numeric columns across datasets: %d", len(common_cols))
 
     metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
@@ -1491,6 +1503,8 @@ def main(args: argparse.Namespace) -> None:
         col for col in combined_df.columns
         if col not in meta_columns and pd.api.types.is_numeric_dtype(combined_df[col])
     ]
+    # drop technicals from the features we’re going to scale/project
+    feature_cols = _exclude_technical_features(feature_cols, logger)
     if not feature_cols:
         raise ValueError("No numeric feature columns found after harmonisation. Check feature overlap and dtypes.")
 
