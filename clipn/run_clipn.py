@@ -2011,11 +2011,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--cpu_threads", type=int, default=None,
                     help="Force number of CPU threads (overrides env/SLURM).")
-    parser.add_argument(
-        "--knn_only",
-        action="store_true",
-        help="Run k-NN on the pre-CLIPn feature space and exit.",
-    )
+
     parser.add_argument(
         "--knn_k",
         type=int,
@@ -2047,15 +2043,15 @@ if __name__ == "__main__":
     )
     knn_group = parser.add_mutually_exclusive_group()
     knn_group.add_argument(
-        "--knn_only",
-        action="store_true",
-        help="Run k-NN on the pre-CLIPn feature space and exit early."
-    )
+                        "--knn_only",
+                        action="store_true",
+                        help="Run k-NN on the pre-CLIPn feature space and exit early."
+                    )
     knn_group.add_argument(
-        "--knn_also",
-        action="store_true",
-        help="Run k-NN baseline first, then continue to CLIPn."
-    )
+                            "--knn_also",
+                            action="store_true",
+                            help="Run k-NN baseline first, then continue to CLIPn."
+                        )
 
 
 
