@@ -1611,9 +1611,9 @@ def main(args: argparse.Namespace) -> None:
             metric=args.knn_metric,
             logger=logger,
         )
-        if args.knn_only:
-            logger.info("k-NN baseline completed; exiting early (--knn_only set).")
-            return
+
+        logger.info("k-NN baseline completed; exiting early (--knn_only set).")
+        return
 
 
 
