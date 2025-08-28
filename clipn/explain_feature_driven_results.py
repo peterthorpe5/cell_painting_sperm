@@ -28,8 +28,8 @@ python explain_feature_driven_results.py \
     --nn_file nearest_neighbours.tsv \
     --output_dir out/explain \
     --test mw \
-    --top_features 15 \
-    --nn_per_query 10 \
+    --top_features 10 \
+    --nn_per_query 5 \
     --feature_group_file feature_groups.tsv
 
 Required columns
@@ -674,8 +674,8 @@ def parse_args() -> argparse.Namespace:
                    help="Nearest-neighbour TSV/CSV with columns: cpd_id (or query_id), neighbour_id, [distance].")
     p.add_argument("--output_dir", required=True, help="Output folder.")
     p.add_argument("--test", choices=["mw", "ks"], default="mw", help="Two-sample test (default: mw).")
-    p.add_argument("--top_features", type=int, default=15, help="Top-N enriched/depleted features to save (default: 15).")
-    p.add_argument("--nn_per_query", type=int, default=10, help="Top-N neighbours per query (default: 10).")
+    p.add_argument("--top_features", type=int, default=10, help="Top-N enriched/depleted features to save (default: 10).")
+    p.add_argument("--nn_per_query", type=int, default=5, help="Top-N neighbours per query (default: 5).")
     p.add_argument("--feature_group_file", default=None,
                    help="Optional TSV/CSV with columns: feature, group — to summarise by groups.")
     return p.parse_args()
@@ -689,12 +689,23 @@ def main() -> None:
     logger = setup_logger(output_dir=str(out_root))
     logger.info("Arguments: %s", vars(args))
 
-    # Collect queries (new unified logic)
+    # Collect queries
     queries = collect_query_ids(args.query_ids, args.query_file, logger)
     logger.info("Queries: %s", queries)
 
-    # Ensure queries exist in the feature table (case-insensitive)
+    # Load features first
+    df_raw = load_feature_manifest(list_or_single=args.ungrouped_list, logger=logger)
+    df_num, feature_cols = ensure_numeric_features(df=df_raw, logger=logger)
 
+    # Keep cpd_type if available (useful for background selection)
+    if "cpd_type" in df_raw.columns and "cpd_type" not in df_num.columns:
+        try:
+            df_num = pd.concat([df_num, df_raw["cpd_type"]], axis=1)
+        except Exception:
+            if len(df_num) == len(df_raw):
+                df_num["cpd_type"] = df_raw["cpd_type"].values
+
+    # Now we can safely ensure queries exist in the table
     present = set(df_num["cpd_id"].astype(str).str.upper())
     original_queries = list(queries)
     queries = [q for q in original_queries if q.upper() in present]
@@ -706,9 +717,7 @@ def main() -> None:
         return
 
 
-    # Load features (single table or manifest), keep numeric + cpd_id
-    df_raw = load_feature_manifest(list_or_single=args.ungrouped_list, logger=logger)
-    df_num, feature_cols = ensure_numeric_features(df=df_raw, logger=logger)
+
 
     # Keep cpd_type if available (useful for background selection)
     if "cpd_type" in df_raw.columns and "cpd_type" not in df_num.columns:
