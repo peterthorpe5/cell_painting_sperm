@@ -2011,7 +2011,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--cpu_threads", type=int, default=None,
                     help="Force number of CPU threads (overrides env/SLURM).")
-        parser.add_argument(
+    parser.add_argument(
         "--knn_only",
         action="store_true",
         help="Run k-NN on the pre-CLIPn feature space and exit.",
