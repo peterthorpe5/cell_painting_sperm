@@ -30,11 +30,11 @@ python summarise_mcp_neighbours.py \
 """
 
 from __future__ import annotations
-
+import glob
 import argparse
 import os
-from typing import Optional, Tuple, List
-
+from typing import Optional, Tuple, List, Iterable
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -65,27 +65,24 @@ def load_metadata(path: Optional[str]) -> Optional[pd.DataFrame]:
     return None
 
 
-def cosine_distance(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float:
+def path_contains_component(path: str, name: str) -> bool:
     """
-    Compute cosine distance (1 - cosine similarity) between two vectors.
+    Return True if 'path' has a component exactly equal to 'name' (case-insensitive).
 
     Parameters
     ----------
-    a : numpy.ndarray
-        First vector.
-    b : numpy.ndarray
-        Second vector.
-    eps : float
-        Small epsilon to avoid division by zero.
+    path : str
+        Filesystem path to inspect.
+    name : str
+        Component name to look for (e.g., 'lib').
 
     Returns
     -------
-    float
-        Cosine distance in [0, 2].
+    bool
+        True if any component equals 'name' ignoring case, otherwise False.
     """
-    num = float(np.dot(a, b))
-    den = float(np.linalg.norm(a) * np.linalg.norm(b)) + eps
-    return 1.0 - (num / den)
+    return any(part.lower() == name.lower() for part in Path(path).parts)
+
 
 
 def find_nearest_umap(
@@ -228,6 +225,51 @@ def find_nearest_from_nn(
     return top_hits[["cpd_id", "nearest_cpd_id", "distance_metric_NN", "source"]]
 
 
+def _pick_latest(paths: Iterable[str]) -> Optional[str]:
+    """
+    Return the most-recently modified path from an iterable (or None if empty).
+
+    Parameters
+    ----------
+    paths : Iterable[str]
+        Candidate file paths.
+
+    Returns
+    -------
+    Optional[str]
+        Path with the latest modification time, or None if no valid files.
+    """
+    paths = [p for p in paths if os.path.isfile(p)]
+    if not paths:
+        return None
+    return max(paths, key=os.path.getmtime)
+
+
+def autodiscover_path(root: str, patterns: list[str]) -> Optional[str]:
+    """
+    Search recursively under 'root' for any of the glob patterns and return the
+    most recently modified match, excluding any hit within a 'lib' component.
+
+    Parameters
+    ----------
+    root : str
+        Root directory to search.
+    patterns : list[str]
+        Glob patterns relative to root.
+
+    Returns
+    -------
+    Optional[str]
+        Best matching path, or None if nothing matched.
+    """
+    hits: list[str] = []
+    for pat in patterns:
+        hits.extend(glob.glob(os.path.join(root, pat), recursive=True))
+    # exclude anything inside a /lib/ component
+    hits = [p for p in hits if not path_contains_component(p, "lib")]
+    return _pick_latest(hits)
+
+
 def summarise_neighbours(
     folder: str,
     targets: List[str],
@@ -266,15 +308,51 @@ def summarise_neighbours(
         Writes merged summary TSV and Excel files beside the CLIPn outputs.
     """
     # Resolve default input paths if not overridden
+    # Skip folders that include a 'lib' path component
+    if path_contains_component(folder, "lib"):
+        print(f"[INFO] Skipping folder because it contains a 'lib' path component: {folder}")
+        return
+
     nn_path = nn_path or os.path.join(folder, "post_clipn", "post_analysis_script", "nearest_neighbours.tsv")
     umap_path = umap_path or os.path.join(
         folder, "post_clipn", "UMAP_kNone", "cpd_type", "clipn_umap_coordinates_cosine_n15_d0.1.tsv"
     )
 
+    # Try defaults; if missing, auto-discover; otherwise skip folder gracefully
     if not os.path.isfile(nn_path):
-        raise FileNotFoundError(f"Nearest neighbours file not found: {nn_path}")
+        print(f"[WARNING] Nearest neighbours not found at default: {nn_path}")
+        nn_auto = autodiscover_path(
+            folder,
+            patterns=[
+                "**/post_analysis_script/nearest_neighbours.tsv",
+                "**/nearest_neighbours.tsv",
+                "**/post_knn/nearest_neighbours.tsv",
+            ],
+        )
+        if nn_auto:
+            print(f"[INFO] Auto-discovered nearest neighbours: {nn_auto}")
+            nn_path = nn_auto
+        else:
+            print(f"[INFO] Skipping folder (no nearest_neighbours.tsv under: {folder})")
+            return
+
     if not os.path.isfile(umap_path):
-        raise FileNotFoundError(f"UMAP coordinate file not found: {umap_path}")
+        print(f"[WARNING] UMAP coordinates not found at default: {umap_path}")
+        umap_auto = autodiscover_path(
+            folder,
+            patterns=[
+                "**/clipn_umap_coordinates_*cosine*.tsv",
+                "**/clipn_umap_coordinates_*.tsv",
+            ],
+        )
+        if umap_auto:
+            print(f"[INFO] Auto-discovered UMAP coordinates: {umap_auto}")
+            umap_path = umap_auto
+        else:
+            print(f"[INFO] Skipping folder (no UMAP coords under: {folder})")
+            return
+
+
 
     # Load metadata (primary)
     meta = load_metadata(metadata_file)
@@ -413,7 +491,7 @@ if __name__ == "__main__":
         "--target", nargs="+",
         default=[
             "MCP09", "MCP05",
-            "DDD02387619", "DDD02443214", "DDD02454019", "DDD02454403",
+            "DDD02387619", "DDD02443214", "DDD02454019", 
             "DDD02591200", "DDD02591362", "DDD02941115",
             "DDD02941193", "DDD02947912", "DDD02947919", "DDD02948915",
             "DDD02948916", "DDD02948926", "DDD02952619", "DDD02952620",
