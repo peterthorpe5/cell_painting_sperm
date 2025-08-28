@@ -1072,6 +1072,7 @@ def _apply_threads(n: int, logger):
         pass
 
     logger.info("CPU threads set to %d (from --cpu_threads)", n)
+    logger.info("only change threads if you are using Torch cpu backend")
     return n
 
 
