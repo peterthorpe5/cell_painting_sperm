@@ -1565,6 +1565,10 @@ def main(args: argparse.Namespace) -> None:
         label="post-scaling",
     )
 
+    # Final guard: never let technical counters into modelling
+    df_scaled_all = df_scaled_all.drop(columns=[c for c in TECHNICAL_FEATURE_BLOCKLIST if c in df_scaled_all.columns], errors="ignore")
+
+
     # ===== Optional: k-NN baseline on the pre-CLIPn feature space =====
     if args.knn_only:
         logger.info("Running k-NN baseline (pre-CLIPn) with metric='%s', level='%s', k=%d",
