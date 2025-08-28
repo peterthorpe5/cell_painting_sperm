@@ -809,7 +809,7 @@ def main() -> None:
     args = parser.parse_args()
     for v in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS"]:
-    os.environ[v] = str(max(1, int(args.threads)))
+        os.environ[v] = str(max(1, int(args.threads)))
 
 
     # Fold --query_ids into --query_id
