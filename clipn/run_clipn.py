@@ -55,7 +55,7 @@ os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple, Optional
+from typing import Dict, Iterable, List, Tuple, Optional, Callable
 import re
 import numpy as np
 import pandas as pd
