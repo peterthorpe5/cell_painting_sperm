@@ -643,7 +643,8 @@ def run_shap(features_df: pd.DataFrame,
              out_dir: str,
              query_id: str,
              logger: logging.Logger,
-             small_sample_threshold: int = 30) -> None:
+             small_sample_threshold: int = 30,
+             threads: int = 1) -> None:
     """
     Fit simple classifier to distinguish query vs neighbours and compute SHAP.
 
@@ -687,7 +688,7 @@ def run_shap(features_df: pd.DataFrame,
             shap_raw = explainer(X).values
         else:
             logger.info("Using RandomForest (n=%d).", X.shape[0])
-            model = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)
+            model = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=threads)
             model.fit(X, y)
             explainer = shap.TreeExplainer(model)
             sv = explainer.shap_values(X)
@@ -802,7 +803,14 @@ def main() -> None:
                         help="Top-N features to plot/report.")
     parser.add_argument("--log_file", default="shap_explain.log",
                         help="Log filename (inside output_dir).")
+    parser.add_argument("--threads", type=int, default=1,
+                        help="Number of CPU cores for RandomForest (default: 1)."
+                    )
     args = parser.parse_args()
+    for v in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+          "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS"]:
+    os.environ[v] = str(max(1, int(args.threads)))
+
 
     # Fold --query_ids into --query_id
     if args.query_ids:
@@ -840,7 +848,7 @@ def main() -> None:
             subset["target"] = (subset["cpd_id"].astype(str) == str(q)).astype(int)
             out_dir = os.path.join(args.output_dir, q)
             os.makedirs(out_dir, exist_ok=True)
-            run_shap(subset, args.n_top_features, out_dir, q, logger)
+            run_shap(subset, args.n_top_features, out_dir, q, logger, threads=args.threads)
         except Exception as e:
             logger.error("Failed for query %s: %s", q, e)
             logger.debug(traceback.format_exc())
