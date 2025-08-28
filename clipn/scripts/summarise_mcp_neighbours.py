@@ -97,6 +97,39 @@ def find_nearest_umap(df, target_id, top_n, max_dist=None):
     return nearest[["cpd_id", "nearest_cpd_id", "distance_metric_UMAP", "source"]]
 
 
+def normalise_id_column(
+    df: pd.DataFrame,
+    *,
+    candidates: list[str],
+    new_name: str = "cpd_id"
+) -> tuple[pd.DataFrame, str | None]:
+    """
+    Find a plausible compound identifier column and normalise it.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table to inspect.
+    candidates : list[str]
+        Candidate column names to try (case-insensitive).
+    new_name : str, optional
+        Name to assign to the normalised ID column (default 'cpd_id').
+
+    Returns
+    -------
+    (df, id_col) : tuple[pandas.DataFrame, Optional[str]]
+        Updated DataFrame with 'new_name' if found; original df and None otherwise.
+    """
+    upper_map = {c.upper(): c for c in df.columns}
+    hit = next((upper_map[c.upper()] for c in candidates if c.upper() in upper_map), None)
+    if hit is None:
+        return df, None
+    df = df.copy()
+    df[new_name] = df[hit].astype(str).str.upper().str.strip()
+    df = df.drop_duplicates(subset=[new_name])
+    return df, new_name
+
+
 
 def find_nearest_from_nn(df, target_id, top_n, max_dist=None):
     """
@@ -167,8 +200,25 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
     extra_meta = None
     if extra_metadata and os.path.isfile(extra_metadata):
         print(f"[INFO] Found extra annotation file: {extra_metadata}")
-        extra_meta = pd.read_csv(extra_metadata)
-        extra_meta["COMPOUND_NAME"] = extra_meta["COMPOUND_NAME"].str.upper()
+        # Auto-detect delimiter; be tolerant of commas/tabs/semicolons
+        try:
+            extra_meta = pd.read_csv(extra_metadata, sep=None, engine="python")
+        except Exception:
+            extra_meta = pd.read_csv(extra_metadata)
+
+        # Try common ID headers, case-insensitive
+        extra_meta, id_col = normalise_id_column(
+            extra_meta,
+            candidates=[
+                "COMPOUND_NAME", "Compound Name", "compound_name",
+                "cpd_id", "CPD_ID", "Compound", "compound", "compound_id",
+                "SAMPLE", "SAMPLE_ID", "Molecule", "MOLECULE_NAME"
+            ],
+            new_name="cpd_id",
+        )
+        if id_col is None:
+            print("[WARNING] Extra metadata has no obvious compound ID column; skipping merge with extra metadata.")
+            extra_meta = None
     else:
         print("[INFO] No extra annotation file provided or file not found.")
 
@@ -197,6 +247,32 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
     nn_df = pd.read_csv(nn_path, sep="\t")
     umap_df = pd.read_csv(umap_path, sep="\t")
 
+
+    # NN: accept either CLIPn-style or k-NN-baseline-style headers
+    nn_required = {"cpd_id", "neighbour_id", "distance"}
+    if not nn_required.issubset(nn_df.columns):
+        alt_map = {}
+        if "QueryID" in nn_df.columns and "NeighbourID" in nn_df.columns:
+            alt_map.update({"QueryID": "cpd_id", "NeighbourID": "neighbour_id"})
+        if "distance" not in nn_df.columns and "Distance" in nn_df.columns:
+            alt_map["Distance"] = "distance"
+        if alt_map:
+            nn_df = nn_df.rename(columns=alt_map)
+    if not nn_required.issubset(nn_df.columns):
+        raise ValueError("nearest_neighbours.tsv must contain columns: cpd_id, neighbour_id, distance")
+
+    # UMAP: tolerate UMAP_1/UMAP_2 naming
+    if "UMAP1" not in umap_df.columns or "UMAP2" not in umap_df.columns:
+        rename_umap = {}
+        if "UMAP_1" in umap_df.columns:
+            rename_umap["UMAP_1"] = "UMAP1"
+        if "UMAP_2" in umap_df.columns:
+            rename_umap["UMAP_2"] = "UMAP2"
+        if rename_umap:
+            umap_df = umap_df.rename(columns=rename_umap)
+
+
+
     umap_df["cpd_id"] = umap_df["cpd_id"].str.upper()
     if meta is not None:
         meta = meta.copy()
@@ -215,8 +291,12 @@ def summarise_neighbours(folder, targets, top_n=15, metadata_file=None, max_dist
         combined = combined.drop_duplicates(subset=["cpd_id", "nearest_cpd_id", "source"], keep="first")
 
         if meta is not None and not combined.empty:
-            combined = combined.merge(meta, left_on="nearest_cpd_id", right_on="cpd_id", how="left", suffixes=("", "_meta"))
+            
+            combined = combined.merge(extra_meta, left_on="nearest_cpd_id", right_on="cpd_id", how="left", suffixes=("", "_extra"))
+
             combined.drop(columns=["cpd_id_meta"], inplace=True, errors="ignore")
+            combined.drop(columns=["cpd_id_extra"], inplace=True, errors="ignore")
+
 
         if extra_meta is not None and not combined.empty:
             combined = combined.merge(extra_meta, left_on="nearest_cpd_id", right_on="COMPOUND_NAME", how="left", suffixes=("", "_extra"))
