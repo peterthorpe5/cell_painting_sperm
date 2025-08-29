@@ -782,6 +782,8 @@ def load_single_dataset(
         If mandatory metadata columns are missing after standardisation.
     """
     delimiter = detect_csv_delimiter(path)
+    delim_name = "tab" if delimiter == "\t" else "comma"
+    logger.info("[%s] Reading %s (delimiter=%s)", name, path, delim_name)
     df = _read_csv_fast(path, delimiter)
 
     logger.debug("[%s] Columns after initial load: %s", name, df.columns.tolist())
@@ -794,6 +796,12 @@ def load_single_dataset(
 
     df = ensure_library_column(df=df, filepath=path, logger=logger, value=name)
     df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
+
+    num_cols = df.select_dtypes(include=[np.number]).shape[1]
+    non_num_cols = df.shape[1] - num_cols
+    logger.info("[%s] Column types: numeric=%d, non-numeric=%d",
+                name, num_cols, non_num_cols)
+
 
     missing_cols = [col for col in metadata_cols if col not in df.columns]
     if missing_cols:
@@ -943,8 +951,11 @@ def load_and_harmonise_datasets(
     dataframes: Dict[str, pd.DataFrame] = {}
 
     logger.info("Loading datasets individually")
+    logger.info("Loading datasets individually (%d listed in %s)",
+            len(dataset_paths), datasets_csv)
     for name, path in dataset_paths.items():
         try:
+            logger.info(" -> [%s] %s", name, path)
             dataframes[name] = load_single_dataset(name=name, path=path, logger=logger, metadata_cols=metadata_cols)
         except ValueError as exc:
             logger.error("Loading dataset '%s' failed: %s", name, exc)
@@ -1483,7 +1494,7 @@ def main(args: argparse.Namespace) -> None:
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load + harmonise
+    # Load + harmonise - lots of logging here
     dataframes, common_cols = load_and_harmonise_datasets(
         datasets_csv=args.datasets_csv,
         logger=logger,
