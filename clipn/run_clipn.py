@@ -66,6 +66,7 @@ import torch.serialization
 import gzip
 from clipn.model import CLIPn
 from sklearn import set_config
+from sklearn.impute import KNNImputer
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
 import random
 random.seed(0)
@@ -1332,6 +1333,107 @@ def read_table_auto(path: str) -> pd.DataFrame:
     return pd.read_csv(filepath_or_buffer=path, sep=sep)
 
 
+def clean_and_impute_features_knn(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    logger: logging.Logger,
+    *,
+    groupby_cols: list[str] = None,           # e.g. ["Dataset", "Plate_Metadata"]
+    max_nan_col_frac: float = 0.30,           # drop features with >30% NaN
+    max_nan_row_frac: float = 0.80,           # drop rows with >80% NaN across kept features
+    n_neighbors: int = 5,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    KNN imputation (optionally per-group), with robust in-place scaling
+    (median/IQR) before KNN to avoid scale dominance, and unscaling after.
+
+    Returns
+    -------
+    (df_imputed, dropped_features)
+    """
+    if not feature_cols:
+        return df, []
+
+    df = df.copy()
+
+    # Replace inf with NaN
+    df.loc[:, feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+
+    # Drop very sparse features
+    col_nan_frac = df[feature_cols].isna().mean(axis=0)
+    drop_feats = col_nan_frac[col_nan_frac > max_nan_col_frac].index.tolist()
+    keep_feats = [c for c in feature_cols if c not in drop_feats]
+    if drop_feats:
+        logger.warning("KNN: dropping %d/%d features with > %.0f%% NaN (e.g. %s)",
+                       len(drop_feats), len(feature_cols), max_nan_col_frac*100, drop_feats[:10])
+
+    # Drop extremely incomplete rows
+    if keep_feats:
+        row_nan_frac = df[keep_feats].isna().mean(axis=1)
+        drop_rows = row_nan_frac > max_nan_row_frac
+        n_drop_rows = int(drop_rows.sum())
+        if n_drop_rows:
+            logger.warning("KNN: dropping %d rows with > %.0f%% NaN across kept features.",
+                           n_drop_rows, max_nan_row_frac*100)
+        df = df.loc[~drop_rows]
+    else:
+        logger.error("KNN: all features would be dropped. Loosen thresholds.")
+        return df.iloc[0:0], feature_cols
+
+    if not keep_feats:
+        return df, drop_feats
+
+    # Grouped KNN impute
+    groupby_cols = groupby_cols or ["Dataset"]
+    imputer = None  # created per group (k may change if group very small)
+
+    def _robust_scale_matrix(mat: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+        med = mat.median(axis=0, skipna=True)
+        iqr = mat.quantile(0.75) - mat.quantile(0.25)
+        iqr = iqr.replace(0, 1.0)  # avoid divide by zero
+        scaled = (mat - med) / iqr
+        return scaled, med, iqr
+
+    def _unscale_matrix(scaled: np.ndarray, med: pd.Series, iqr: pd.Series) -> pd.DataFrame:
+        return (scaled * iqr.values) + med.values
+
+    def _impute_group(g: pd.DataFrame) -> pd.DataFrame:
+        X = g[keep_feats]
+
+        # If group too small for KNN, fallback to median
+        if len(X) < 2:
+            med = X.median(numeric_only=True)
+            g.loc[:, keep_feats] = X.fillna(med)
+            return g
+
+        # Robust scale → KNN → unscale
+        X_scaled, med, iqr = _robust_scale_matrix(X)
+        k_eff = max(1, min(n_neighbors, len(X)))
+        imp = KNNImputer(n_neighbors=k_eff, weights="uniform")
+        X_imp_scaled = imp.fit_transform(X_scaled.values)
+        X_imp = _unscale_matrix(X_imp_scaled, med, iqr)
+
+        g.loc[:, keep_feats] = X_imp
+        return g
+
+    logger.info("Imputing with KNN (k=%d) per group=%s", n_neighbors, groupby_cols)
+    df = df.groupby(groupby_cols, dropna=False, sort=False).apply(_impute_group)
+
+    # pandas >=2.1 can leave group keys in the index; restore original
+    if isinstance(df.index, pd.MultiIndex) and df.index.names != ["Dataset", "Sample"]:
+        try:
+            df.index = df.index.droplevel(list(range(len(groupby_cols))))
+        except Exception:
+            pass
+
+    # Final check (rare): any NaNs left → fill with global medians to be safe
+    if df[keep_feats].isna().any().any():
+        logger.warning("KNN: residual NaNs after impute; filling with global medians.")
+        df.loc[:, keep_feats] = df[keep_feats].fillna(df[keep_feats].median(numeric_only=True))
+
+    return df, drop_feats
+
+
 def clean_and_impute_features(
     df: pd.DataFrame,
     feature_cols: list[str],
@@ -1588,17 +1690,37 @@ def main(args: argparse.Namespace) -> None:
     )
 
 
-    # Robust clean + impute (pre-scaling)
-    combined_df, dropped_feats = clean_and_impute_features(
-        df=combined_df,
-        feature_cols=feature_cols,
-        logger=logger,
-        groupby_cols=["Dataset", "Plate_Metadata"] if "Plate_Metadata" in combined_df.columns else ["Dataset"],
-        max_nan_col_frac=0.30,
-        max_nan_row_frac=0.80,
-    )
-    if dropped_feats:
-        feature_cols = [c for c in feature_cols if c not in dropped_feats]
+    # Optional clean + impute (pre-scaling)
+    if args.impute == "median":
+        combined_df, dropped_feats = clean_and_impute_features(
+            df=combined_df,
+            feature_cols=feature_cols,
+            logger=logger,
+            groupby_cols=["Dataset", "Plate_Metadata"] if "Plate_Metadata" in combined_df.columns else ["Dataset"],
+            max_nan_col_frac=0.30,
+            max_nan_row_frac=0.80,
+        )
+        if dropped_feats:
+            feature_cols = [c for c in feature_cols if c not in dropped_feats]
+
+    elif args.impute == "knn":
+        combined_df, dropped_feats = clean_and_impute_features_knn(
+            df=combined_df,
+            feature_cols=feature_cols,
+            logger=logger,
+            groupby_cols=["Dataset", "Plate_Metadata"] if "Plate_Metadata" in combined_df.columns else ["Dataset"],
+            max_nan_col_frac=0.30,
+            max_nan_row_frac=0.80,
+            n_neighbors=args.impute_knn_k,
+        )
+        if dropped_feats:
+            feature_cols = [c for c in feature_cols if c not in dropped_feats]
+
+    else:
+        logger.info("Imputation disabled (--impute none); skipping NaN drop/impute step.")
+        dropped_feats = []
+
+
 
     # Hard guard
     if combined_df.shape[0] == 0:
@@ -2147,6 +2269,20 @@ if __name__ == "__main__":
                             action="store_true",
                             help="Run k-NN baseline first, then continue to CLIPn."
                         )
+    parser.add_argument(
+    "--impute",
+    choices=["median", "knn", "none"],
+    default="none",
+    help="Impute missing values before scaling/modeling. "
+         "'median' = per-group median (default), 'knn' = KNNImputer, "
+         "'none' = skip imputation."
+    )
+    parser.add_argument(
+        "--impute_knn_k",
+        type=int,
+        default=5,
+        help="Number of neighbours for KNN imputation (used when --impute knn)."
+    )
 
 
 
