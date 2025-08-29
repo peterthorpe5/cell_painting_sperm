@@ -817,7 +817,7 @@ def load_single_dataset(
     logger.debug("[%s] Final index names: %s", name, df.index.names)
     meta = {"cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"}
     feat_guess = [c for c in df.columns if c not in meta]
-    df.loc[:, feat_guess] = df[feat_guess].apply(pd.to_numeric, errors="coerce")
+    df.loc[:, feat_guess] = df[feat_guess].apply(pd.to_numeric, errors="ignore")
     return df
 
 def safe_to_csv(df: pd.DataFrame, path: Path | str, sep: str = "\t", logger: logging.Logger | None = None) -> None:
@@ -1757,7 +1757,22 @@ def main(args: argparse.Namespace) -> None:
 
     # Final guard: never let technical counters into modelling
     df_scaled_all = df_scaled_all.drop(columns=[c for c in TECHNICAL_FEATURE_BLOCKLIST if c in df_scaled_all.columns], errors="ignore")
+    
 
+    feature_audit_dir = Path(args.out) / "feature_audit"
+    feature_audit_dir.mkdir(parents=True, exist_ok=True)
+    pd.Series(feature_cols, name="feature").to_csv(
+        feature_audit_dir / "features_used_after_imputation.tsv", sep="\t", index=False
+    )
+    logger.info("Final feature column count after cleaning: %d", len(feature_cols))
+
+    # If imputation is off, fail fast if NaNs remain in features
+    if args.impute == "none" and df_scaled_all[feature_cols].isna().any().any():
+        n_missing = int(df_scaled_all[feature_cols].isna().sum().sum())
+        raise ValueError(
+            f"{n_missing} missing values remain in feature columns with --impute none. "
+            "Enable imputation (--impute median|knn) or pre-clean inputs."
+        )
 
     # ===== Optional: k-NN baseline on the pre-CLIPn feature space =====
     if args.knn_only or args.knn_also:
@@ -2274,8 +2289,8 @@ if __name__ == "__main__":
     choices=["median", "knn", "none"],
     default="none",
     help="Impute missing values before scaling/modeling. "
-         "'median' = per-group median (default), 'knn' = KNNImputer, "
-         "'none' = skip imputation."
+         "'median' = per-group median , 'knn' = KNNImputer, "
+         "'none' = skip imputation (default)."
     )
     parser.add_argument(
         "--impute_knn_k",
