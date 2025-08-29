@@ -806,6 +806,9 @@ def load_single_dataset(
     logger.debug("[%s] Final columns: %s", name, df.columns.tolist())
     logger.debug("[%s] Final shape: %s", name, df.shape)
     logger.debug("[%s] Final index names: %s", name, df.index.names)
+    meta = {"cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"}
+    feat_guess = [c for c in df.columns if c not in meta]
+    df.loc[:, feat_guess] = df[feat_guess].apply(pd.to_numeric, errors="coerce")
     return df
 
 def safe_to_csv(df: pd.DataFrame, path: Path | str, sep: str = "\t", logger: logging.Logger | None = None) -> None:
@@ -834,7 +837,7 @@ def safe_to_csv(df: pd.DataFrame, path: Path | str, sep: str = "\t", logger: log
     path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, sep=sep, index=False)
     if logger:
-        logger.info("Wrote %s rows × %s cols -> %s", out.shape[0], out.shape[1], path)
+        logger.info("Wrote %s rows x %s cols -> %s", out.shape[0], out.shape[1], path)
 
 
 
@@ -843,36 +846,67 @@ def harmonise_numeric_columns(
     logger: logging.Logger,
 ) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     """
-    Subset to the intersection of numeric columns and preserve metadata columns.
-
-    Parameters
-    ----------
-    dataframes : dict[str, pd.DataFrame]
-        Mapping from dataset name to DataFrame.
-    logger : logging.Logger
-        Logger.
-
-    Returns
-    -------
-    tuple[dict[str, pd.DataFrame], list[str]]
-        Harmonised dataframes and the list of common numeric columns preserved.
+    Subset to the intersection of numeric columns and preserve metadata columns,
+    with detailed diagnostics.
     """
-    numeric_cols_sets = [set(df.select_dtypes(include=[np.number]).columns) for df in dataframes.values()]
-    common_cols = sorted(set.intersection(*numeric_cols_sets)) if numeric_cols_sets else []
-    common_cols = _exclude_technical_features(common_cols, logger)
-    logger.info("Harmonised numeric columns across datasets: %d", len(common_cols))
-
     metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
 
+    # 0) Best-effort: coerce potential numeric dtypes (avoid losing int/float stored as strings)
+    for name, df in dataframes.items():
+        before = df.select_dtypes(include=[np.number]).shape[1]
+        cand = [c for c in df.columns if c not in metadata_cols]
+        # Coerce "object" columns to numeric where possible (leave real strings untouched)
+        dataframes[name].loc[:, cand] = df[cand].apply(pd.to_numeric, errors="ignore")
+        after = dataframes[name].select_dtypes(include=[np.number]).shape[1]
+        if after != before:
+            logger.info("[%s] dtype coercion: numeric cols %d -> %d", name, before, after)
+
+    # 1) Build numeric sets per dataset
+    num_sets: Dict[str, set] = {
+        name: set(df.select_dtypes(include=[np.number]).columns) for name, df in dataframes.items()
+    }
+    union = set().union(*num_sets.values()) if num_sets else set()
+    inter = set.intersection(*num_sets.values()) if num_sets else set()
+
+    # 2) Log headline stats before blocklist
+    jacc = (len(inter) / max(1, len(union))) if union else 0.0
+    logger.info("Numeric feature union=%d, intersection=%d (Jaccard=%.3f)", len(union), len(inter), jacc)
+
+    # 3) Apply technical blocklist, but log what it removed
+    inter_before_block = sorted(inter)
+    common_cols = sorted(_exclude_technical_features(inter_before_block, logger))
+    removed_by_block = [c for c in inter_before_block if c not in common_cols]
+    if removed_by_block:
+        logger.info("Technical blocklist removed %d intersecting features (e.g. %s%s)",
+                    len(removed_by_block),
+                    ", ".join(removed_by_block[:5]),
+                    "..." if len(removed_by_block) > 5 else "")
+
+    logger.info("Harmonised numeric columns across datasets (after blocklist): %d", len(common_cols))
+
+    # 4) Per-dataset diagnostics
+    for name, cols in num_sets.items():
+        # What this dataset is missing vs the global intersection (pre-blocklist) and union
+        missing_from_inter = sorted(list(inter - cols))[:20]
+        missing_from_union = sorted(list(union - cols))[:20]
+        logger.debug("[%s] Missing from intersection (first 20): %s",
+                     name, ", ".join(missing_from_inter) if missing_from_inter else "<none>")
+        logger.debug("[%s] Missing from union (first 20): %s",
+                     name, ", ".join(missing_from_union) if missing_from_union else "<none>")
+
+    # 5) Assemble harmonised frames
     for name, df in dataframes.items():
         numeric_df = df[common_cols] if common_cols else df.select_dtypes(include=[np.number])
         metadata_df = df[metadata_cols]
-        df_harmonised = pd.concat(objs=[numeric_df, metadata_df], axis=1)
+        df_harmonised = pd.concat([numeric_df, metadata_df], axis=1)
         assert df_harmonised.index.equals(df.index), f"Index mismatch after harmonisation in '{name}'."
         dataframes[name] = df_harmonised
-        logger.debug("[%s] Harmonisation successful, final columns: %s", name, df_harmonised.columns.tolist())
+        logger.debug("[%s] Harmonisation successful, final columns: %s",
+                     name, df_harmonised.columns.tolist())
 
     return dataframes, common_cols
+
+
 
 
 def load_and_harmonise_datasets(
