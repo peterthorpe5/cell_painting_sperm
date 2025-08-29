@@ -852,6 +852,7 @@ def safe_to_csv(df: pd.DataFrame, path: Path | str, sep: str = "\t", logger: log
 def harmonise_numeric_columns(
     dataframes: Dict[str, pd.DataFrame],
     logger: logging.Logger,
+    audit_dir: Path | None = None,
 ) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     """
     Subset to the intersection of numeric columns and preserve metadata columns,
@@ -892,6 +893,18 @@ def harmonise_numeric_columns(
 
     logger.info("Harmonised numeric columns across datasets (after blocklist): %d", len(common_cols))
 
+    if audit_dir is not None:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        pd.Series(sorted(union), name="feature").to_csv(
+            audit_dir / "feature_union.tsv", sep="\t", index=False
+        )
+        pd.Series(sorted(inter), name="feature").to_csv(
+            audit_dir / "feature_intersection_pre_blocklist.tsv", sep="\t", index=False
+        )
+        pd.Series(common_cols, name="feature").to_csv(
+            audit_dir / "feature_intersection_post_blocklist.tsv", sep="\t", index=False
+        )
+
     # 4) Per-dataset diagnostics
     for name, cols in num_sets.items():
         # What this dataset is missing vs the global intersection (pre-blocklist) and union
@@ -921,6 +934,7 @@ def load_and_harmonise_datasets(
     datasets_csv: str,
     logger: logging.Logger,
     mode: str | None = None,
+    audit_dir: Path | None = None,
 ) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     """
     Load all datasets listed in the 'datasets_csv' file and harmonise.
@@ -960,7 +974,8 @@ def load_and_harmonise_datasets(
             logger.error("Loading dataset '%s' failed: %s", name, exc)
             raise
 
-    return harmonise_numeric_columns(dataframes=dataframes, logger=logger)
+    return harmonise_numeric_columns(dataframes=dataframes, logger=logger, audit_dir=audit_dir)
+
 
 
 # ============================
@@ -1504,8 +1519,10 @@ def main(args: argparse.Namespace) -> None:
         datasets_csv=args.datasets_csv,
         logger=logger,
         mode=args.mode,
+        audit_dir=Path(args.out) / "feature_audit",
     )
     logger.info("Loaded and harmonised %d datasets from %s", len(dataframes), args.datasets_csv)
+
 
     # Per-dataset sanity checks
     for name, df in dataframes.items():
