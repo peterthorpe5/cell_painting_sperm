@@ -317,7 +317,7 @@ def aggregate_latent_from_decoded(
 
 
 # Technical, non-biological columns that must never be used as features
-TECHNICAL_FEATURE_BLOCKLIST = {"ImageNumber", "Number_Object_Number"}
+TECHNICAL_FEATURE_BLOCKLIST = {"ImageNumber","Number_Object_Number","ObjectNumber","TableNumber"}
 
 def _exclude_technical_features(cols, logger):
     """Remove any technical columns from a list of feature columns."""
@@ -864,7 +864,7 @@ def harmonise_numeric_columns(
         before = df.select_dtypes(include=[np.number]).shape[1]
         cand = [c for c in df.columns if c not in metadata_cols]
         # Coerce "object" columns to numeric where possible (leave real strings untouched)
-        dataframes[name].loc[:, cand] = df[cand].apply(pd.to_numeric, errors="ignore")
+        dataframes[name].loc[:, cand] = df[cand].apply(pd.to_numeric, errors="coerce")
         after = dataframes[name].select_dtypes(include=[np.number]).shape[1]
         if after != before:
             logger.info("[%s] dtype coercion: numeric cols %d -> %d", name, before, after)
@@ -950,7 +950,6 @@ def load_and_harmonise_datasets(
 
     dataframes: Dict[str, pd.DataFrame] = {}
 
-    logger.info("Loading datasets individually")
     logger.info("Loading datasets individually (%d listed in %s)",
             len(dataset_paths), datasets_csv)
     for name, path in dataset_paths.items():
@@ -1115,6 +1114,12 @@ def _apply_threads(n: int, logger):
         torch.set_float32_matmul_precision("high")
     except Exception:
         pass
+    if torch.cuda.is_available():
+        logger.info("GPU detected; set CPU-thread env vars for BLAS/pandas, "
+                    "but PyTorch compute will mainly run on GPU.")
+    else:
+        logger.info("CPU backend: using %d threads.", n)
+
 
     logger.info("CPU threads set to %d (from --cpu_threads)", n)
     logger.info("only change threads if you are using Torch cpu backend")
@@ -1616,7 +1621,7 @@ def main(args: argparse.Namespace) -> None:
 
 
     # ===== Optional: k-NN baseline on the pre-CLIPn feature space =====
-    if args.knn_only:
+    if args.knn_only or args.knn_also:
         logger.info("Running k-NN baseline (pre-CLIPn) with metric='%s', level='%s', k=%d",
                     args.knn_metric, args.knn_level, args.knn_k)
 
@@ -1657,8 +1662,10 @@ def main(args: argparse.Namespace) -> None:
             logger=logger,
         )
 
+
+        if args.knn_only:
         logger.info("k-NN baseline completed; exiting early (--knn_only set).")
-        return
+            return
 
 
 
