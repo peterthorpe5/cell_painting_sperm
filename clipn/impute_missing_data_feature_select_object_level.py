@@ -212,6 +212,13 @@ def parse_args():
     parser.add_argument('--no_dmso_normalisation',
                         action='store_true',
                         help='If set, skip DMSO normalisation. Default: OFF (normalisation ON).')
+    parser.add_argument("--correlation_method",
+                        choices=["pearson", "spearman", "kendall"],
+                        default="spearman",
+                        help="Correlation metric for redundancy filter. Default spearman due to data distributions"
+                    )
+
+    
     parser.add_argument('--correlation_threshold', type=float, default=0.99,
                         help='Correlation threshold for filtering features (default: 0.99).')
     parser.add_argument('--variance_threshold', type=float, default=0.05,
@@ -851,6 +858,7 @@ def correlation_filter_smart(
     strategy: str = "variance",
     protect: Optional[Iterable[str]] = None,
     logger: Optional[logging.Logger] = None,
+    method: str = "spearman"
 ) -> pd.DataFrame:
     """
     Drop highly correlated features, keeping the “best” one per correlated group.
@@ -872,6 +880,10 @@ def correlation_filter_smart(
 
     Returns
     -------
+
+        method : {"pearson","spearman","kendall"}, default "spearman"
+        Correlation metric.
+
     pd.DataFrame
         X with correlated columns removed according to the strategy.
     """
@@ -902,8 +914,10 @@ def correlation_filter_smart(
         X_num, strategy=strategy, protect=protect, logger=logger
     )
 
-    # Precompute absolute correlation matrix for speed
-    corr = X_num.corr().abs().fillna(0.0)
+    # Compute absolute correlation using requested method (numeric only)
+    corr = X_num.corr(method=method).abs().fillna(0.0)
+    logger.info("Using %s correlation method for correlation filter.", method)
+
     kept: list[str] = []
     dropped: list[str] = []
 
@@ -2500,13 +2514,14 @@ def main():
         # This will also generate a PDF with correlation diagnostics
         # Strategy: "mean", "median", "max", "min", "random"
 
-        
         filtered_corr = correlation_filter_smart(filtered_var,
-                                                 threshold=args.correlation_threshold,
-                                                 strategy=args.corr_strategy,
-                                                 protect=args.protect_features,
-                                                 logger=logger,
-                                                 )
+                                                threshold=args.correlation_threshold,
+                                                strategy=args.corr_strategy,
+                                                protect=args.protect_features,
+                                                logger=logger,
+                                                method=args.correlation_method,
+                                            )
+
 
         logger.info("Feature selection summary: start=%d → after variance=%d → after correlation=%d",
                     len(feature_cols), filtered_var.shape[1], filtered_corr.shape[1])
