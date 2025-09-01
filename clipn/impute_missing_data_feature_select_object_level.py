@@ -271,7 +271,7 @@ def parse_args():
         '--trim_metric',
         choices=['q', 'q95', 'l2', 'max'],
         default='q95',
-        help='How to aggregate per-feature |z| into one distance per object.e '
+        help='How to aggregate per-feature |z| into one distance per object. '
     )
     parser.add_argument(
         '--trim_quantile',
@@ -2676,7 +2676,8 @@ def main():
     if args.aggregate_per_well:
         logger.info("Aggregating per-object data to per-well median (because --aggregate_per_well is set).")
         group_cols = ["Plate_Metadata", "Well_Metadata"]
-        meta_cols = ["cpd_id", "cpd_type", "Library"]
+        meta_cols = ["cpd_id", "cpd_type", "Library",
+                    "ImageNumber", "ObjectNumber", "Number_Object_Number"]
         keep_cols = group_cols + meta_cols + [c for c in merged_df.columns if c not in group_cols + meta_cols]
         output_df = merged_df.loc[:, [c for c in keep_cols if c in merged_df.columns]].copy()
 
