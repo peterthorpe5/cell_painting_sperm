@@ -304,11 +304,24 @@ def parse_args():
         default=None,
         help='Optional path to write a small QC table (TSV) with per-group trimming stats.'
     )
-    parser.add_argument(
-    "--drop_categorical_like",
-    action="store_true",
-    help="Detect and drop numeric features that look categorical/encoded (binary, few levels, etc.)."
+
+    # Categorical-like feature dropping: default ON, with an opt-out flag
+    cat_group = parser.add_mutually_exclusive_group()
+    cat_group.add_argument(
+        "--drop_categorical_like",
+        dest="drop_categorical_like",
+        action="store_true",
+        help="Detect and drop numeric features that look categorical/encoded (binary, few levels, etc.). (default: on)"
     )
+    cat_group.add_argument(
+        "--no_drop_categorical_like",
+        dest="drop_categorical_like",
+        action="store_false",
+        help="Disable categorical-like detection/drop."
+    )
+    parser.set_defaults(drop_categorical_like=True)
+
+
     parser.add_argument(
         "--categorical_max_levels",
         type=int,
