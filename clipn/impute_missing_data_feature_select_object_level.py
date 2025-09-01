@@ -2714,6 +2714,68 @@ def main():
     present_metadata = [c for c in ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"] if c in fs_df.columns]
     feature_cols = [c for c in fs_df.columns if c not in present_metadata and pd.api.types.is_numeric_dtype(fs_df[c])]
 
+    # Exclude all ID / bookkeeping columns from feature selection
+    exclude_cols = [
+        "cpd_id", "cpd_type", "Library",
+        "Plate_Metadata", "Well_Metadata",
+        "ImageNumber", "ObjectNumber", "Number_Object_Number"
+    ]
+
+    # Also drop any accidental index columns like 'Unnamed: 0'
+    unnamed = [c for c in fs_df.columns if re.match(r"^Unnamed:\s*\d+$", str(c))]
+    if unnamed:
+        logger.info(f"Dropping index-like columns before FS: {unnamed}")
+        fs_df = fs_df.drop(columns=unnamed, errors="ignore")
+
+    present_metadata = [c for c in exclude_cols if c in fs_df.columns]
+
+    # Start with numeric, non-metadata columns
+    feature_cols = [
+        c for c in fs_df.columns
+        if c not in present_metadata and pd.api.types.is_numeric_dtype(fs_df[c])
+    ]
+
+    # strip by name-patterns you consider non-informative
+    #    (case-insensitive; anchors around common separators)
+
+    # Case-insensitive, boundary-aware column name filter
+    name_drop_pat = re.compile(
+        r"""(?ix)                       # ignore case + allow comments
+        (?:^|_)                         # start or underscore before the token
+        (
+            Treatment
+        | Child(?:ren)?               # Child/Children
+        | Paren(?:t)?                 # Parent
+        | Plate
+        | Well
+        | Field
+        | Location_[XYZ]
+        | Center_(?:Z|X|Y)
+        | ZernikePhase
+        | Euler
+        | Volume
+        | Number(?:_|$|Of)            # Number_ , end, or NumberOf...
+        | no_                         # prefix token
+        | fn_                         # prefix token
+        )
+        """,
+        re.VERBOSE
+    )
+
+
+    logger.info(f"Excluding feature columns by name pattern: {name_drop_pat.pattern}")
+
+    drop_by_name = [c for c in feature_cols if name_drop_pat.search(c)]
+    if drop_by_name:
+        logger.info(
+            "Excluding %d feature columns by name pattern (e.g. %s%s).",
+            len(drop_by_name),
+            ", ".join(drop_by_name[:8]),
+            "..." if len(drop_by_name) > 8 else ""
+        )
+    feature_cols = [c for c in feature_cols if c not in drop_by_name]
+
+
     logger.info(f"Feature selection on {len(feature_cols)} numeric columns.")
     # fs_df[feature_cols] = fs_df[feature_cols].astype(np.float32)
     fs_df.loc[:, feature_cols] = fs_df[feature_cols].astype(np.float32)
