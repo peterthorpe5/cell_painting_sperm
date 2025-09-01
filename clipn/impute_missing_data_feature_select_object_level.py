@@ -304,6 +304,55 @@ def parse_args():
         default=None,
         help='Optional path to write a small QC table (TSV) with per-group trimming stats.'
     )
+    parser.add_argument(
+    "--drop_categorical_like",
+    action="store_true",
+    help="Detect and drop numeric features that look categorical/encoded (binary, few levels, etc.)."
+    )
+    parser.add_argument(
+        "--categorical_max_levels",
+        type=int,
+        default=20,
+        help="Absolute max distinct non-null values to consider a column categorical-like (default: 20)."
+    )
+    parser.add_argument(
+        "--categorical_unique_ratio",
+        type=float,
+        default=0.005,
+        help="If (unique_non_null / non_null) <= this and unique_non_null <= 100, flag as categorical-like (default: 0.005)."
+    )
+    parser.add_argument(
+        "--categorical_integer_levels",
+        type=int,
+        default=15,
+        help="If all values are (near-)integers and distinct levels <= this, flag (default: 15)."
+    )
+    parser.add_argument(
+        "--categorical_topk",
+        type=int,
+        default=3,
+        help="K for top-K mass heuristic (default: 3)."
+    )
+    parser.add_argument(
+        "--categorical_topk_mass",
+        type=float,
+        default=0.99,
+        help="If the top-K levels cover >= this fraction and levels <= categorical_integer_levels, flag (default: 0.99)."
+    )
+    parser.add_argument(
+        "--categorical_protect",
+        type=lambda s: [x.strip() for x in s.split(",")] if s else None,
+        default=None,
+        help="Comma-separated feature names to protect from categorical-like dropping."
+    )
+    parser.add_argument(
+        "--categorical_report",
+        type=str,
+        default=None,
+        help="Optional path to write diagnostics of categorical-like detection (TSV). "
+            "Default: <output_file>_categorical_like.tsv"
+    )
+
 
 
     parser.add_argument('--no_compress_output',
@@ -524,6 +573,130 @@ def _rank_features_for_corr_filter(
 
     # Protected features first (original order), then ranked others
     return protect + ranked
+
+
+def detect_categorical_like_features(
+    df: pd.DataFrame,
+    *,
+    candidates: Optional[list[str]] = None,
+    max_levels: int = 20,
+    unique_ratio: float = 0.005,
+    integer_levels_cap: int = 15,
+    topk: int = 3,
+    topk_mass_thr: float = 0.99,
+    protect: Optional[Iterable[str]] = None,
+    integer_tol: float = 1e-6,
+    logger: Optional[logging.Logger] = None,
+) -> tuple[list[str], pd.DataFrame]:
+    """
+    Identify numeric columns that behave like categorical/encoded features.
+
+    Heuristics (flag a column if ANY is true):
+      1) Low distinct count: nunique_non_null <= max_levels
+      2) Low distinct ratio: (nunique_non_null / non_null) <= unique_ratio AND nunique_non_null <= 100
+      3) Binary: values subset of {0,1} (allowing NaN)
+      4) Small integer code: all values (within tol) are integers AND levels <= integer_levels_cap
+      5) Mass concentration: top-K levels cover >= topk_mass_thr AND levels <= integer_levels_cap
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input table.
+    candidates : list[str], optional
+        Explicit numeric columns to check. If None, infer from df (numeric dtypes).
+    max_levels : int
+        Absolute distinct count threshold for categorical-like.
+    unique_ratio : float
+        Distinct / non-null ratio threshold.
+    integer_levels_cap : int
+        If integer-valued and #levels <= this, flag.
+    topk : int
+        K for the top-K mass heuristic.
+    topk_mass_thr : float
+        Threshold for the top-K mass heuristic (0-1).
+    protect : Iterable[str], optional
+        Feature names never to flag.
+    integer_tol : float
+        Tolerance for near-integer detection.
+    logger : logging.Logger, optional
+        Logger.
+
+    Returns
+    -------
+    (list[str], pd.DataFrame)
+        List of flagged column names and a diagnostics DataFrame with per-column metrics.
+    """
+    logger = logger or logging.getLogger("categorical_like")
+    protect = set(protect or [])
+    if candidates is None:
+        candidates = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    rows = []
+    flagged = []
+
+    for col in candidates:
+        s = df[col]
+        non_null = s.notna().sum()
+        if non_null == 0:
+            # all NaN is handled elsewhere; skip here
+            continue
+
+        # fast metrics
+        nunique = s.nunique(dropna=True)
+        uniq_ratio = nunique / non_null
+
+        # value distribution (for binary/topK)
+        vc = s.value_counts(dropna=True)
+        topk_mass = (vc.head(topk).sum() / non_null) if non_null else 0.0
+
+        # integer-ish?
+        v = s.dropna().to_numpy()
+        all_integer = np.all(np.isclose(v, np.round(v), atol=integer_tol))
+
+        # binary check (allow 0/1 or 1/0 with any floats close to them)
+        unique_vals = sorted(np.unique(np.round(v, 6)))
+        is_binary = len(unique_vals) <= 2 and set(unique_vals).issubset({0.0, 1.0})
+
+        triggers = []
+        if nunique <= max_levels:
+            triggers.append(f"≤{max_levels} unique")
+        if (uniq_ratio <= unique_ratio) and (nunique <= 100):
+            triggers.append(f"unique_ratio≤{unique_ratio:g}")
+        if is_binary:
+            triggers.append("binary")
+        if all_integer and nunique <= integer_levels_cap:
+            triggers.append(f"integer_levels≤{integer_levels_cap}")
+        if (topk_mass >= topk_mass_thr) and (nunique <= integer_levels_cap):
+            triggers.append(f"top{topk}_mass≥{topk_mass_thr:.2f}")
+
+        flagged_now = len(triggers) > 0 and (col not in protect)
+
+        if flagged_now:
+            flagged.append(col)
+
+        # small sample of levels (stringified) for audit
+        sample_levels = ", ".join(map(lambda x: str(x)[:12], vc.head(6).index.tolist()))
+
+        rows.append({
+            "feature": col,
+            "non_null": int(non_null),
+            "nunique": int(nunique),
+            "unique_ratio": float(uniq_ratio),
+            "is_binary": bool(is_binary),
+            "all_integer": bool(all_integer),
+            "topk_mass": float(topk_mass),
+            "flagged": bool(flagged_now),
+            "triggers": ";".join(triggers),
+            "sample_levels": sample_levels,
+        })
+
+    diag = pd.DataFrame(rows).sort_values(["flagged", "nunique"], ascending=[False, True])
+    logger.info(
+        "Categorical-like detection: checked %d columns, flagged %d.",
+        len(candidates), len(flagged)
+    )
+    return flagged, diag
+
 
 
 def attach_plate_well_with_fallback(
@@ -790,7 +963,7 @@ def trim_objects_by_robust_distance(
 
         # Distance per object
         with np.errstate(invalid='ignore', divide='ignore'):
-            if metric == "q95":
+            if metric in ("q", "q95"):
                 dist = np.nanquantile(np.abs(Z), trim_quantile, axis=1)
             elif metric == "l2":
                 dist = np.sqrt(np.nanmean(Z * Z, axis=1))
@@ -2022,6 +2195,59 @@ def main():
         logger.warning(f"Dropping {len(na_cols)} all-NaN columns: {na_cols}")
         cp_df = cp_df.drop(columns=na_cols)
     logger.info(f"DataFrame shape after dropping all-NaN columns: {cp_df.shape}")
+
+    # 1b) identify catergorical data and remove
+    # It would be posible to include the catergorical data but would take a better man than I ... 
+    present_meta = {
+        "cpd_id", "cpd_type", "Library",
+        "Plate_Metadata", "Well_Metadata",
+        "ImageNumber", "ObjectNumber"
+    }
+    numeric_feature_candidates = [
+        c for c in cp_df.columns
+        if pd.api.types.is_numeric_dtype(cp_df[c]) and c not in present_meta
+    ]
+
+    if args.drop_categorical_like and numeric_feature_candidates:
+        cat_report_path = (
+            args.categorical_report
+            if args.categorical_report
+            else os.path.splitext(args.output_file)[0] + "_categorical_like.tsv"
+        )
+
+        flagged_cols, diag = detect_categorical_like_features(
+            cp_df,
+            candidates=numeric_feature_candidates,
+            max_levels=args.categorical_max_levels,
+            unique_ratio=args.categorical_unique_ratio,
+            integer_levels_cap=args.categorical_integer_levels,
+            topk=args.categorical_topk,
+            topk_mass_thr=args.categorical_topk_mass,
+            protect=args.categorical_protect or [],
+            logger=logger,
+        )
+
+        # Write audit
+        try:
+            diag.to_csv(cat_report_path, sep=args.sep, index=False)
+            logger.info("Wrote categorical-like diagnostics to %s", cat_report_path)
+        except Exception as e:
+            logger.warning("Failed to write categorical-like diagnostics: %s", e)
+
+        if flagged_cols:
+            logger.info("Dropping %d categorical-like features (e.g. %s%s).",
+                        len(flagged_cols),
+                        ", ".join(flagged_cols[:8]),
+                        "..." if len(flagged_cols) > 8 else "")
+            cp_df = cp_df.drop(columns=flagged_cols, errors="ignore")
+
+            if 'per_object_df' in locals() and per_object_df is not None:
+                keep_po = [c for c in per_object_df.columns if c not in flagged_cols]
+                per_object_df = per_object_df[keep_po]
+    else:
+        logger.info("Categorical-like removal disabled or no numeric candidates found.")
+
+        
 
 
     # 2. Harmonise plate/well columns

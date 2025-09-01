@@ -709,6 +709,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--pca", action="store_true", help="Also compute a PCA scree plot on a row sample")
     p.add_argument("--pca_components", type=int, default=20, help="Max PCA components to compute (default: 20)")
     p.add_argument("--pca_sample_rows", type=int, default=50000, help="Max rows sampled for PCA (default: 50k)")
+    p.add_argument("--export_filtered_tsv",
+                    type=str,
+                    default=None,
+                    help="If set, write a TSV with categorical-like columns removed (no imputation/standardisation)."
+                )
+    p.add_argument("--export_metadata",
+                    nargs="*",
+                    default=["cpd_id","cpd_type","Library","Plate_Metadata","Well_Metadata"],
+                    help="Metadata columns to always keep in the export."
+                )
+
     return p.parse_args(argv)
 
 
