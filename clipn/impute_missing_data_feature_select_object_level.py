@@ -2362,7 +2362,11 @@ def main():
     logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
     logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
     logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
-    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
+    logger.info("Metadata well values: %s unique (NaNs ignored).",
+                int(meta_df[meta_well_col].nunique(dropna=True))
+    )
+    log_memory_usage(logger, prefix=" [After metadata loaded ] ")
+    gc.collect()
 
     # 4. Merge metadata
     for df_ in (cp_df, meta_df):
