@@ -366,6 +366,17 @@ def parse_args():
             "Default: <output_file>_categorical_like.tsv"
     )
 
+    parser.add_argument(
+    "--drop_by_name",
+    action="store_true",
+    help="If set, drop feature columns whose names match --drop_by_name_pat (case-insensitive). Default: off."
+    )
+    parser.add_argument(
+        "--drop_by_name_pat",
+        type=str,
+        default=r"(?:^|_)(?:Treatment|Number|Child|Paren|Location_[XYZ]|ZernikePhase|Euler|Plate|Well|Field|Center_(?:Z|X|Y)|no_|fn_|Volume)(?:_|$)",
+        help="Regex used to flag feature columns to drop when --drop_by_name is set (case-insensitive)."
+    )
 
 
     parser.add_argument('--no_compress_output',
@@ -2333,7 +2344,10 @@ def main():
     logger.info(f"CellProfiler unique plate values: {sorted(cp_df[plate_col].unique())[:10]}")
     logger.info(f"Metadata unique plate values: {sorted(meta_df[meta_plate_col].unique())[:10]}")
     logger.info(f"CellProfiler unique well values: {sorted(cp_df[well_col].unique())[:10]}")
-    logger.info(f"Metadata unique well values: {sorted(meta_df[meta_well_col].unique())[:10]}")
+    logger.info("Metadata well values: %s unique (NaNs ignored).",
+                int(meta_df[meta_well_col].nunique(dropna=True))
+            )
+
 
 
     # Standardise Well_Metadata in both main and metadata DataFrames
@@ -2738,42 +2752,20 @@ def main():
     # strip by name-patterns you consider non-informative
     #    (case-insensitive; anchors around common separators)
 
-    # Case-insensitive, boundary-aware column name filter
-    name_drop_pat = re.compile(
-        r"""(?ix)                       # ignore case + allow comments
-        (?:^|_)                         # start or underscore before the token
-        (
-            Treatment
-        | Child(?:ren)?               # Child/Children
-        | Paren(?:t)?                 # Parent
-        | Plate
-        | Well
-        | Field
-        | Location_[XYZ]
-        | Center_(?:Z|X|Y)
-        | ZernikePhase
-        | Euler
-        | Volume
-        | Number(?:_|$|Of)            # Number_ , end, or NumberOf...
-        | no_                         # prefix token
-        | fn_                         # prefix token
-        )
-        """,
-        re.VERBOSE
-    )
+    if args.drop_by_name:
+        name_drop_pat = re.compile(args.drop_by_name_pat, re.IGNORECASE)
+        drop_by_name = [c for c in feature_cols if name_drop_pat.search(c)]
+        if drop_by_name:
+            logger.info(
+                "Excluding %d feature columns by name pattern (e.g. %s%s).",
+                len(drop_by_name),
+                ", ".join(drop_by_name[:8]),
+                "..." if len(drop_by_name) > 8 else ""
+            )
+            feature_cols = [c for c in feature_cols if c not in drop_by_name]
+    else:
+        logger.info("Name-based feature dropping disabled (enable with --drop_by_name).")
 
-
-    logger.info(f"Excluding feature columns by name pattern: {name_drop_pat.pattern}")
-
-    drop_by_name = [c for c in feature_cols if name_drop_pat.search(c)]
-    if drop_by_name:
-        logger.info(
-            "Excluding %d feature columns by name pattern (e.g. %s%s).",
-            len(drop_by_name),
-            ", ".join(drop_by_name[:8]),
-            "..." if len(drop_by_name) > 8 else ""
-        )
-    feature_cols = [c for c in feature_cols if c not in drop_by_name]
 
 
     logger.info(f"Feature selection on {len(feature_cols)} numeric columns.")
