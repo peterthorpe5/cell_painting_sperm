@@ -178,51 +178,6 @@ def normalise_id_column(
     return out, hit
 
 
-def find_nearest_from_nn(
-    df: pd.DataFrame,
-    target_id: str,
-    top_n: int,
-    max_dist: Optional[float] = None,
-) -> pd.DataFrame:
-    """
-    Retrieve top-N nearest neighbours from CLIPn-generated NN results.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Must contain: 'cpd_id', 'neighbour_id', 'distance'.
-    target_id : str
-        Target compound ID.
-    top_n : int
-        Number of neighbours to return.
-    max_dist : float, optional
-        Distance threshold; if provided, neighbours with distance > max_dist
-        are discarded.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns: ['cpd_id', 'nearest_cpd_id', 'distance_metric_NN', 'source'].
-    """
-    df = df.copy()
-    for col in ("cpd_id", "neighbour_id"):
-        df[col] = df[col].astype(str).str.upper().str.strip()
-    df["distance"] = pd.to_numeric(df["distance"], errors="coerce")
-
-    target_rows = df.loc[df["cpd_id"] == target_id.upper()]
-    if target_rows.empty:
-        print(f"[WARNING] Target compound '{target_id}' not found in nearest neighbour data")
-        return pd.DataFrame(columns=["cpd_id", "nearest_cpd_id", "distance_metric_NN", "source"])
-
-    if max_dist is not None:
-        target_rows = target_rows[target_rows["distance"] <= max_dist]
-
-    target_rows = target_rows.sort_values("distance", ascending=True).drop_duplicates(subset=["neighbour_id"], keep="first")
-    top_hits = target_rows.head(top_n).copy()
-    top_hits["source"] = "NN"
-    top_hits = top_hits.rename(columns={"neighbour_id": "nearest_cpd_id", "distance": "distance_metric_NN"})
-
-    return top_hits[["cpd_id", "nearest_cpd_id", "distance_metric_NN", "source"]]
 
 
 def _pick_latest(paths: Iterable[str]) -> Optional[str]:
@@ -270,6 +225,61 @@ def autodiscover_path(root: str, patterns: list[str]) -> Optional[str]:
     return _pick_latest(hits)
 
 
+def find_nearest_from_nn(
+    df: pd.DataFrame,
+    target_id: str,
+    top_n: int,
+    max_dist: Optional[float] = None,
+    *,
+    source_label: str = "NN",
+    distance_col: str = "distance_metric_NN",
+) -> pd.DataFrame:
+    """
+    Retrieve top-N nearest neighbours from a nearest_neighbours.tsv-style table.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must contain: 'cpd_id', 'neighbour_id', 'distance'.
+    target_id : str
+        Target compound ID.
+    top_n : int
+        Number of neighbours to return.
+    max_dist : float, optional
+        Distance threshold; if provided, neighbours with distance > max_dist
+        are discarded.
+    source_label : str, optional
+        Label to use in the 'source' column (default: 'NN').
+    distance_col : str, optional
+        Name of the output distance column (default: 'distance_metric_NN').
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: ['cpd_id', 'nearest_cpd_id', <distance_col>, 'source'].
+    """
+    df = df.copy()
+    for col in ("cpd_id", "neighbour_id"):
+        df[col] = df[col].astype(str).str.upper().str.strip()
+    df["distance"] = pd.to_numeric(df["distance"], errors="coerce")
+
+    target_rows = df.loc[df["cpd_id"] == target_id.upper()]
+    if target_rows.empty:
+        print(f"[WARNING] Target compound '{target_id}' not found in nearest neighbour data")
+        return pd.DataFrame(columns=["cpd_id", "nearest_cpd_id", distance_col, "source"])
+
+    if max_dist is not None:
+        target_rows = target_rows[target_rows["distance"] <= max_dist]
+
+    target_rows = target_rows.sort_values("distance", ascending=True).drop_duplicates(subset=["neighbour_id"], keep="first")
+    top_hits = target_rows.head(top_n).copy()
+    top_hits["source"] = source_label
+    top_hits = top_hits.rename(columns={"neighbour_id": "nearest_cpd_id", "distance": distance_col})
+
+    return top_hits[["cpd_id", "nearest_cpd_id", distance_col, "source"]]
+
+
+
 def summarise_neighbours(
     folder: str,
     targets: List[str],
@@ -279,9 +289,14 @@ def summarise_neighbours(
     extra_metadata: Optional[str] = None,
     nn_path: Optional[str] = None,
     umap_path: Optional[str] = None,
+    include_umap: bool = False,
+    raw_nn_mode: str = "auto",
+    raw_nn_path: Optional[str] = None,
 ) -> None:
     """
     Summarise nearest neighbours for target compounds and merge annotations.
+
+    If include_umap is False (default)
 
     Parameters
     ----------
@@ -301,6 +316,15 @@ def summarise_neighbours(
         Optional override path for nearest_neighbours.tsv.
     umap_path : str, optional
         Optional override path for UMAP coordinates TSV.
+
+    include_umap : bool, optional
+        If True, include UMAP-based nearest neighbours. Default is False.
+
+    If include_umap is False (default), only CLIPn NN results are used.
+    Raw-feature baseline NN is controlled by 'raw_nn_mode':
+      - 'auto' (default): include if a raw NN file is found.
+      - 'on': attempt to include; warn if not found.
+      - 'off': never include.
 
     Returns
     -------
@@ -335,22 +359,23 @@ def summarise_neighbours(
         else:
             print(f"[INFO] Skipping folder (no nearest_neighbours.tsv under: {folder})")
             return
-
-    if not os.path.isfile(umap_path):
-        print(f"[WARNING] UMAP coordinates not found at default: {umap_path}")
-        umap_auto = autodiscover_path(
-            folder,
-            patterns=[
-                "**/clipn_umap_coordinates_*cosine*.tsv",
-                "**/clipn_umap_coordinates_*.tsv",
-            ],
-        )
-        if umap_auto:
-            print(f"[INFO] Auto-discovered UMAP coordinates: {umap_auto}")
-            umap_path = umap_auto
-        else:
-            print(f"[INFO] Skipping folder (no UMAP coords under: {folder})")
-            return
+    # Only attempt UMAP discovery if explicitly requested
+    if include_umap:
+        if not os.path.isfile(umap_path):
+            print(f"[WARNING] UMAP coordinates not found at default: {umap_path}")
+            umap_auto = autodiscover_path(
+                folder,
+                patterns=[
+                    "**/clipn_umap_coordinates_*cosine*.tsv",
+                    "**/clipn_umap_coordinates_*.tsv",
+                ],
+            )
+            if umap_auto:
+                print(f"[INFO] Auto-discovered UMAP coordinates: {umap_auto}")
+                umap_path = umap_auto
+            else:
+                print(f"[INFO] Skipping UMAP (no coords under: {folder})")
+                include_umap = False
 
 
 
@@ -397,7 +422,7 @@ def summarise_neighbours(
 
     # Read inputs
     nn_df = pd.read_csv(nn_path, sep="\t")
-    umap_df = pd.read_csv(umap_path, sep="\t")
+
 
     # Accept alternative headers for NN table
     nn_required = {"cpd_id", "neighbour_id", "distance"}
@@ -414,24 +439,69 @@ def summarise_neighbours(
 
     nn_df["distance"] = pd.to_numeric(nn_df["distance"], errors="coerce")
 
-    # UMAP header normalisation
-    if "UMAP1" not in umap_df.columns or "UMAP2" not in umap_df.columns:
-        rename_umap = {}
-        if "UMAP_1" in umap_df.columns:
-            rename_umap["UMAP_1"] = "UMAP1"
-        if "UMAP_2" in umap_df.columns:
-            rename_umap["UMAP_2"] = "UMAP2"
-        if rename_umap:
-            umap_df = umap_df.rename(columns=rename_umap)
-    for col in ("UMAP1", "UMAP2", "cpd_id"):
-        if col not in umap_df.columns:
-            raise ValueError(f"UMAP coordinates file must contain '{col}'")
 
-    # Normalise IDs
-    umap_df["cpd_id"] = umap_df["cpd_id"].astype(str).str.upper().str.strip()
-    if meta is not None:
-        meta = meta.copy()
-        meta["cpd_id"] = meta["cpd_id"].astype(str).str.upper().str.strip()
+    # Optional UMAP
+    umap_df = None
+    if include_umap:
+        umap_df = pd.read_csv(umap_path, sep="\t")
+
+        # UMAP header normalisation
+        if "UMAP1" not in umap_df.columns or "UMAP2" not in umap_df.columns:
+            rename_umap = {}
+            if "UMAP_1" in umap_df.columns:
+                rename_umap["UMAP_1"] = "UMAP1"
+            if "UMAP_2" in umap_df.columns:
+                rename_umap["UMAP_2"] = "UMAP2"
+            if rename_umap:
+                umap_df = umap_df.rename(columns=rename_umap)
+        for col in ("UMAP1", "UMAP2", "cpd_id"):
+            if col not in umap_df.columns:
+                raise ValueError(f"UMAP coordinates file must contain '{col}'")
+
+        # Normalise IDs
+        umap_df["cpd_id"] = umap_df["cpd_id"].astype(str).str.upper().str.strip()
+        #if meta is not None:
+        #    meta = meta.copy()
+        #    meta["cpd_id"] = meta["cpd_id"].astype(str).str.upper().str.strip()
+
+    raw_nn_df = None
+    if raw_nn_mode != "off":
+        # If explicit path was not provided, try to auto-discover
+        candidate_path = raw_nn_path
+        if not candidate_path:
+            # Common locations used by your pipeline – adjust if needed
+            candidates = [
+                "**/post_raw_nn/nearest_neighbours.tsv",
+                "**/post_baseline_nn/nearest_neighbours.tsv",
+                "**/nearest_neighbours_raw.tsv",
+                "**/raw_nn/nearest_neighbours.tsv",
+                "**/post_knn/nearest_neighbours.tsv",  # often used in your runs
+            ]
+            auto = autodiscover_path(folder, patterns=candidates)
+            if auto:
+                print(f"[INFO] Auto-discovered raw-feature NN: {auto}")
+                candidate_path = auto
+
+        if candidate_path and os.path.isfile(candidate_path):
+            raw_nn_df = pd.read_csv(candidate_path, sep="\t")
+            # Align headers if needed
+            rn_required = {"cpd_id", "neighbour_id", "distance"}
+            if not rn_required.issubset(raw_nn_df.columns):
+                alt_map = {}
+                if {"QueryID", "NeighbourID"}.issubset(raw_nn_df.columns):
+                    alt_map.update({"QueryID": "cpd_id", "NeighbourID": "neighbour_id"})
+                if "Distance" in raw_nn_df.columns and "distance" not in raw_nn_df.columns:
+                    alt_map["Distance"] = "distance"
+                if alt_map:
+                    raw_nn_df = raw_nn_df.rename(columns=alt_map)
+            if not rn_required.issubset(raw_nn_df.columns):
+                raise ValueError("Raw-NN file must contain columns: cpd_id, neighbour_id, distance")
+        else:
+            if raw_nn_mode == "on":
+                print("[WARNING] raw_nn_mode='on' but no raw-feature NN file was found.")
+            else:
+                print("[INFO] No raw-feature NN file found; continuing without it.")
+
 
     # Process each target
     all_summaries: List[pd.DataFrame] = []
@@ -440,9 +510,20 @@ def summarise_neighbours(
         t = str(target).upper().strip()
 
         top_nn = find_nearest_from_nn(nn_df, t, top_n, max_dist=max_dist)
-        top_umap = find_nearest_umap(umap_df, t, top_n, max_dist=max_dist)
+        combined = top_nn.copy()
+        if include_umap and umap_df is not None:
+            top_umap = find_nearest_umap(umap_df, t, top_n, max_dist=max_dist)
+            combined = pd.concat([combined, top_umap], ignore_index=True)
 
-        combined = pd.concat([top_nn, top_umap], ignore_index=True)
+            # Optional raw-feature baseline (auto/on)
+        if raw_nn_df is not None:
+            top_raw = find_nearest_from_nn(
+                df=raw_nn_df, target_id=t, top_n=top_n, max_dist=max_dist,
+                source_label="NN_RAW", distance_col="distance_metric_RAW"
+            )
+            combined = pd.concat([combined, top_raw], ignore_index=True)
+
+
         combined = combined.drop_duplicates(subset=["cpd_id", "nearest_cpd_id", "source"], keep="first")
 
         # Merge primary metadata
@@ -505,6 +586,31 @@ if __name__ == "__main__":
     parser.add_argument("--extra_metadata", type=str, default=None, help="Path to secondary metadata TSV/CSV.")
     parser.add_argument("--nn_path", type=str, default=None, help="Optional override path for nearest_neighbours.tsv.")
     parser.add_argument("--umap_path", type=str, default=None, help="Optional override path for UMAP coords TSV.")
+    # In argparse
+    parser.add_argument(
+        "--include_umap",
+        action="store_true",
+        help="Include UMAP nearest neighbour data (default: off)."
+    )
+    parser.add_argument(
+        "--raw_nn_mode",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help=(
+            "Include raw-feature baseline NN. "
+            "'auto' (default): include if a file is found; "
+            "'on': try to include (warn if missing); "
+            "'off': do not include."
+        ),
+    )
+    parser.add_argument(
+        "--raw_nn_path",
+        type=str,
+        default=None,
+        help="Optional override path to raw-feature nearest_neighbours.tsv."
+    )
+
+
 
     args = parser.parse_args()
     summarise_neighbours(
@@ -516,4 +622,6 @@ if __name__ == "__main__":
         extra_metadata=args.extra_metadata,
         nn_path=args.nn_path,
         umap_path=args.umap_path,
-    )
+        include_umap=args.include_umap,
+        raw_nn_mode=args.raw_nn_mode,
+        raw_nn_path=args.raw_nn_path,)
