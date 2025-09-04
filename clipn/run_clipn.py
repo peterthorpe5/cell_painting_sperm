@@ -583,7 +583,7 @@ def run_knn_analysis(
     *,
     X: pd.DataFrame,
     meta: pd.DataFrame,
-    k: int = 10,
+    k: int = 50,
     metric: str = "cosine",
     logger: logging.Logger,
 ) -> pd.DataFrame:
@@ -2295,7 +2295,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--impute_knn_k",
         type=int,
-        default=5,
+        default=50,
         help="Number of neighbours for KNN imputation (used when --impute knn)."
     )
 
