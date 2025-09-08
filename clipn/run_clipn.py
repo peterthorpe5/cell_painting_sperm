@@ -2704,17 +2704,17 @@ def main(args: argparse.Namespace) -> None:
                 logger=logger,)
     logger.info("Decoded data saved to %s", main_decoded_path)
     if not args.no_diagnostics:
-    run_training_diagnostics(
-            decoded_df=decoded_df,
-            out_dir=Path(args.out),
-            experiment=args.experiment,
-            mode=args.mode,
-            level=args.diag_level,
-            k_nn=args.diag_k,
-            metric=args.diag_metric,
-            logger=logger,
-        )
-        logger.info("Diagnostics completed.")
+        run_training_diagnostics(
+                decoded_df=decoded_df,
+                out_dir=Path(args.out),
+                experiment=args.experiment,
+                mode=args.mode,
+                level=args.diag_level,
+                k_nn=args.diag_k,
+                metric=args.diag_metric,
+                logger=logger,
+            )
+            logger.info("Diagnostics completed.")
 
 
     post_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.tsv"
