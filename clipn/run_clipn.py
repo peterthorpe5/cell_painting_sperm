@@ -2714,7 +2714,7 @@ def main(args: argparse.Namespace) -> None:
                 metric=args.diag_metric,
                 logger=logger,
             )
-            logger.info("Diagnostics completed.")
+        logger.info("Diagnostics completed.")
 
 
     post_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.tsv"
