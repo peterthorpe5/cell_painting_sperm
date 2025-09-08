@@ -146,13 +146,13 @@ def parse_args() -> argparse.Namespace:
         help="Plate column name (used if --scale_for_ae != none). Default: Plate_Metadata."
     )
     parser.add_argument(
-    "--selection_rule",
-    choices=["negative_mean", "top_abs_quantile"],
-    default="negative_mean",
-    help=("Feature removal rule. "
-          "'negative_mean' (default): remove features with mean signed SHAP < remove_threshold. "
-          "'top_abs_quantile': keep the top fraction by absolute mean SHAP and remove the rest.")
-    )
+        "--selection_rule",
+        choices=["negative_mean", "top_abs_quantile"],
+        default="negative_mean",
+        help=("Feature removal rule. "
+            "'negative_mean' (default): remove features with mean signed SHAP < remove_threshold. "
+            "'top_abs_quantile': keep the top fraction by absolute mean SHAP and remove the rest.")
+        )
 
     parser.add_argument(
         "--keep_top_abs_quantile",

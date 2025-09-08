@@ -37,6 +37,10 @@ Command-line arguments:
                           using 'median' (default), 'mean', 'min', or 'max'.
     --annotations       : Optional annotation file (TSV) to merge using
                           Plate_Metadata and Well_Metadata.
+    --impute            : Missing data imputation method: 'none' (default) or 'knn'
+    --impute_k          : Number of neighbours for KNN imputation (default: 50).
+    --no_plot_loss      : If set, disable plotting and saving the training loss curve and TSV.
+
 """
 
 from __future__ import annotations
@@ -59,12 +63,21 @@ from typing import Dict, Iterable, List, Tuple, Optional, Callable
 import re
 import numpy as np
 import pandas as pd
+from typing import Sequence
+
+import matplotlib 
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 import psutil
 import concurrent.futures
 import torch
 import torch.serialization
 import gzip
 from clipn.model import CLIPn
+import math
+from sklearn.metrics import silhouette_score
+from sklearn.neighbors import NearestNeighbors
 from sklearn import set_config
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
@@ -187,6 +200,577 @@ def torch_load_compat(model_path: str, *, map_location: str | None = None, weigh
     except TypeError:
         # Older Torch without 'weights_only'
         return torch.load(f=model_path, map_location=map_location)
+
+
+def save_training_loss(
+    *,
+    loss_values: Sequence[float] | np.ndarray | "torch.Tensor",
+    out_dir: str | Path,
+    experiment: str,
+    mode: str,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Plot and save CLIPn training loss per epoch.
+
+    Parameters
+    ----------
+    loss_values : Sequence[float] | numpy.ndarray | torch.Tensor
+        The per-epoch loss values returned by the CLIPn trainer.
+    out_dir : str | Path
+        Base output directory (will write into the 'post_clipn' subfolder).
+    experiment : str
+        Experiment name used for file naming.
+    mode : str
+        CLIPn mode context ('reference_only' or 'integrate_all'), used in names.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, png_path) of the written loss artefacts.
+
+    Notes
+    -----
+    - Writes a tab-separated file with columns 'epoch' and 'loss'.
+    - Saves a PNG line plot using the non-interactive 'Agg' backend
+      for safe use on HPC/headless systems.
+    """
+    # Normalise to a 1-D list of floats
+    if hasattr(loss_values, "detach"):  # torch.Tensor
+        vals = loss_values.detach().cpu().numpy().tolist()
+    elif isinstance(loss_values, np.ndarray):
+        vals = loss_values.tolist()
+    else:
+        vals = list(loss_values)
+
+    # Guard: empty or scalar
+    if not isinstance(vals, list) or len(vals) == 0:
+        logger.warning("Training loss sequence is empty; nothing to plot/save.")
+        post_dir = Path(out_dir) / "post_clipn"
+        post_dir.mkdir(parents=True, exist_ok=True)
+        empty_tsv = post_dir / f"{experiment}_{mode}_clipn_training_loss.tsv"
+        pd.DataFrame(data=[], columns=["epoch", "loss"]).to_csv(empty_tsv, sep="\t", index=False)
+        return empty_tsv, post_dir / f"{experiment}_{mode}_clipn_training_loss.png"
+
+    epochs = list(range(1, len(vals) + 1))
+    df_loss = pd.DataFrame(data={"epoch": epochs, "loss": vals})
+
+    post_dir = Path(out_dir) / "post_clipn"
+    post_dir.mkdir(parents=True, exist_ok=True)
+
+    tsv_path = post_dir / f"{experiment}_{mode}_clipn_training_loss.tsv"
+    df_loss.to_csv(tsv_path, sep="\t", index=False)
+
+    png_path = post_dir / f"{experiment}_{mode}_clipn_training_loss.pdf"
+    fig = plt.figure(figsize=(8, 5))
+    ax = fig.add_subplot(111)
+    ax.plot(epochs, vals)
+    ax.set_title(f"CLIPn training loss — {experiment} [{mode}]")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(True, which="major", linestyle="--", linewidth=0.5)
+    fig.tight_layout()
+    fig.savefig(png_path)
+    plt.close(fig)
+
+    logger.info("Saved training loss TSV -> %s", tsv_path)
+    logger.info("Saved training loss pdf -> %s", png_path)
+    return tsv_path, png_path
+
+
+def extract_latent_and_meta(
+    *,
+    decoded_df: pd.DataFrame,
+    level: str = "compound",
+    aggregate: str = "median",
+    logger: logging.Logger,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Prepare a latent matrix X and aligned metadata for diagnostics.
+
+    Parameters
+    ----------
+    decoded_df : pandas.DataFrame
+        Decoded table containing integer-named latent columns ('0','1',...),
+        plus 'Dataset', 'Sample', 'cpd_id', and optionally 'cpd_type'/'Library'.
+    level : str
+        'compound' (aggregates by 'cpd_id') or 'image'.
+    aggregate : str
+        'median' or 'mean' for compound aggregation.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    tuple
+        (X, meta, latent_cols) where X is numeric latent DataFrame, meta is
+        aligned metadata, latent_cols are the latent column names used.
+    """
+    latent_cols = [c for c in decoded_df.columns if str(c).isdigit()]
+    if not latent_cols:
+        raise ValueError("No latent columns detected (expected '0','1',...).")
+
+    if level == "image":
+        meta_cols = [c for c in ["cpd_id", "cpd_type", "Dataset", "Library", "Plate_Metadata", "Well_Metadata"]
+                     if c in decoded_df.columns]
+        X = decoded_df.loc[:, latent_cols].copy()
+        meta = decoded_df.loc[:, meta_cols].copy()
+        logger.info("Diagnostics at image level: %d rows, %d dims.", X.shape[0], len(latent_cols))
+        return X, meta, latent_cols
+
+    if level == "compound":
+        grouped = decoded_df.groupby(by="cpd_id", dropna=False, sort=False)
+        aggfunc = "median" if aggregate == "median" else "mean"
+        X = grouped[latent_cols].agg(func=aggfunc)
+        def _mode_safe(s: pd.Series) -> str | None:
+            s = s.dropna()
+            return None if s.empty else str(s.mode(dropna=True).iloc[0])
+        meta = pd.DataFrame({
+            "cpd_id": X.index.astype(str),
+            "cpd_type": grouped["cpd_type"].apply(func=_mode_safe) if "cpd_type" in decoded_df.columns else None,
+            "Dataset": grouped["Dataset"].apply(func=_mode_safe) if "Dataset" in decoded_df.columns else None,
+            "Library": grouped["Library"].apply(func=_mode_safe) if "Library" in decoded_df.columns else None,
+        }).dropna(axis=1, how="all")
+        meta.index = X.index
+        logger.info("Diagnostics at compound level: %d compounds, %d dims.", X.shape[0], len(latent_cols))
+        return X.reset_index(drop=True), meta.reset_index(drop=True), latent_cols
+
+    raise ValueError("level must be 'compound' or 'image'.")
+
+
+def build_knn_index(
+    *,
+    X: pd.DataFrame,
+    k: int,
+    metric: str = "cosine",
+    logger: logging.Logger,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build a k-NN index and return neighbour indices and distances.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent matrix with numeric columns.
+    k : int
+        Number of neighbours to return (excluding self).
+    metric : str
+        'cosine' or 'euclidean'.
+    logger : logging.Logger
+        Logger for messages.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        (indices, distances) arrays of shape (n, k).
+    """
+    n = X.shape[0]
+    if n < 2:
+        raise ValueError("Not enough rows to build a k-NN graph.")
+    k_eff = min(k + 1, n)
+    nn = NearestNeighbors(n_neighbors=k_eff, metric=metric)
+    nn.fit(X.values)
+    dists, idxs = nn.kneighbors(X.values, return_distance=True)
+    idxs_clean = []
+    dists_clean = []
+    for i in range(n):
+        row = [(j, d) for j, d in zip(idxs[i], dists[i]) if j != i]
+        row = row[:k]
+        idxs_clean.append([j for j, _ in row])
+        dists_clean.append([float(d) for _, d in row])
+    return np.asarray(idxs_clean, dtype=int), np.asarray(dists_clean, dtype=float)
+
+
+def precision_at_k(
+    *,
+    labels: pd.Series,
+    nn_indices: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute Precision@k for a single label vector using a fixed neighbour index.
+
+    Parameters
+    ----------
+    labels : pandas.Series
+        Class labels aligned to the rows of the k-NN index.
+    nn_indices : numpy.ndarray
+        Neighbour indices of shape (n, k).
+
+    Returns
+    -------
+    numpy.ndarray
+        Precision@k values for k=1..K (averaged over queries).
+    """
+    y = labels.astype(str).to_numpy()
+    n, k = nn_indices.shape
+    hits_cum = np.zeros(shape=(k,), dtype=float)
+    for i in range(n):
+        neigh = nn_indices[i]
+        same = (y[neigh] == y[i]).astype(float)
+        hits_cum += np.cumsum(same) / np.arange(1, k + 1)
+    return hits_cum / n
+
+
+def plot_and_save_precision_curves(
+    *,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    label_name: str,
+    prec_curve: np.ndarray,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Save Precision@k TSV and PDF for a given label type.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    k_vals = np.arange(1, len(prec_curve) + 1)
+    df = pd.DataFrame({"k": k_vals, "precision": prec_curve})
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_precision_at_k_{label_name}.tsv"
+    df.to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_precision_at_k_{label_name}.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(7, 5))
+    df.plot(kind="line", x="k", y="precision", ax=ax, legend=False)
+    ax.set_xlabel("k")
+    ax.set_ylabel("Precision")
+    ax.set_title(f"Precision@k in latent space — {label_name}")
+    ax.grid(visible=True, linestyle="--", linewidth=0.5)
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved Precision@k for %s -> %s ; %s", label_name, tsv, pdf)
+    return tsv, pdf
+
+
+def dataset_mixing_entropy(
+    *,
+    datasets: pd.Series,
+    nn_indices: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute neighbour-label entropy for each row using Dataset labels.
+
+    Parameters
+    ----------
+    datasets : pandas.Series
+        Dataset label per row.
+    nn_indices : numpy.ndarray
+        Neighbour indices of shape (n, k).
+
+    Returns
+    -------
+    numpy.ndarray
+        Entropy values per row (natural log base).
+    """
+    labs = datasets.astype(str).to_numpy()
+    n, _ = nn_indices.shape
+    ent = np.zeros(shape=(n,), dtype=float)
+    for i in range(n):
+        neigh = labs[nn_indices[i]]
+        _, counts = np.unique(neigh, return_counts=True)
+        probs = counts / counts.sum()
+        ent[i] = -np.sum(probs * np.log(probs + 1e-12))
+    return ent
+
+
+def plot_and_save_entropy(
+    *,
+    ent: np.ndarray,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    num_datasets: int,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Save dataset-mixing entropy histogram and per-row TSV.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    norm = ent / math.log(max(2, num_datasets))
+    tsv = out_dir / f"{experiment}_{mode}_dataset_mixing_entropy.tsv"
+    pd.DataFrame({"entropy": ent, "normalised_entropy": norm}).to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_dataset_mixing_entropy.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(7, 5))
+    pd.Series(norm, name="normalised_entropy").plot(kind="hist", bins=40, ax=ax)
+    ax.set_xlabel("Normalised entropy (0..1)")
+    ax.set_ylabel("Count")
+    ax.set_title("Dataset-mixing entropy (higher = better mixing)")
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved mixing entropy -> %s ; %s", tsv, pdf)
+    return tsv, pdf
+
+
+def compute_and_save_silhouette(
+    *,
+    X: pd.DataFrame,
+    labels: pd.Series,
+    metric: str,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    label_name: str,
+    logger: logging.Logger,
+) -> Path:
+    """
+    Compute a global silhouette score and write to TSV.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent matrix (numeric).
+    labels : pandas.Series
+        Labels for silhouette computation.
+    metric : str
+        'cosine' or 'euclidean'.
+    out_dir : pathlib.Path
+        Output directory.
+    experiment : str
+        Experiment name.
+    mode : str
+        Mode name.
+    label_name : str
+        Name of the grouping label for the report.
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written TSV.
+    """
+    valid = labels.fillna("NA").astype(str)
+    ok_sizes = (valid.value_counts() > 1).all() and valid.nunique() >= 2
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_silhouette_{label_name}.tsv"
+    if not ok_sizes:
+        pd.DataFrame({"label": [label_name], "silhouette_score": [np.nan], "metric": [metric]}).to_csv(tsv, sep="\t", index=False)
+        logger.warning("Silhouette skipped for %s (insufficient class sizes).", label_name)
+        return tsv
+    score = silhouette_score(X=X.values, labels=valid.to_numpy(), metric=metric)
+    pd.DataFrame({"label": [label_name], "silhouette_score": [float(score)], "metric": [metric]}).to_csv(tsv, sep="\t", index=False)
+    logger.info("Silhouette (%s): %.4f -> %s", label_name, score, tsv)
+    return tsv
+
+
+def save_latent_variance_report(
+    *,
+    X: pd.DataFrame,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    eps: float = 1e-6,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Save per-dimension variance (TSV) and a bar plot (PDF); flag low-variance dims.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent matrix with columns as latent dimensions.
+    out_dir : pathlib.Path
+        Output directory.
+    experiment : str
+        Experiment name.
+    mode : str
+        Mode name.
+    eps : float
+        Threshold below which a dimension is considered 'dead'.
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    var = X.var(axis=0, ddof=1).to_frame(name="variance").sort_values(by="variance", ascending=False)
+    var["is_dead_dim"] = var["variance"] < eps
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_latent_variance.tsv"
+    var.reset_index(names=["dimension"]).to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_latent_variance.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(9, 4))
+    var.reset_index(drop=True)["variance"].plot(kind="bar", ax=ax)
+    ax.set_xlabel("Latent dimension (sorted)")
+    ax.set_ylabel("Variance")
+    ax.set_title("Latent per-dimension variance (dead dims near zero)")
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved latent variance report -> %s ; %s (dead dims: %d)", tsv, pdf, int(var["is_dead_dim"].sum()))
+    return tsv, pdf
+
+
+def wbd_ratio_per_compound(
+    *,
+    X: pd.DataFrame,
+    meta: pd.DataFrame,
+    k: int,
+    metric: str,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Compute within/between dispersion ratio (WBDR) per compound and save outputs.
+
+    For each compound with ≥ 2 members:
+      - Within: mean distance to k nearest neighbours from the same compound.
+      - Between: mean distance to k nearest neighbours from other compounds.
+      - Ratio = within / between. Lower is better (< 1 desirable).
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    if "cpd_id" not in meta.columns:
+        logger.warning("WBDR skipped: 'cpd_id' not in metadata.")
+        dummy_tsv = out_dir / f"{experiment}_{mode}_wbd_ratio.tsv"
+        pd.DataFrame(columns=["cpd_id", "wbd_ratio"]).to_csv(dummy_tsv, sep="\t", index=False)
+        return dummy_tsv, out_dir / f"{experiment}_{mode}_wbd_ratio.pdf"
+
+    idxs, dists = build_knn_index(X=X, k=max(50, k), metric=metric, logger=logger)
+    y = meta["cpd_id"].astype(str).to_numpy()
+    ratios = []
+    for i in range(X.shape[0]):
+        neigh = idxs[i]
+        same_mask = (y[neigh] == y[i])
+        diff_mask = ~same_mask
+        within = float(np.mean(dists[i][same_mask][:k])) if same_mask.any() else np.nan
+        between = float(np.mean(dists[i][diff_mask][:k])) if diff_mask.any() else np.nan
+        r = np.nan if (np.isnan(within) or np.isnan(between) or between == 0.0) else (within / between)
+        ratios.append(r)
+
+    df = pd.DataFrame({"cpd_id": meta["cpd_id"].astype(str), "wbd_ratio": ratios}).dropna()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_wbd_ratio.tsv"
+    df.to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_wbd_ratio.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(7, 5))
+    df.plot(kind="hist", y="wbd_ratio", bins=40, ax=ax, legend=False)
+    ax.set_xlabel("Within/Between ratio (lower is better)")
+    ax.set_ylabel("Count")
+    ax.set_title("Compound WBDR in latent space")
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved WBDR -> %s ; %s (n=%d)", tsv, pdf, df.shape[0])
+    return tsv, pdf
+
+
+def run_training_diagnostics(
+    *,
+    decoded_df: pd.DataFrame,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    level: str = "compound",
+    k_nn: int = 15,
+    metric: str = "cosine",
+    logger: logging.Logger,
+) -> None:
+    """
+    Run post-training diagnostics on the latent space and save TSV/PDF outputs.
+
+    Parameters
+    ----------
+    decoded_df : pandas.DataFrame
+        Decoded latent table (must include latent dims and 'Dataset';
+        ideally also 'cpd_id' and 'cpd_type').
+    out_dir : pathlib.Path
+        Base output directory.
+    experiment : str
+        Experiment name for file naming.
+    mode : str
+        'reference_only' or 'integrate_all'.
+    level : str
+        'compound' (default) or 'image'.
+    k_nn : int
+        Neighbourhood size for diagnostics.
+    metric : str
+        'cosine' (default) or 'euclidean'.
+    logger : logging.Logger
+        Logger instance.
+    """
+    diag_dir = Path(out_dir) / "training_diagnostics"
+    X, meta, _ = extract_latent_and_meta(
+        decoded_df=decoded_df,
+        level=level,
+        aggregate="median",
+        logger=logger,
+    )
+    nn_idx, _ = build_knn_index(X=X, k=k_nn, metric=metric, logger=logger)
+
+    if "cpd_id" in meta.columns:
+        p_curve = precision_at_k(labels=meta["cpd_id"], nn_indices=nn_idx)
+        plot_and_save_precision_curves(
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="cpd_id", prec_curve=p_curve, logger=logger,
+        )
+    if "cpd_type" in meta.columns:
+        p_curve = precision_at_k(labels=meta["cpd_type"], nn_indices=nn_idx)
+        plot_and_save_precision_curves(
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="cpd_type", prec_curve=p_curve, logger=logger,
+        )
+
+    if "Dataset" in meta.columns and meta["Dataset"].notna().any():
+        ent = dataset_mixing_entropy(datasets=meta["Dataset"], nn_indices=nn_idx)
+        plot_and_save_entropy(
+            ent=ent, out_dir=diag_dir, experiment=experiment, mode=mode,
+            num_datasets=int(meta["Dataset"].nunique(dropna=True)), logger=logger,
+        )
+
+    if "cpd_type" in meta.columns:
+        compute_and_save_silhouette(
+            X=X, labels=meta["cpd_type"], metric=metric,
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="cpd_type", logger=logger,
+        )
+    if "Dataset" in meta.columns:
+        compute_and_save_silhouette(
+            X=X, labels=meta["Dataset"], metric=metric,
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="Dataset", logger=logger,
+        )
+
+    save_latent_variance_report(
+        X=X, out_dir=diag_dir, experiment=experiment, mode=mode, eps=1e-6, logger=logger,
+    )
+
+    if "cpd_id" in meta.columns:
+        wbd_ratio_per_compound(
+            X=X, meta=meta, k=k_nn, metric=metric,
+            out_dir=diag_dir, experiment=experiment, mode=mode, logger=logger,
+        )
+
+    logger.info("Training diagnostics completed. Outputs in %s", diag_dir)
 
 
 def detect_csv_delimiter(csv_path: str) -> str:
@@ -1154,7 +1738,8 @@ def run_clipn_integration(
     latent_dim: int,
     lr: float,
     epochs: int,
-    skip_standardise: bool = False,  # kept for signature parity
+    skip_standardise: bool = False,
+    plot_loss: bool = True,
 ) -> Tuple[pd.DataFrame, Dict[str, List[str]], CLIPn, Dict[int, str]]:
     """
     Train a CLIPn model on the provided DataFrame and return latent representations.
@@ -1212,6 +1797,20 @@ def run_clipn_integration(
         lr=lr,
         epochs=epochs,
     )
+    logger.info("CLIPn training completed.")
+    # Save loss curve (TSV + PNG) if available
+    if plot_loss and loss is not None:
+        try:
+            save_training_loss(
+                loss_values=loss,
+                out_dir=output_path,
+                experiment=experiment,
+                mode=mode,
+                logger=logger,
+            )
+        except Exception as exc:
+            logger.warning("Failed to save/plot training loss: %s", exc)
+
 
     if isinstance(loss, (list, np.ndarray)):
         logger.info("CLIPn final loss: %.6f", loss[-1])
@@ -1616,6 +2215,9 @@ def main(args: argparse.Namespace) -> None:
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
+    plot_loss = not args.no_plot_loss
+
+
     # Load + harmonise - lots of logging here
     dataframes, common_cols = load_and_harmonise_datasets(
         datasets_csv=args.datasets_csv,
@@ -1901,6 +2503,7 @@ def main(args: argparse.Namespace) -> None:
                 lr=args.lr,
                 epochs=args.epoch,
                 skip_standardise=args.skip_standardise,
+                plot_loss=plot_loss, 
             )
             if args.save_model:
                 model_path = Path(args.out) / f"{args.experiment}_clipn_model.pt"
@@ -2057,6 +2660,7 @@ def main(args: argparse.Namespace) -> None:
                 lr=args.lr,
                 epochs=args.epoch,
                 skip_standardise=args.skip_standardise,
+                plot_loss=plot_loss,
             )
             if args.save_model:
                 model_path = Path(args.out) / f"{args.experiment}_clipn_model.pt"
@@ -2098,8 +2702,20 @@ def main(args: argparse.Namespace) -> None:
                 path=main_decoded_path,
                 sep="\t",
                 logger=logger,)
-
     logger.info("Decoded data saved to %s", main_decoded_path)
+    if not args.no_diagnostics:
+    run_training_diagnostics(
+            decoded_df=decoded_df,
+            out_dir=Path(args.out),
+            experiment=args.experiment,
+            mode=args.mode,
+            level=args.diag_level,
+            k_nn=args.diag_k,
+            metric=args.diag_metric,
+            logger=logger,
+        )
+        logger.info("Diagnostics completed.")
+
 
     post_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.tsv"
     safe_to_csv(df=decoded_df,
@@ -2298,7 +2914,35 @@ if __name__ == "__main__":
         default=50,
         help="Number of neighbours for KNN imputation (used when --impute knn)."
     )
+    parser.add_argument(
+                        "--no_plot_loss",
+                        action="store_true",
+                        help="Disable plotting and saving the training loss curve and TSV.",
+                    )
 
+    parser.add_argument(
+        "--no_diagnostics",
+        action="store_true",
+        help="Disable post-training diagnostics (Precision@k, mixing entropy, silhouette, variance, WBDR).",
+    )
+    parser.add_argument(
+        "--diag_level",
+        choices=["compound", "image"],
+        default="compound",
+        help="Granularity for diagnostics ('compound' aggregates by cpd_id).",
+    )
+    parser.add_argument(
+        "--diag_k",
+        type=int,
+        default=15,
+        help="Neighbourhood size k for diagnostics.",
+    )
+    parser.add_argument(
+        "--diag_metric",
+        choices=["cosine", "euclidean"],
+        default="cosine",
+        help="Distance metric for diagnostics.",
+    )
 
 
     main(parser.parse_args())
