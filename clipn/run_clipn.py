@@ -2459,6 +2459,9 @@ def main(args: argparse.Namespace) -> None:
         .loc[:, [c for c in ["Dataset", "Sample"] + meta_cols if c in df_scaled_all.columns]]
         .copy()
     )
+    bad_cols = set(df_encoded.columns) & {"cpd_id", "Library", "Plate_Metadata", "Well_Metadata"}
+    if bad_cols:
+        raise ValueError(f"Unexpected metadata leaked into training matrix: {sorted(bad_cols)}")
 
     # Expose encoder mapping for downstream decode/exports
     encoders = {"cpd_type": le_cpd}
@@ -2488,7 +2491,7 @@ def main(args: argparse.Namespace) -> None:
 
     # Optional: dump all column names to a TSV for inspection
     train_cols_path = Path(args.out) / "clipn_training_columns.tsv"
-    pd.Series(df_encoded.columns).to_csv(train_cols_path, sep="\t", index=False, header=["column"])
+    pd.Series(df_encoded.columns, name="column").to_csv(train_cols_path, sep="\t", index=False, header=True)
     logger.info("Wrote full list of training columns to %s", train_cols_path)
 
 
