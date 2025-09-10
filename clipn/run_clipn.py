@@ -209,61 +209,66 @@ def save_training_loss(
     experiment: str,
     mode: str,
     logger: logging.Logger,
+    expected_epochs: int | None = None,
+    aggregate: str = "last",          
 ) -> tuple[Path, Path]:
     """
     Plot and save CLIPn training loss per epoch.
 
-    Parameters
-    ----------
-    loss_values : Sequence[float] | numpy.ndarray | torch.Tensor
-        The per-epoch loss values returned by the CLIPn trainer.
-    out_dir : str | Path
-        Base output directory (will write into the 'post_clipn' subfolder).
-    experiment : str
-        Experiment name used for file naming.
-    mode : str
-        CLIPn mode context ('reference_only' or 'integrate_all'), used in names.
-    logger : logging.Logger
-        Logger for status messages.
-
-    Returns
-    -------
-    tuple[pathlib.Path, pathlib.Path]
-        (tsv_path, png_path) of the written loss artefacts.
-
-    Notes
-    -----
-    - Writes a tab-separated file with columns 'epoch' and 'loss'.
-    - Saves a PNG line plot using the non-interactive 'Agg' backend
-      for safe use on HPC/headless systems.
+    - If loss is per-step and expected_epochs is provided, collapse to per-epoch.
+    - Writes TSV and a PDF line plot.
     """
-    # Normalise to a 1-D list of floats
-    if hasattr(loss_values, "detach"):  # torch.Tensor
-        vals = loss_values.detach().cpu().numpy().tolist()
-    elif isinstance(loss_values, np.ndarray):
-        vals = loss_values.tolist()
-    else:
-        vals = list(loss_values)
+    def _to_float_list(x):
+        if hasattr(x, "detach"):  # torch.Tensor
+            x = x.detach().cpu().numpy()
+        if isinstance(x, np.ndarray):
+            x = x.tolist()
+        return [float(v) for v in x]
 
-    # Guard: empty or scalar
-    if not isinstance(vals, list) or len(vals) == 0:
-        logger.warning("Training loss sequence is empty; nothing to plot/save.")
-        post_dir = Path(out_dir) / "post_clipn"
-        post_dir.mkdir(parents=True, exist_ok=True)
-        empty_tsv = post_dir / f"{experiment}_{mode}_clipn_training_loss.tsv"
-        pd.DataFrame(data=[], columns=["epoch", "loss"]).to_csv(empty_tsv, sep="\t", index=False)
-        return empty_tsv, post_dir / f"{experiment}_{mode}_clipn_training_loss.png"
+    # 1) coerce + clean
+    try:
+        vals = _to_float_list(loss_values)
+    except Exception:
+        vals = [float(getattr(v, "item", lambda: v)()) if hasattr(v, "item") else float(v) for v in loss_values]
+    vals = [v for v in vals if np.isfinite(v)]
 
+    # 2) collapse per-step -> per-epoch if applicable
+    if expected_epochs and expected_epochs > 0 and len(vals) != expected_epochs:
+        if len(vals) % expected_epochs == 0:
+            steps_per_epoch = len(vals) // expected_epochs
+            collapsed = []
+            for e in range(expected_epochs):
+                block = vals[e*steps_per_epoch:(e+1)*steps_per_epoch]
+                collapsed.append(block[-1] if aggregate == "last" else float(np.mean(block)))
+            logger.info(
+                "Collapsed per-step loss (%d points, %d/epoch) to per-epoch (%d points) using '%s'.",
+                len(vals), steps_per_epoch, len(collapsed), aggregate
+            )
+            vals = collapsed
+        else:
+            logger.warning(
+                "expected_epochs=%d but len(loss)=%d not divisible; leaving as-is (x-axis will reflect steps).",
+                expected_epochs, len(vals)
+            )
+
+    # 3) write TSV
     epochs = list(range(1, len(vals) + 1))
-    df_loss = pd.DataFrame(data={"epoch": epochs, "loss": vals})
-
     post_dir = Path(out_dir) / "post_clipn"
     post_dir.mkdir(parents=True, exist_ok=True)
-
     tsv_path = post_dir / f"{experiment}_{mode}_clipn_training_loss.tsv"
-    df_loss.to_csv(tsv_path, sep="\t", index=False)
+    pd.DataFrame({"epoch": epochs, "loss": vals}).to_csv(tsv_path, sep="\t", index=False)
 
-    png_path = post_dir / f"{experiment}_{mode}_clipn_training_loss.pdf"
+    # 4) plot PDF (or touch empty if <2 points)
+    pdf_path = post_dir / f"{experiment}_{mode}_clipn_training_loss.pdf"
+    if len(vals) < 2:
+        logger.warning("Training loss has < 2 valid points; wrote TSV only -> %s", tsv_path)
+        try:
+            from matplotlib.backends.backend_pdf import PdfPages
+            with PdfPages(pdf_path): pass
+        except Exception:
+            pass
+        return tsv_path, pdf_path
+
     fig = plt.figure(figsize=(8, 5))
     ax = fig.add_subplot(111)
     ax.plot(epochs, vals)
@@ -272,12 +277,12 @@ def save_training_loss(
     ax.set_ylabel("Loss")
     ax.grid(True, which="major", linestyle="--", linewidth=0.5)
     fig.tight_layout()
-    fig.savefig(png_path)
+    fig.savefig(pdf_path)
     plt.close(fig)
 
     logger.info("Saved training loss TSV -> %s", tsv_path)
-    logger.info("Saved training loss pdf -> %s", png_path)
-    return tsv_path, png_path
+    logger.info("Saved training loss PDF -> %s", pdf_path)
+    return tsv_path, pdf_path
 
 
 def extract_latent_and_meta(
@@ -1807,6 +1812,9 @@ def run_clipn_integration(
                 experiment=experiment,
                 mode=mode,
                 logger=logger,
+                expected_epochs=epochs, 
+                aggregate="last",        
+                
             )
         except Exception as exc:
             logger.warning("Failed to save/plot training loss: %s", exc)
@@ -2493,6 +2501,16 @@ def main(args: argparse.Namespace) -> None:
     train_cols_path = Path(args.out) / "clipn_training_columns.tsv"
     pd.Series(df_encoded.columns, name="column").to_csv(train_cols_path, sep="\t", index=False, header=True)
     logger.info("Wrote full list of training columns to %s", train_cols_path)
+
+    # Sanity: training matrix must be (features + exactly one label column 'cpd_type')
+    assert "cpd_type" in df_encoded.columns, "cpd_type label missing from training matrix."
+    _leaky = set(df_encoded.columns) & {"cpd_id","Library","Plate_Metadata","Well_Metadata"}
+    assert not _leaky, f"Unexpected metadata in training matrix: {_leaky}"
+    _non_numeric = [c for c in df_encoded.columns if c != "cpd_type" and not pd.api.types.is_numeric_dtype(df_encoded[c])]
+    assert not _non_numeric, f"Non-numeric feature columns present: {_non_numeric}"
+    logger.info("Training matrix validated: %d rows, %d feature cols + 'cpd_type' label.",
+                df_encoded.shape[0], df_encoded.shape[1]-1)
+
 
 
     # =========================
