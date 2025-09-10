@@ -2426,19 +2426,71 @@ def main(args: argparse.Namespace) -> None:
 
 
     # Encode labels (cpd_id is explicitly not encoded)
-    logger.info("Encoding categorical labels for CLIPn compatibility")
-    # Ensure key categoricals are strings so they get encoded → can be decoded later
-    for _col in ("cpd_type", "Library", "Plate_Metadata", "Well_Metadata"):
-        if _col in df_scaled_all.columns:
-            df_scaled_all.loc[:, _col] = df_scaled_all[_col].astype("string")
+    # ============================================================
+    # Encode ONLY cpd_type for training labels; exclude other metadata
+    # ============================================================
 
-    df_encoded, encoders = encode_labels(df=df_scaled_all.copy(), logger=logger)
-    log_memory_usage(logger, prefix="[After encoding] ")
+    meta_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
 
-    # Keep a decoded metadata view for later merge
-    decoded_meta_df = decode_labels(df=df_encoded.copy(), encoders=encoders, logger=logger)[
-        ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-    ].reset_index()
+    # Model features: strictly numeric, excluding metadata
+    feature_cols_model = [
+        c for c in df_scaled_all.columns
+        if (c not in meta_cols) and pd.api.types.is_numeric_dtype(df_scaled_all[c])
+    ]
+    if not feature_cols_model:
+        raise ValueError("No numeric feature columns for CLIPn after excluding metadata.")
+
+    df_features = df_scaled_all.loc[:, feature_cols_model].copy()
+
+    # Encode cpd_type (required for CLIPn training labels)
+    if "cpd_type" not in df_scaled_all.columns:
+        raise ValueError("Column 'cpd_type' is required but missing.")
+    le_cpd = LabelEncoder()
+    cpd_type_codes = le_cpd.fit_transform(df_scaled_all["cpd_type"].astype("string").fillna("NA"))
+
+    # Build df_encoded: numeric features + integer cpd_type column (labels)
+    df_encoded = df_features.copy()
+    df_encoded.loc[:, "cpd_type"] = cpd_type_codes.astype(np.int32)
+
+    # Keep only human-readable metadata (NOT fed to model) for later merge/diagnostics
+    decoded_meta_df = (
+        df_scaled_all
+        .reset_index()
+        .loc[:, [c for c in ["Dataset", "Sample"] + meta_cols if c in df_scaled_all.columns]]
+        .copy()
+    )
+
+    # Expose encoder mapping for downstream decode/exports
+    encoders = {"cpd_type": le_cpd}
+
+    logger.info(
+        "Prepared CLIPn inputs: features=%d, rows=%d; encoded 'cpd_type' with %d classes.",
+        len(feature_cols_model), df_encoded.shape[0], len(le_cpd.classes_)
+    )
+    log_memory_usage(logger=logger, prefix="[After cpd_type-only encoding] ")
+
+    # (Optional) save cpd_type mapping
+    mapping_df = pd.DataFrame({
+        "cpd_type": le_cpd.classes_,
+        "cpd_type_encoded": np.arange(len(le_cpd.classes_), dtype=int),
+    })
+    safe_to_csv(
+        df=mapping_df,
+        path=(Path(args.out) / "label_mapping_cpd_type.tsv"),
+        sep="\t",
+        logger=logger,
+    )
+
+    # Report training input columns
+    logger.info("CLIPn training DataFrame shape: %s", df_encoded.shape)
+    logger.info("Training columns: %d total", df_encoded.shape[1])
+    logger.info("First 10 training columns: %s", df_encoded.columns[:10].tolist())
+
+    # Optional: dump all column names to a TSV for inspection
+    train_cols_path = Path(args.out) / "clipn_training_columns.tsv"
+    pd.Series(df_encoded.columns).to_csv(train_cols_path, sep="\t", index=False, header=["column"])
+    logger.info("Wrote full list of training columns to %s", train_cols_path)
+
 
     # =========================
     # Mode: reference-only flow
