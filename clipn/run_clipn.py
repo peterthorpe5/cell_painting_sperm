@@ -577,11 +577,12 @@ def main(args: argparse.Namespace) -> None:
     logger.info("Training columns: %d total", df_encoded.shape[1])
     logger.info("First 10 training columns: %s", df_encoded.columns[:10].tolist())
 
-    # Optional: dump all column names to a TSV for inspection
-    train_cols_path = Path(args.out) / "clipn_training_columns.tsv"
-    pd.Series(df_encoded.columns, name="column").to_csv(train_cols_path, sep="\t", index=False, header=True)
-    logger.info("Wrote full list of training columns to %s", train_cols_path)
-
+    # dump all column names to a TSV for inspection
+    all_cols_path = Path(args.out) / "clipn_all_columns.tsv"
+    pd.Series(df_encoded.columns, name="column").to_csv(
+        all_cols_path, sep="\t", index=False, header=True
+    )
+    logger.info("Wrote full list of columns to %s", all_cols_path)
     # Sanity: training matrix must be (features + exactly one label column 'cpd_type')
 
     bad_cols = set(df_encoded.columns) & {"Library", "Plate_Metadata", "Well_Metadata"}
@@ -594,8 +595,12 @@ def main(args: argparse.Namespace) -> None:
 
 
     assert not _non_numeric, f"Non-numeric feature columns present: {_non_numeric}"
-    logger.info("Training matrix validated: %d rows, %d feature cols + 'cpd_type' label.",
-                df_encoded.shape[0], df_encoded.shape[1]-1)
+
+    logger.info(
+    "Training matrix validated: %d rows, %d feature cols + 'cpd_type' label.",
+    df_encoded.shape[0], len(features_for_model)
+)
+
 
     assert pd.api.types.is_integer_dtype(df_encoded["cpd_type"]) or pd.api.types.is_numeric_dtype(df_encoded["cpd_type"]), \
         f"'cpd_type' should be numeric-encoded; got {df_encoded['cpd_type'].dtype}"
