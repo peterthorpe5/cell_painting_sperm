@@ -578,3 +578,87 @@ def standardise_metadata_columns(df, logger=None, dataset_name=None):
 
     return df
 
+
+def decode_labels(df: pd.DataFrame, encoders: Dict[str, LabelEncoder], logger: logging.Logger) -> pd.DataFrame:
+    """
+    Decode categorical columns using fitted LabelEncoders.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame whose columns may be label-encoded.
+    encoders : dict[str, LabelEncoder]
+        Mapping of column names to fitted LabelEncoder objects.
+    logger : logging.Logger
+        Logger for progress and warnings.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with decoded columns where possible.
+
+    Notes
+    -----
+    - Robust to columns that are integer-like but stored as 'object' or 'float'
+      (e.g. '0'/'1' strings or 0.0/1.0 floats).
+    - Leaves already-decoded string columns unchanged.
+    """
+    for col, le in encoders.items():
+        if col not in df.columns:
+            logger.warning("decode_labels: Column '%s' not found in DataFrame. Skipping.", col)
+            continue
+
+        s = df[col]
+
+        # Try to coerce to integer codes robustly
+        s_codes = pd.to_numeric(s, errors="coerce").astype("Int64")
+        n_codes = int(s_codes.notna().sum())
+
+        if n_codes == 0:
+            # Nothing integer-like to decode; assume already-decoded strings
+            logger.info("decode_labels: Column '%s' appears already decoded or non-integer; leaving as-is.", col)
+            continue
+
+        # Build a mapping from code -> original label
+        mapping = {i: cls for i, cls in enumerate(le.classes_)}
+
+        decoded = s_codes.map(mapping)
+        # Keep original values where decode failed (e.g. unexpected codes)
+        df[col] = decoded.where(decoded.notna(), other=s.astype(str))
+
+        logger.info("decode_labels: Decoded column '%s' (%d/%d values).", col, int(decoded.notna().sum()), len(s))
+    return df
+
+
+def encode_labels(df: pd.DataFrame, logger: logging.Logger) -> Tuple[pd.DataFrame, Dict[str, LabelEncoder]]:
+    """
+    Encode object/category columns (excluding 'cpd_id') using LabelEncoder.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to encode.
+    logger : logging.Logger
+        Logger for debug information.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, dict[str, LabelEncoder]]
+        The encoded DataFrame and a mapping of column name to LabelEncoder.
+    """
+    encoders: Dict[str, LabelEncoder] = {}
+    skip_columns = {"cpd_id"}
+
+    obj_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    logger.info("Encoding %d object/category columns (excluding 'cpd_id' if present).", len(obj_cols))
+
+    for col in obj_cols:
+        if col in skip_columns:
+            logger.debug("Skipping encoding for column '%s'", col)
+            continue
+        le = LabelEncoder()
+        df.loc[:, col] = le.fit_transform(df[col])
+        encoders[col] = le
+        logger.debug("Encoded column '%s' with %d classes.", col, len(le.classes_))
+    return df, encoders
+

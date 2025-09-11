@@ -250,3 +250,156 @@ def run_training_diagnostics(
 
     logger.info("Training diagnostics completed. Outputs in %s", diag_dir)
 
+
+# ====================
+# CLIPn core functions
+# ====================
+
+def extend_model_encoders(
+    model: CLIPn,
+    new_keys: Iterable[int],
+    reference_key: int,
+    logger: logging.Logger,
+) -> None:
+    """
+    Extend CLIPn model's encoder mapping for new datasets using a reference encoder.
+
+    Parameters
+    ----------
+    model : CLIPn
+        Trained CLIPn model object.
+    new_keys : Iterable[int]
+        Keys of new datasets to be projected.
+    reference_key : int
+        Key of the reference dataset to copy the encoder from.
+    logger : logging.Logger
+        Logger instance.
+    """
+    for new_key in new_keys:
+        model.model.encoders[new_key] = model.model.encoders[reference_key]
+        logger.debug("Assigned encoder for dataset key %s using reference encoder %s", new_key, reference_key)
+
+
+
+def run_clipn_integration(
+    df: pd.DataFrame,
+    logger: logging.Logger,
+    clipn_param: str,
+    output_path: str | Path,
+    experiment: str,
+    mode: str,
+    latent_dim: int,
+    lr: float,
+    epochs: int,
+    skip_standardise: bool = False,
+    plot_loss: bool = True,
+) -> Tuple[pd.DataFrame, Dict[str, List[str]], CLIPn, Dict[int, str]]:
+    """
+    Train a CLIPn model on the provided DataFrame and return latent representations.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Combined input DataFrame with MultiIndex (Dataset, Sample).
+    logger : logging.Logger
+        Logger instance.
+    clipn_param : str
+        Optional parameter for logging (no functional effect here).
+    output_path : str | Path
+        Directory to save latent arrays.
+    experiment : str
+        Experiment name.
+    mode : str
+        Operation mode (for filename context).
+    latent_dim : int
+        Dimensionality of the latent space.
+    lr : float
+        Learning rate.
+    epochs : int
+        Number of training epochs.
+    skip_standardise : bool
+        Unused here (kept for API compatibility).
+
+    Returns
+    -------
+    tuple[pd.DataFrame, dict[str, list[str]], CLIPn, dict[int, str]]
+        Combined latent DataFrame (MultiIndex),
+        dictionary of cpd_ids per dataset,
+        trained CLIPn model,
+        dataset key mapping.
+    """
+    logger.info("Running CLIPn integration with param: %s", clipn_param)
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    logger.info("Numeric feature column count: %d", len(numeric_cols))
+    logger.info("Combined DataFrame shape: %s", df.shape)
+    logger.debug("Head of combined DataFrame:\n%s", df.head())
+
+    if not numeric_cols:
+        logger.error(
+            "No numeric feature columns found after harmonisation. "
+            "Possible causes: no overlap of features, all numeric columns are NaN, or wrong dtypes."
+        )
+        raise ValueError("No numeric columns available for CLIPn.")
+
+    data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df)
+    latent_dict, model, loss = run_clipn_simple(
+        data_dict,
+        label_dict,
+        latent_dim=latent_dim,
+        lr=lr,
+        epochs=epochs,
+    )
+    logger.info("CLIPn training completed.")
+    # Save loss curve (TSV + PNG) if available
+    if plot_loss and loss is not None:
+        try:
+            save_training_loss(
+                loss_values=loss,
+                out_dir=output_path,
+                experiment=experiment,
+                mode=mode,
+                logger=logger,
+                expected_epochs=epochs, 
+                aggregate="last",        
+                
+            )
+        except Exception as exc:
+            logger.warning("Failed to save/plot training loss: %s", exc)
+
+
+    if isinstance(loss, (list, np.ndarray)):
+        logger.info("CLIPn final loss: %.6f", loss[-1])
+    else:
+        logger.info("CLIPn loss: %s", loss)
+
+    latent_frames = []
+    for i, latent in latent_dict.items():
+        name = dataset_key_mapping[i]
+        df_latent = pd.DataFrame(latent)
+        df_latent.index = pd.MultiIndex.from_product(
+            [[name], range(len(df_latent))], names=["Dataset", "Sample"]
+        )
+        latent_frames.append(df_latent)
+
+    latent_combined = pd.concat(latent_frames)
+
+    # Save latent as NPZ (with string keys)
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    latent_file = output_path / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
+    latent_dict_str_keys = {str(k): v for k, v in latent_dict.items()}
+    np.savez(file=latent_file, **latent_dict_str_keys)
+    logger.info("Latent representations saved to: %s", latent_file)
+
+    latent_file_id = output_path / f"{experiment}_{mode}_CLIPn_latent_representations_cpd_id.npz"
+    cpd_ids_array = {f"cpd_ids_{k}": np.array(v) for k, v in cpd_ids.items()}
+    np.savez(file=latent_file_id, **latent_dict_str_keys, **cpd_ids_array)
+
+    post_clipn_dir = output_path / "post_clipn"
+    post_clipn_dir.mkdir(parents=True, exist_ok=True)
+    post_latent_file = post_clipn_dir / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
+    np.savez(file=post_latent_file, **latent_dict_str_keys)
+
+    return latent_combined, cpd_ids, model, dataset_key_mapping
+
