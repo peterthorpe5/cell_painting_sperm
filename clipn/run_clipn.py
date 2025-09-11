@@ -605,13 +605,47 @@ def main(args: argparse.Namespace) -> None:
     assert pd.api.types.is_integer_dtype(df_encoded["cpd_type"]) or pd.api.types.is_numeric_dtype(df_encoded["cpd_type"]), \
         f"'cpd_type' should be numeric-encoded; got {df_encoded['cpd_type'].dtype}"
 
+    # Columns we want to carry along
     meta_cols = ["cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library"]
-    decoded_meta_df = (
-        df_scaled_all
-        .reset_index()
-        .loc[:, [c for c in ["Dataset", "Sample"] + meta_cols if c in df_scaled_all.columns]]
-        .copy()
-    )
+
+    # Start from a reset copy
+    decoded_meta_df = df_scaled_all.reset_index()
+
+    # If index names were lost, rename common fallbacks to Dataset/Sample
+    rename_map = {}
+    if "Dataset" not in decoded_meta_df.columns:
+        if "level_0" in decoded_meta_df.columns:
+            rename_map["level_0"] = "Dataset"
+        elif "index" in decoded_meta_df.columns:
+            rename_map["index"] = "Dataset"
+    if "Sample" not in decoded_meta_df.columns:
+        if "level_1" in decoded_meta_df.columns:
+            rename_map["level_1"] = "Sample"
+    if rename_map:
+        logger.warning("Index names lost; renaming columns: %s", rename_map)
+        decoded_meta_df = decoded_meta_df.rename(columns=rename_map)
+
+    # As a soft fallback, rebuild from the original index if still missing
+    if "Dataset" not in decoded_meta_df.columns:
+        if isinstance(df_scaled_all.index, pd.MultiIndex) and df_scaled_all.index.nlevels >= 1:
+            decoded_meta_df["Dataset"] = df_scaled_all.index.get_level_values(0).to_numpy()
+            logger.warning("Constructed 'Dataset' from original index.")
+        else:
+            decoded_meta_df["Dataset"] = "unknown"
+            logger.warning("Could not recover 'Dataset'; filled with 'unknown'.")
+
+    if "Sample" not in decoded_meta_df.columns:
+        if isinstance(df_scaled_all.index, pd.MultiIndex) and df_scaled_all.index.nlevels >= 2:
+            decoded_meta_df["Sample"] = df_scaled_all.index.get_level_values(1).to_numpy()
+            logger.warning("Constructed 'Sample' from original index.")
+        else:
+            decoded_meta_df["Sample"] = np.arange(len(decoded_meta_df), dtype=int)
+            logger.warning("Could not recover 'Sample'; using 0..n-1 sequence.")
+
+    # Keep only what we need (IMPORTANT: check columns on decoded_meta_df, not df_scaled_all)
+    keep_cols = ["Dataset", "Sample"] + [c for c in meta_cols if c in decoded_meta_df.columns]
+    decoded_meta_df = decoded_meta_df.loc[:, keep_cols].copy()
+
 
 
     # =========================
