@@ -280,6 +280,71 @@ def extend_model_encoders(
         logger.debug("Assigned encoder for dataset key %s using reference encoder %s", new_key, reference_key)
 
 
+def prepare_data_for_clipn_from_df(df):
+    """
+    Prepares input data for CLIPn training from a MultiIndex DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame with MultiIndex (Dataset, Sample). Should contain numeric features and metadata.
+
+    Returns
+    -------
+    tuple
+        data_dict : dict
+            Dictionary mapping integer ID to feature matrix (np.ndarray).
+        label_dict : dict
+            Dictionary mapping integer ID to label vector (np.ndarray).
+        label_mappings : dict
+            Dictionary mapping dataset name to {label_id: label_name}.
+        cpd_ids : dict
+            Dictionary mapping dataset name to list of compound IDs.
+        dataset_key_mapping : dict
+            Dictionary mapping integer keys to original dataset names.
+    """
+    from collections import defaultdict
+
+    data_dict = {}
+    label_dict = {}
+    label_mappings = {}
+    cpd_ids = {}
+
+    # Ensure it's a MultiIndex
+    if not isinstance(df.index, pd.MultiIndex):
+        raise ValueError("Expected a MultiIndex DataFrame with levels ['Dataset', 'Sample']")
+
+    dataset_keys = df.index.get_level_values('Dataset').unique()
+
+    for dataset_name in dataset_keys:
+        dataset_df = df.loc[dataset_name]
+
+        # Get feature columns (exclude metadata)
+        feature_cols = dataset_df.select_dtypes(include=[np.number]).columns.tolist()
+        meta_cols = ['cpd_id', 'cpd_type', 'Library']
+        feature_cols = [col for col in feature_cols if col not in meta_cols]
+
+        X = dataset_df[feature_cols].to_numpy()
+        y = dataset_df['cpd_type'].astype(str).to_numpy()
+        ids = dataset_df['cpd_id'].astype(str).tolist()
+
+        unique_labels = sorted(set(y))
+        label_map = {label: idx for idx, label in enumerate(unique_labels)}
+        y_encoded = np.array([label_map[label] for label in y])
+
+        data_dict[dataset_name] = X
+        label_dict[dataset_name] = y_encoded
+        label_mappings[dataset_name] = {v: k for k, v in label_map.items()}
+        cpd_ids[dataset_name] = ids
+
+    # Reindex with integers for CLIPn compatibility
+    indexed_data_dict = {i: data_dict[k] for i, k in enumerate(data_dict)}
+    indexed_label_dict = {i: label_dict[k] for i, k in enumerate(label_dict)}
+    dataset_key_mapping = {i: k for i, k in enumerate(data_dict)}
+
+    return indexed_data_dict, indexed_label_dict, label_mappings, cpd_ids, dataset_key_mapping
+
+
 
 def run_clipn_integration(
     df: pd.DataFrame,

@@ -650,7 +650,7 @@ def main(args: argparse.Namespace) -> None:
 
 
             # Prepare and predict training references
-            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(reference_df)
+            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_encoded)
             latent_dict = model.predict(data_dict)
 
             latent_frames = []
