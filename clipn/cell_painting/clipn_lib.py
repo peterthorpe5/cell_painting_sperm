@@ -15,7 +15,6 @@ from sklearn import set_config
 import csv
 set_config(transform_output="pandas")
 
-from __future__ import annotations
 
 import argparse
 import glob
