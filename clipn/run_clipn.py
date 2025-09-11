@@ -559,12 +559,6 @@ def merge_annotations(
         logger.warning("Annotation merging failed: %s", exc)
 
 
-def _read_csv_fast(path: str, delimiter: str) -> pd.DataFrame:
-    # Try pyarrow engine (fast); fall back to pandas' python engine.
-    try:
-        return pd.read_csv(path, delimiter=delimiter, engine="pyarrow")
-    except Exception:
-        return pd.read_csv(path, delimiter=delimiter, engine="python", compression="infer")
 
 
 def read_table_auto(path: str) -> pd.DataFrame:

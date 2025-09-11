@@ -315,7 +315,7 @@ def load_single_dataset(
     delimiter = detect_csv_delimiter(path)
     delim_name = "tab" if delimiter == "\t" else "comma"
     logger.info("[%s] Reading %s (delimiter=%s)", name, path, delim_name)
-    df = _read_csv_fast(path, delimiter)
+    df = read_csv_fast(path, delimiter)
 
     logger.debug("[%s] Columns after initial load: %s", name, df.columns.tolist())
 
@@ -507,3 +507,11 @@ def load_and_harmonise_datasets(
 
     return harmonise_numeric_columns(dataframes=dataframes, logger=logger, audit_dir=audit_dir)
 
+
+
+def read_csv_fast(path: str, delimiter: str) -> pd.DataFrame:
+    # Try pyarrow engine (fast); fall back to pandas' python engine.
+    try:
+        return pd.read_csv(path, delimiter=delimiter, engine="pyarrow")
+    except Exception:
+        return pd.read_csv(path, delimiter=delimiter, engine="python", compression="infer")
