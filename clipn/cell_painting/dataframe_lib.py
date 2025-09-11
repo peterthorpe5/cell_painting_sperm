@@ -515,3 +515,66 @@ def read_csv_fast(path: str, delimiter: str) -> pd.DataFrame:
         return pd.read_csv(path, delimiter=delimiter, engine="pyarrow")
     except Exception:
         return pd.read_csv(path, delimiter=delimiter, engine="python", compression="infer")
+
+
+
+# This function is a pain too!! 
+def standardise_metadata_columns(df, logger=None, dataset_name=None):
+    """
+    Standardise column names for metadata and recover 'cpd_id' from index if necessary.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame to standardise.
+    logger : logging.Logger, optional
+        Logger instance for status messages.
+    dataset_name : str, optional
+        Dataset name used to infer 'cpd_type' if missing.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with standardised metadata columns.
+
+    Raises
+    ------
+    ValueError
+        If mandatory metadata columns are missing and cannot be recovered.
+    """
+    rename_map = {
+        "library": "Library",
+        "Library": "Library",
+        "compound_name": "cpd_id",
+        "COMPOUND_NAME": "cpd_id",
+        "Source_Plate_Barcode": "Plate_Metadata",
+        "Source_Well": "Well_Metadata"
+    }
+
+    # Rename columns using mapping
+    for old, new in rename_map.items():
+        if old in df.columns and new not in df.columns:
+            df.rename(columns={old: new}, inplace=True)
+            if logger:
+                logger.info(f"Renamed column '{old}' to '{new}'")
+
+    # Attempt to recover 'cpd_id' from index if not in columns
+    if "cpd_id" not in df.columns:
+        if df.index.name == "cpd_id":
+            df["cpd_id"] = df.index
+            if logger:
+                logger.warning(f"[{dataset_name}] 'cpd_id' recovered from Index.")
+        else:
+            if logger:
+                logger.error(f"[{dataset_name}] 'cpd_id' not found in columns or index.")
+            raise ValueError(f"[{dataset_name}] 'cpd_id' not found in columns or index.")
+
+    # Handle missing 'cpd_type' explicitly (but allow fallback)
+    if "cpd_type" not in df.columns:
+        fallback_type = dataset_name if dataset_name else "unknown"
+        df["cpd_type"] = fallback_type
+        if logger:
+            logger.warning(f"[{dataset_name}] 'cpd_type' missing, inferred as '{fallback_type}'.")
+
+    return df
+
