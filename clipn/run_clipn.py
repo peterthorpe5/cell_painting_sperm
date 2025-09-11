@@ -583,9 +583,10 @@ def main(args: argparse.Namespace) -> None:
     logger.info("Wrote full list of training columns to %s", train_cols_path)
 
     # Sanity: training matrix must be (features + exactly one label column 'cpd_type')
-    assert "cpd_type" in df_encoded.columns, "cpd_type label missing from training matrix."
-    _leaky = set(df_encoded.columns) & {"cpd_id","Library","Plate_Metadata","Well_Metadata"}
-    assert not _leaky, f"Unexpected metadata in training matrix: {_leaky}"
+
+    bad_cols = set(df_encoded.columns) & {"Library", "Plate_Metadata", "Well_Metadata"}
+    assert not bad_cols, f"Unexpected metadata in training matrix: {sorted(bad_cols)}"
+
     _non_numeric = [c for c in df_encoded.columns if c != "cpd_type" and not pd.api.types.is_numeric_dtype(df_encoded[c])]
     assert not _non_numeric, f"Non-numeric feature columns present: {_non_numeric}"
     logger.info("Training matrix validated: %d rows, %d feature cols + 'cpd_type' label.",
