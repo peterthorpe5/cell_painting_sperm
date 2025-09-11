@@ -60,6 +60,9 @@ if torch.cuda.is_available():
 
 logger = logging.getLogger(__name__)
 
+# Global timer (for memory log timestamps)
+_SCRIPT_START_TIME = time.time()
+
 
 
 def log_memory_usage(
