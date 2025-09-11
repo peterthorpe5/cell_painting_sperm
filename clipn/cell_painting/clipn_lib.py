@@ -447,6 +447,48 @@ def extract_latent_and_meta(
 
     raise ValueError("level must be 'compound' or 'image'.")
 
+def build_knn_index(
+    *,
+    X: pd.DataFrame,
+    k: int,
+    metric: str = "cosine",
+    logger: logging.Logger,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build a k-NN index and return neighbour indices and distances.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent matrix with numeric columns.
+    k : int
+        Number of neighbours to return (excluding self).
+    metric : str
+        'cosine' or 'euclidean'.
+    logger : logging.Logger
+        Logger for messages.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        (indices, distances) arrays of shape (n, k).
+    """
+    n = X.shape[0]
+    if n < 2:
+        raise ValueError("Not enough rows to build a k-NN graph.")
+    k_eff = min(k + 1, n)
+    nn = NearestNeighbors(n_neighbors=k_eff, metric=metric)
+    nn.fit(X.values)
+    dists, idxs = nn.kneighbors(X.values, return_distance=True)
+    idxs_clean = []
+    dists_clean = []
+    for i in range(n):
+        row = [(j, d) for j, d in zip(idxs[i], dists[i]) if j != i]
+        row = row[:k]
+        idxs_clean.append([j for j, _ in row])
+        dists_clean.append([float(d) for _, d in row])
+    return np.asarray(idxs_clean, dtype=int), np.asarray(dists_clean, dtype=float)
+
 
 
 def run_clipn_integration(
