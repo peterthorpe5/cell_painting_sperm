@@ -388,6 +388,66 @@ def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     return latent_named_dict, model, loss
 
 
+def extract_latent_and_meta(
+    *,
+    decoded_df: pd.DataFrame,
+    level: str = "compound",
+    aggregate: str = "median",
+    logger: logging.Logger,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Prepare a latent matrix X and aligned metadata for diagnostics.
+
+    Parameters
+    ----------
+    decoded_df : pandas.DataFrame
+        Decoded table containing integer-named latent columns ('0','1',...),
+        plus 'Dataset', 'Sample', 'cpd_id', and optionally 'cpd_type'/'Library'.
+    level : str
+        'compound' (aggregates by 'cpd_id') or 'image'.
+    aggregate : str
+        'median' or 'mean' for compound aggregation.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    tuple
+        (X, meta, latent_cols) where X is numeric latent DataFrame, meta is
+        aligned metadata, latent_cols are the latent column names used.
+    """
+    latent_cols = [c for c in decoded_df.columns if str(c).isdigit()]
+    if not latent_cols:
+        raise ValueError("No latent columns detected (expected '0','1',...).")
+
+    if level == "image":
+        meta_cols = [c for c in ["cpd_id", "cpd_type", "Dataset", "Library", "Plate_Metadata", "Well_Metadata"]
+                     if c in decoded_df.columns]
+        X = decoded_df.loc[:, latent_cols].copy()
+        meta = decoded_df.loc[:, meta_cols].copy()
+        logger.info("Diagnostics at image level: %d rows, %d dims.", X.shape[0], len(latent_cols))
+        return X, meta, latent_cols
+
+    if level == "compound":
+        grouped = decoded_df.groupby(by="cpd_id", dropna=False, sort=False)
+        aggfunc = "median" if aggregate == "median" else "mean"
+        X = grouped[latent_cols].agg(func=aggfunc)
+        def _mode_safe(s: pd.Series) -> str | None:
+            s = s.dropna()
+            return None if s.empty else str(s.mode(dropna=True).iloc[0])
+        meta = pd.DataFrame({
+            "cpd_id": X.index.astype(str),
+            "cpd_type": grouped["cpd_type"].apply(func=_mode_safe) if "cpd_type" in decoded_df.columns else None,
+            "Dataset": grouped["Dataset"].apply(func=_mode_safe) if "Dataset" in decoded_df.columns else None,
+            "Library": grouped["Library"].apply(func=_mode_safe) if "Library" in decoded_df.columns else None,
+        }).dropna(axis=1, how="all")
+        meta.index = X.index
+        logger.info("Diagnostics at compound level: %d compounds, %d dims.", X.shape[0], len(latent_cols))
+        return X.reset_index(drop=True), meta.reset_index(drop=True), latent_cols
+
+    raise ValueError("level must be 'compound' or 'image'.")
+
+
 
 def run_clipn_integration(
     df: pd.DataFrame,
