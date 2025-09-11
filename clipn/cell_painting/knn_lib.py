@@ -347,3 +347,21 @@ def save_knn_outputs(
         dm.to_csv(dm_path, sep="\t")
         logger.info("Wrote full pairwise matrix (%d×%d) -> %s", n, n, dm_path)
 
+
+def mode_strict(series: pd.Series) -> Optional[str]:
+    """
+    Return the most frequent non-null string in a Series, or None.
+
+    Parameters
+    ----------
+    series : pandas.Series
+
+    Returns
+    -------
+    Optional[str]
+    """
+    s = series.dropna()
+    if s.empty:
+        return None
+    mode_vals = s.mode(dropna=True)
+    return None if mode_vals.empty else str(mode_vals.iloc[0])
