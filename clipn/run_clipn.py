@@ -592,7 +592,8 @@ def main(args: argparse.Namespace) -> None:
     logger.info("Training matrix validated: %d rows, %d feature cols + 'cpd_type' label.",
                 df_encoded.shape[0], df_encoded.shape[1]-1)
 
-
+    assert pd.api.types.is_integer_dtype(df_encoded["cpd_type"]) or pd.api.types.is_numeric_dtype(df_encoded["cpd_type"]), \
+        f"'cpd_type' should be numeric-encoded; got {df_encoded['cpd_type'].dtype}"
 
     # =========================
     # Mode: reference-only flow
@@ -647,7 +648,7 @@ def main(args: argparse.Namespace) -> None:
             # Train a new model on references
             logger.info("Training new CLIPn model on reference datasets")
             latent_df, cpd_ids, model, dataset_key_mapping = run_clipn_integration(
-                df=reference_df,
+                df=df_encoded,
                 logger=logger,
                 clipn_param=args.clipn_param,
                 output_path=args.out,
