@@ -68,6 +68,22 @@ def configure_torch_performance(logger: logging.Logger) -> None:
 
 
 
+def torch_load_compat(model_path: str, *, map_location: str | None = None, weights_only: bool | None = None):
+    """
+    Backwards-compatible torch.load.
+
+    Tries to use the 'weights_only' argument when supported; falls back
+    silently if the running PyTorch does not accept it.
+    """
+    try:
+        if weights_only is None:
+            return torch.load(f=model_path, map_location=map_location)
+        return torch.load(f=model_path, map_location=map_location, weights_only=weights_only)
+    except TypeError:
+        # Older Torch without 'weights_only'
+        return torch.load(f=model_path, map_location=map_location)
+
+
 def precision_at_k(
     *,
     labels: pd.Series,
@@ -100,20 +116,6 @@ def precision_at_k(
 
 
 
-def torch_load_compat(model_path: str, *, map_location: str | None = None, weights_only: bool | None = None):
-    """
-    Backwards-compatible torch.load.
-
-    Tries to use the 'weights_only' argument when supported; falls back
-    silently if the running PyTorch does not accept it.
-    """
-    try:
-        if weights_only is None:
-            return torch.load(f=model_path, map_location=map_location)
-        return torch.load(f=model_path, map_location=map_location, weights_only=weights_only)
-    except TypeError:
-        # Older Torch without 'weights_only'
-        return torch.load(f=model_path, map_location=map_location)
 
 
 
