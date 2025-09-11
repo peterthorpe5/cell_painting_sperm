@@ -534,16 +534,16 @@ def main(args: argparse.Namespace) -> None:
         if c != "cpd_type"
     ]
 
+    # computed this earlier:
+    features_for_model = [
+        c for c in df_encoded.select_dtypes(include=[np.number]).columns
+        if c != "cpd_type"
+    ]
     logger.info(
         "Training matrix validated: %d rows, %d feature cols + 'cpd_type' label (plus 'cpd_id' for bookkeeping).",
         df_encoded.shape[0], len(features_for_model)
     )
 
-
-    logger.info(
-        "Training matrix validated: %d rows, %d feature cols + 'cpd_type' label (plus 'cpd_id' for bookkeeping).",
-        df_encoded.shape[0], len(features_for_model)
-    )
 
     # Optional: write the columns you really train on (exclude cpd_id)
     train_cols_path = Path(args.out) / "clipn_training_columns.tsv"
@@ -587,13 +587,27 @@ def main(args: argparse.Namespace) -> None:
     bad_cols = set(df_encoded.columns) & {"Library", "Plate_Metadata", "Well_Metadata"}
     assert not bad_cols, f"Unexpected metadata in training matrix: {sorted(bad_cols)}"
 
-    _non_numeric = [c for c in df_encoded.columns if c != "cpd_type" and not pd.api.types.is_numeric_dtype(df_encoded[c])]
+    _non_numeric = [
+        c for c in df_encoded.columns
+        if c not in {"cpd_type", "cpd_id"} and not pd.api.types.is_numeric_dtype(df_encoded[c])
+    ]
+
+
     assert not _non_numeric, f"Non-numeric feature columns present: {_non_numeric}"
     logger.info("Training matrix validated: %d rows, %d feature cols + 'cpd_type' label.",
                 df_encoded.shape[0], df_encoded.shape[1]-1)
 
     assert pd.api.types.is_integer_dtype(df_encoded["cpd_type"]) or pd.api.types.is_numeric_dtype(df_encoded["cpd_type"]), \
         f"'cpd_type' should be numeric-encoded; got {df_encoded['cpd_type'].dtype}"
+
+    meta_cols = ["cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library"]
+    decoded_meta_df = (
+        df_scaled_all
+        .reset_index()
+        .loc[:, [c for c in ["Dataset", "Sample"] + meta_cols if c in df_scaled_all.columns]]
+        .copy()
+    )
+
 
     # =========================
     # Mode: reference-only flow
@@ -805,7 +819,7 @@ def main(args: argparse.Namespace) -> None:
 
         else:
             latent_df, cpd_ids, model, dataset_key_mapping = run_clipn_integration(
-                df=df_for_clipn,
+                df=df_encoded,
                 logger=logger,
                 clipn_param=args.clipn_param,
                 output_path=args.out,
