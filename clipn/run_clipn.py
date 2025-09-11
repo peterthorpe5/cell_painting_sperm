@@ -101,7 +101,7 @@ from cell_painting.clipn_lib import (
     save_training_loss,
     run_training_diagnostics)
 
-from cell_painting.Ai import (
+from cell_painting.AI import (
     torch_load_compat,
     configure_torch_performance,
     precision_at_k,
