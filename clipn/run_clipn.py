@@ -44,7 +44,6 @@ Command-line arguments:
 """
 
 from __future__ import annotations
-
 import argparse
 import glob
 import logging
@@ -64,11 +63,9 @@ import re
 import numpy as np
 import pandas as pd
 from typing import Sequence
-
 import matplotlib 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 import psutil
 import concurrent.futures
 import torch
@@ -87,15 +84,11 @@ np.random.seed(0)
 torch.manual_seed(0)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(0)
-
-
-
 from cell_painting.process_data import (
     prepare_data_for_clipn_from_df,
     run_clipn_simple,
     standardise_metadata_columns,
     assert_cpd_type_encoded,
-    validate_frozen_features_manifest,
     assert_xy_alignment_strict,
     validate_frozen_features_manifest)
 
@@ -2610,6 +2603,9 @@ def main(args: argparse.Namespace) -> None:
                 features_expected = pd.read_csv(feature_list_path, sep="\t")["feature"].tolist()
             else:
                 features_expected = None  # will freeze now
+            features_expected = validate_frozen_features_manifest(
+                feature_list_path=feature_list_path, logger=logger
+            )
 
             ref_features, _ = select_clipn_features_and_write(
                 df=reference_df,
@@ -2717,7 +2713,10 @@ def main(args: argparse.Namespace) -> None:
 
             # Load frozen training feature order
             feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
-            features_expected = pd.read_csv(feature_list_path, sep="\t")["feature"].tolist()
+            features_expected = validate_frozen_features_manifest(
+                                    feature_list_path=feature_list_path, logger=logger
+                                )
+
 
             meta_drop = [c for c in query_df.columns if c.lower() in {m.lower() for m in METADATA_COL_BLOCKLIST}]
 
@@ -2786,29 +2785,13 @@ def main(args: argparse.Namespace) -> None:
             model = torch_load_compat(model_path=model_path, weights_only=False)
 
 
-            # Prepare and predict latent with loaded model (use frozen features/order)
-            feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
-            features_expected = pd.read_csv(feature_list_path, sep="\t")["feature"].tolist() if feature_list_path.exists() else None
-
-            feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
-            _ = validate_frozen_features_manifest(feature_list_path=feature_list_path, logger=logger)
-            df_features, _ = select_clipn_features_and_write(
-                df=df_encoded,
-                out_dir=args.out,
-                experiment=args.experiment,
-                logger=logger,
-                features_expected=features_expected,
-            )
-
             # Build data_dict (X) from frozen features; labels not needed for prediction
             # Prepare and predict latent with loaded model (manifest-enforced features)
             feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
-            features_expected = validate_frozen_features_manifest(
-                feature_list_path=feature_list_path,
-                logger=logger,
-            )
 
-            # Freeze to the saved feature order; never let metadata creep in
+            features_expected = validate_frozen_features_manifest(
+                feature_list_path=feature_list_path, logger=logger
+            )
             df_features, _ = select_clipn_features_and_write(
                 df=df_encoded,
                 out_dir=args.out,
