@@ -1645,15 +1645,17 @@ def encode_labels(df: pd.DataFrame, logger: logging.Logger) -> tuple[pd.DataFram
     out = df.copy()
 
     if "cpd_type" in out.columns:
-        out.loc[:, "cpd_type"] = out["cpd_type"].astype("string")
         le = LabelEncoder()
         mask = out["cpd_type"].notna()
         if mask.any():
-            out.loc[mask, "cpd_type"] = le.fit_transform(out.loc[mask, "cpd_type"])
+            # Fit on string view, write back integer codes, force Int64 dtype
+            codes = le.fit_transform(out.loc[mask, "cpd_type"].astype(str))
+            out.loc[mask, "cpd_type"] = codes
+            out["cpd_type"] = pd.to_numeric(out["cpd_type"], errors="coerce").astype("Int64")
             encoders["cpd_type"] = le
             logger.info("encode_labels: Encoded 'cpd_type' with %d classes.", len(le.classes_))
         else:
-            logger.warning("encode_labels: 'cpd_type' present but all values are NA; left as string.")
+            logger.warning("encode_labels: 'cpd_type' present but all values are NA; left as-is.")
     return out, encoders
 
 
