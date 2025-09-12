@@ -78,7 +78,6 @@ from clipn.model import CLIPn
 import math
 from sklearn.metrics import silhouette_score
 from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics import pairwise_distances
 from sklearn import set_config
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
@@ -90,67 +89,11 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(0)
 
 
+
 from cell_painting.process_data import (
     prepare_data_for_clipn_from_df,
     run_clipn_simple,
     standardise_metadata_columns,)
-
-from cell_painting.clipn_lib import (
-    save_training_loss,
-    register_clipn_for_pickle,
-    save_training_loss,
-    run_training_diagnostics,
-    extend_model_encoders,
-    run_clipn_integration)
-
-from cell_painting.AI import (
-    torch_load_compat,
-    configure_torch_performance,
-    precision_at_k,
-    plot_and_save_precision_curves,
-    dataset_mixing_entropy,
-    plot_and_save_entropy,
-    compute_and_save_silhouette,
-    save_latent_variance_report,
-    wbd_ratio_per_compound)
-
-from cell_painting.knn_lib import (
-    build_knn_index,
-    save_knn_outputs,
-    simple_knn_qc,
-    run_knn_analysis,
-    aggregate_for_knn
-    )
-
-from cell_painting.dataframe_lib import (
-    extract_latent_and_meta,
-    detect_csv_delimiter,
-    mode_nonnull,
-    aggregate_latent_from_decoded,
-    exclude_technical_features,
-    ensure_library_column,
-    load_and_harmonise_datasets,
-    harmonise_numeric_columns,
-    safe_to_csv,
-    load_single_dataset,
-    encode_labels,
-    decode_labels
-)
-
-from cell_painting.general import (
-    log_memory_usage,
-    read_table_auto,
-    aggregate_latent_per_compound,
-    clean_nonfinite_features,
-    clean_and_impute_features,
-    clean_and_impute_features_knn,
-    merge_annotations
-
-)
-
-from cell_painting.dataframe_process import (
-    scale_features,
-    mode_strict)
 
 # Global timer (for memory log timestamps)
 _SCRIPT_START_TIME = time.time()
@@ -158,6 +101,11 @@ _SCRIPT_START_TIME = time.time()
 # Make sklearn return DataFrames
 set_config(transform_output="pandas")
 
+
+
+# =========================
+# Logging and small helpers
+# =========================
 
 def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
     """
@@ -203,13 +151,1536 @@ def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
     return logger
 
 
+def configure_torch_performance(logger: logging.Logger) -> None:
+    """
+    Small runtime hints for speed.
+    - On GPU: enable better matmul + cuDNN autotune.
+    - On CPU: leave defaults (MKL/OpenBLAS already multithreaded).
+    """
+    try:
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")  # TF32/fast FP32 on Ampere+
+            torch.backends.cudnn.benchmark = True       # tune best conv algo for fixed shapes
+            logger.info("Torch perf: enabled high-precision matmul + cuDNN benchmark on GPU.")
+        else:
+            logger.info("Torch perf: CPU mode (no special tweaks).")
+    except Exception as exc:
+        logger.warning("Torch perf configuration skipped: %s", exc)
+
+
+def _register_clipn_for_pickle() -> None:
+    """
+    Best-effort registration of CLIPn for Torch's safe unpickling.
+
+    On older PyTorch versions the 'add_safe_globals' helper does not exist.
+    In that case this function becomes a no-op and loading still works
+    provided the CLIPn class is importable.
+    """
+    try:
+        add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+        if callable(add_safe_globals):
+            add_safe_globals([CLIPn])
+    except Exception:
+        # Optional hardening only; safe to ignore on older Torch.
+        pass
+
+
+
+def torch_load_compat(model_path: str, *, map_location: str | None = None, weights_only: bool | None = None):
+    """
+    Backwards-compatible torch.load.
+
+    Tries to use the 'weights_only' argument when supported; falls back
+    silently if the running PyTorch does not accept it.
+    """
+    try:
+        if weights_only is None:
+            return torch.load(f=model_path, map_location=map_location)
+        return torch.load(f=model_path, map_location=map_location, weights_only=weights_only)
+    except TypeError:
+        # Older Torch without 'weights_only'
+        return torch.load(f=model_path, map_location=map_location)
+
+
+def save_training_loss(
+    *,
+    loss_values: Sequence[float] | np.ndarray | "torch.Tensor",
+    out_dir: str | Path,
+    experiment: str,
+    mode: str,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Plot and save CLIPn training loss per epoch.
+
+    Parameters
+    ----------
+    loss_values : Sequence[float] | numpy.ndarray | torch.Tensor
+        The per-epoch loss values returned by the CLIPn trainer.
+    out_dir : str | Path
+        Base output directory (will write into the 'post_clipn' subfolder).
+    experiment : str
+        Experiment name used for file naming.
+    mode : str
+        CLIPn mode context ('reference_only' or 'integrate_all'), used in names.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, png_path) of the written loss artefacts.
+
+    Notes
+    -----
+    - Writes a tab-separated file with columns 'epoch' and 'loss'.
+    - Saves a PNG line plot using the non-interactive 'Agg' backend
+      for safe use on HPC/headless systems.
+    """
+    # Normalise to a 1-D list of floats
+    if hasattr(loss_values, "detach"):  # torch.Tensor
+        vals = loss_values.detach().cpu().numpy().tolist()
+    elif isinstance(loss_values, np.ndarray):
+        vals = loss_values.tolist()
+    else:
+        vals = list(loss_values)
+
+    # Guard: empty or scalar
+    if not isinstance(vals, list) or len(vals) == 0:
+        logger.warning("Training loss sequence is empty; nothing to plot/save.")
+        post_dir = Path(out_dir) / "post_clipn"
+        post_dir.mkdir(parents=True, exist_ok=True)
+        empty_tsv = post_dir / f"{experiment}_{mode}_clipn_training_loss.tsv"
+        pd.DataFrame(data=[], columns=["epoch", "loss"]).to_csv(empty_tsv, sep="\t", index=False)
+        return empty_tsv, post_dir / f"{experiment}_{mode}_clipn_training_loss.png"
+
+    epochs = list(range(1, len(vals) + 1))
+    df_loss = pd.DataFrame(data={"epoch": epochs, "loss": vals})
+
+    post_dir = Path(out_dir) / "post_clipn"
+    post_dir.mkdir(parents=True, exist_ok=True)
+
+    tsv_path = post_dir / f"{experiment}_{mode}_clipn_training_loss.tsv"
+    df_loss.to_csv(tsv_path, sep="\t", index=False)
+
+    png_path = post_dir / f"{experiment}_{mode}_clipn_training_loss.pdf"
+    fig = plt.figure(figsize=(8, 5))
+    ax = fig.add_subplot(111)
+    ax.plot(epochs, vals)
+    ax.set_title(f"CLIPn training loss — {experiment} [{mode}]")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(True, which="major", linestyle="--", linewidth=0.5)
+    fig.tight_layout()
+    fig.savefig(png_path)
+    plt.close(fig)
+
+    logger.info("Saved training loss TSV -> %s", tsv_path)
+    logger.info("Saved training loss pdf -> %s", png_path)
+    return tsv_path, png_path
+
+
+def extract_latent_and_meta(
+    *,
+    decoded_df: pd.DataFrame,
+    level: str = "compound",
+    aggregate: str = "median",
+    logger: logging.Logger,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Prepare a latent matrix X and aligned metadata for diagnostics.
+
+    Parameters
+    ----------
+    decoded_df : pandas.DataFrame
+        Decoded table containing integer-named latent columns ('0','1',...),
+        plus 'Dataset', 'Sample', 'cpd_id', and optionally 'cpd_type'/'Library'.
+    level : str
+        'compound' (aggregates by 'cpd_id') or 'image'.
+    aggregate : str
+        'median' or 'mean' for compound aggregation.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    tuple
+        (X, meta, latent_cols) where X is numeric latent DataFrame, meta is
+        aligned metadata, latent_cols are the latent column names used.
+    """
+    latent_cols = [c for c in decoded_df.columns if str(c).isdigit()]
+    if not latent_cols:
+        raise ValueError("No latent columns detected (expected '0','1',...).")
+
+    if level == "image":
+        meta_cols = [c for c in ["cpd_id", "cpd_type", "Dataset", "Library", "Plate_Metadata", "Well_Metadata"]
+                     if c in decoded_df.columns]
+        X = decoded_df.loc[:, latent_cols].copy()
+        meta = decoded_df.loc[:, meta_cols].copy()
+        logger.info("Diagnostics at image level: %d rows, %d dims.", X.shape[0], len(latent_cols))
+        return X, meta, latent_cols
+
+    if level == "compound":
+        grouped = decoded_df.groupby(by="cpd_id", dropna=False, sort=False)
+        aggfunc = "median" if aggregate == "median" else "mean"
+        X = grouped[latent_cols].agg(func=aggfunc)
+        def _mode_safe(s: pd.Series) -> str | None:
+            s = s.dropna()
+            return None if s.empty else str(s.mode(dropna=True).iloc[0])
+        meta = pd.DataFrame({
+            "cpd_id": X.index.astype(str),
+            "cpd_type": grouped["cpd_type"].apply(func=_mode_safe) if "cpd_type" in decoded_df.columns else None,
+            "Dataset": grouped["Dataset"].apply(func=_mode_safe) if "Dataset" in decoded_df.columns else None,
+            "Library": grouped["Library"].apply(func=_mode_safe) if "Library" in decoded_df.columns else None,
+        }).dropna(axis=1, how="all")
+        meta.index = X.index
+        logger.info("Diagnostics at compound level: %d compounds, %d dims.", X.shape[0], len(latent_cols))
+        return X.reset_index(drop=True), meta.reset_index(drop=True), latent_cols
+
+    raise ValueError("level must be 'compound' or 'image'.")
+
+
+def build_knn_index(
+    *,
+    X: pd.DataFrame,
+    k: int,
+    metric: str = "cosine",
+    logger: logging.Logger,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build a k-NN index and return neighbour indices and distances.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent matrix with numeric columns.
+    k : int
+        Number of neighbours to return (excluding self).
+    metric : str
+        'cosine' or 'euclidean'.
+    logger : logging.Logger
+        Logger for messages.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        (indices, distances) arrays of shape (n, k).
+    """
+    n = X.shape[0]
+    if n < 2:
+        raise ValueError("Not enough rows to build a k-NN graph.")
+    k_eff = min(k + 1, n)
+    nn = NearestNeighbors(n_neighbors=k_eff, metric=metric)
+    nn.fit(X.values)
+    dists, idxs = nn.kneighbors(X.values, return_distance=True)
+    idxs_clean = []
+    dists_clean = []
+    for i in range(n):
+        row = [(j, d) for j, d in zip(idxs[i], dists[i]) if j != i]
+        row = row[:k]
+        idxs_clean.append([j for j, _ in row])
+        dists_clean.append([float(d) for _, d in row])
+    return np.asarray(idxs_clean, dtype=int), np.asarray(dists_clean, dtype=float)
+
+
+def precision_at_k(
+    *,
+    labels: pd.Series,
+    nn_indices: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute Precision@k for a single label vector using a fixed neighbour index.
+
+    Parameters
+    ----------
+    labels : pandas.Series
+        Class labels aligned to the rows of the k-NN index.
+    nn_indices : numpy.ndarray
+        Neighbour indices of shape (n, k).
+
+    Returns
+    -------
+    numpy.ndarray
+        Precision@k values for k=1..K (averaged over queries).
+    """
+    y = labels.astype(str).to_numpy()
+    n, k = nn_indices.shape
+    hits_cum = np.zeros(shape=(k,), dtype=float)
+    for i in range(n):
+        neigh = nn_indices[i]
+        same = (y[neigh] == y[i]).astype(float)
+        hits_cum += np.cumsum(same) / np.arange(1, k + 1)
+    return hits_cum / n
+
+
+def plot_and_save_precision_curves(
+    *,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    label_name: str,
+    prec_curve: np.ndarray,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Save Precision@k TSV and PDF for a given label type.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    k_vals = np.arange(1, len(prec_curve) + 1)
+    df = pd.DataFrame({"k": k_vals, "precision": prec_curve})
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_precision_at_k_{label_name}.tsv"
+    df.to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_precision_at_k_{label_name}.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(7, 5))
+    df.plot(kind="line", x="k", y="precision", ax=ax, legend=False)
+    ax.set_xlabel("k")
+    ax.set_ylabel("Precision")
+    ax.set_title(f"Precision@k in latent space — {label_name}")
+    ax.grid(visible=True, linestyle="--", linewidth=0.5)
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved Precision@k for %s -> %s ; %s", label_name, tsv, pdf)
+    return tsv, pdf
+
+
+def dataset_mixing_entropy(
+    *,
+    datasets: pd.Series,
+    nn_indices: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute neighbour-label entropy for each row using Dataset labels.
+
+    Parameters
+    ----------
+    datasets : pandas.Series
+        Dataset label per row.
+    nn_indices : numpy.ndarray
+        Neighbour indices of shape (n, k).
+
+    Returns
+    -------
+    numpy.ndarray
+        Entropy values per row (natural log base).
+    """
+    labs = datasets.astype(str).to_numpy()
+    n, _ = nn_indices.shape
+    ent = np.zeros(shape=(n,), dtype=float)
+    for i in range(n):
+        neigh = labs[nn_indices[i]]
+        _, counts = np.unique(neigh, return_counts=True)
+        probs = counts / counts.sum()
+        ent[i] = -np.sum(probs * np.log(probs + 1e-12))
+    return ent
+
+
+def plot_and_save_entropy(
+    *,
+    ent: np.ndarray,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    num_datasets: int,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Save dataset-mixing entropy histogram and per-row TSV.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    norm = ent / math.log(max(2, num_datasets))
+    tsv = out_dir / f"{experiment}_{mode}_dataset_mixing_entropy.tsv"
+    pd.DataFrame({"entropy": ent, "normalised_entropy": norm}).to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_dataset_mixing_entropy.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(7, 5))
+    pd.Series(norm, name="normalised_entropy").plot(kind="hist", bins=40, ax=ax)
+    ax.set_xlabel("Normalised entropy (0..1)")
+    ax.set_ylabel("Count")
+    ax.set_title("Dataset-mixing entropy (higher = better mixing)")
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved mixing entropy -> %s ; %s", tsv, pdf)
+    return tsv, pdf
+
+
+def compute_and_save_silhouette(
+    *,
+    X: pd.DataFrame,
+    labels: pd.Series,
+    metric: str,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    label_name: str,
+    logger: logging.Logger,
+) -> Path:
+    """
+    Compute a global silhouette score and write to TSV.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent matrix (numeric).
+    labels : pandas.Series
+        Labels for silhouette computation.
+    metric : str
+        'cosine' or 'euclidean'.
+    out_dir : pathlib.Path
+        Output directory.
+    experiment : str
+        Experiment name.
+    mode : str
+        Mode name.
+    label_name : str
+        Name of the grouping label for the report.
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written TSV.
+    """
+    valid = labels.fillna("NA").astype(str)
+    ok_sizes = (valid.value_counts() > 1).all() and valid.nunique() >= 2
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_silhouette_{label_name}.tsv"
+    if not ok_sizes:
+        pd.DataFrame({"label": [label_name], "silhouette_score": [np.nan], "metric": [metric]}).to_csv(tsv, sep="\t", index=False)
+        logger.warning("Silhouette skipped for %s (insufficient class sizes).", label_name)
+        return tsv
+    score = silhouette_score(X=X.values, labels=valid.to_numpy(), metric=metric)
+    pd.DataFrame({"label": [label_name], "silhouette_score": [float(score)], "metric": [metric]}).to_csv(tsv, sep="\t", index=False)
+    logger.info("Silhouette (%s): %.4f -> %s", label_name, score, tsv)
+    return tsv
+
+
+def save_latent_variance_report(
+    *,
+    X: pd.DataFrame,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    eps: float = 1e-6,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Save per-dimension variance (TSV) and a bar plot (PDF); flag low-variance dims.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent matrix with columns as latent dimensions.
+    out_dir : pathlib.Path
+        Output directory.
+    experiment : str
+        Experiment name.
+    mode : str
+        Mode name.
+    eps : float
+        Threshold below which a dimension is considered 'dead'.
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    var = X.var(axis=0, ddof=1).to_frame(name="variance").sort_values(by="variance", ascending=False)
+    var["is_dead_dim"] = var["variance"] < eps
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_latent_variance.tsv"
+    var.reset_index(names=["dimension"]).to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_latent_variance.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(9, 4))
+    var.reset_index(drop=True)["variance"].plot(kind="bar", ax=ax)
+    ax.set_xlabel("Latent dimension (sorted)")
+    ax.set_ylabel("Variance")
+    ax.set_title("Latent per-dimension variance (dead dims near zero)")
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved latent variance report -> %s ; %s (dead dims: %d)", tsv, pdf, int(var["is_dead_dim"].sum()))
+    return tsv, pdf
+
+
+def wbd_ratio_per_compound(
+    *,
+    X: pd.DataFrame,
+    meta: pd.DataFrame,
+    k: int,
+    metric: str,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    logger: logging.Logger,
+) -> tuple[Path, Path]:
+    """
+    Compute within/between dispersion ratio (WBDR) per compound and save outputs.
+
+    For each compound with ≥ 2 members:
+      - Within: mean distance to k nearest neighbours from the same compound.
+      - Between: mean distance to k nearest neighbours from other compounds.
+      - Ratio = within / between. Lower is better (< 1 desirable).
+
+    Returns
+    -------
+    tuple[pathlib.Path, pathlib.Path]
+        (tsv_path, pdf_path).
+    """
+    if "cpd_id" not in meta.columns:
+        logger.warning("WBDR skipped: 'cpd_id' not in metadata.")
+        dummy_tsv = out_dir / f"{experiment}_{mode}_wbd_ratio.tsv"
+        pd.DataFrame(columns=["cpd_id", "wbd_ratio"]).to_csv(dummy_tsv, sep="\t", index=False)
+        return dummy_tsv, out_dir / f"{experiment}_{mode}_wbd_ratio.pdf"
+
+    idxs, dists = build_knn_index(X=X, k=max(50, k), metric=metric, logger=logger)
+    y = meta["cpd_id"].astype(str).to_numpy()
+    ratios = []
+    for i in range(X.shape[0]):
+        neigh = idxs[i]
+        same_mask = (y[neigh] == y[i])
+        diff_mask = ~same_mask
+        within = float(np.mean(dists[i][same_mask][:k])) if same_mask.any() else np.nan
+        between = float(np.mean(dists[i][diff_mask][:k])) if diff_mask.any() else np.nan
+        r = np.nan if (np.isnan(within) or np.isnan(between) or between == 0.0) else (within / between)
+        ratios.append(r)
+
+    df = pd.DataFrame({"cpd_id": meta["cpd_id"].astype(str), "wbd_ratio": ratios}).dropna()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tsv = out_dir / f"{experiment}_{mode}_wbd_ratio.tsv"
+    df.to_csv(tsv, sep="\t", index=False)
+
+    pdf = out_dir / f"{experiment}_{mode}_wbd_ratio.pdf"
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(7, 5))
+    df.plot(kind="hist", y="wbd_ratio", bins=40, ax=ax, legend=False)
+    ax.set_xlabel("Within/Between ratio (lower is better)")
+    ax.set_ylabel("Count")
+    ax.set_title("Compound WBDR in latent space")
+    fig.tight_layout()
+    fig.savefig(fname=pdf)
+    plt.close(fig)
+
+    logger.info("Saved WBDR -> %s ; %s (n=%d)", tsv, pdf, df.shape[0])
+    return tsv, pdf
+
+
+def run_training_diagnostics(
+    *,
+    decoded_df: pd.DataFrame,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    level: str = "compound",
+    k_nn: int = 15,
+    metric: str = "cosine",
+    logger: logging.Logger,
+) -> None:
+    """
+    Run post-training diagnostics on the latent space and save TSV/PDF outputs.
+
+    Parameters
+    ----------
+    decoded_df : pandas.DataFrame
+        Decoded latent table (must include latent dims and 'Dataset';
+        ideally also 'cpd_id' and 'cpd_type').
+    out_dir : pathlib.Path
+        Base output directory.
+    experiment : str
+        Experiment name for file naming.
+    mode : str
+        'reference_only' or 'integrate_all'.
+    level : str
+        'compound' (default) or 'image'.
+    k_nn : int
+        Neighbourhood size for diagnostics.
+    metric : str
+        'cosine' (default) or 'euclidean'.
+    logger : logging.Logger
+        Logger instance.
+    """
+    diag_dir = Path(out_dir) / "training_diagnostics"
+    X, meta, _ = extract_latent_and_meta(
+        decoded_df=decoded_df,
+        level=level,
+        aggregate="median",
+        logger=logger,
+    )
+    nn_idx, _ = build_knn_index(X=X, k=k_nn, metric=metric, logger=logger)
+
+    if "cpd_id" in meta.columns:
+        p_curve = precision_at_k(labels=meta["cpd_id"], nn_indices=nn_idx)
+        plot_and_save_precision_curves(
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="cpd_id", prec_curve=p_curve, logger=logger,
+        )
+    if "cpd_type" in meta.columns:
+        p_curve = precision_at_k(labels=meta["cpd_type"], nn_indices=nn_idx)
+        plot_and_save_precision_curves(
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="cpd_type", prec_curve=p_curve, logger=logger,
+        )
+
+    if "Dataset" in meta.columns and meta["Dataset"].notna().any():
+        ent = dataset_mixing_entropy(datasets=meta["Dataset"], nn_indices=nn_idx)
+        plot_and_save_entropy(
+            ent=ent, out_dir=diag_dir, experiment=experiment, mode=mode,
+            num_datasets=int(meta["Dataset"].nunique(dropna=True)), logger=logger,
+        )
+
+    if "cpd_type" in meta.columns:
+        compute_and_save_silhouette(
+            X=X, labels=meta["cpd_type"], metric=metric,
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="cpd_type", logger=logger,
+        )
+    if "Dataset" in meta.columns:
+        compute_and_save_silhouette(
+            X=X, labels=meta["Dataset"], metric=metric,
+            out_dir=diag_dir, experiment=experiment, mode=mode,
+            label_name="Dataset", logger=logger,
+        )
+
+    save_latent_variance_report(
+        X=X, out_dir=diag_dir, experiment=experiment, mode=mode, eps=1e-6, logger=logger,
+    )
+
+    if "cpd_id" in meta.columns:
+        wbd_ratio_per_compound(
+            X=X, meta=meta, k=k_nn, metric=metric,
+            out_dir=diag_dir, experiment=experiment, mode=mode, logger=logger,
+        )
+
+    logger.info("Training diagnostics completed. Outputs in %s", diag_dir)
+
+
+def detect_csv_delimiter(csv_path: str) -> str:
+    """
+    Detect the delimiter of a small text file (prefer tab if ambiguous).
+    Transparently supports gzip (.gz) inputs.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the text file.
+
+    Returns
+    -------
+    str
+        Detected delimiter, one of: '\\t' or ','.
+    """
+    opener = gzip.open if str(csv_path).endswith(".gz") else open
+    with opener(csv_path, mode="rt", encoding="utf-8", errors="replace", newline="") as handle:
+        sample = handle.read(4096)
+
+    has_tab = "\t" in sample
+    has_comma = "," in sample
+    if has_tab and has_comma:
+        return "\t"  # prefer TSV
+    if has_tab:
+        return "\t"
+    if has_comma:
+        return ","
+    return "\t"
+
+
+def _mode_nonnull(series: pd.Series) -> Optional[str]:
+    """
+    Return the most frequent non-null value in a Series.
+
+    Parameters
+    ----------
+    series : pandas.Series
+        Series of values.
+
+    Returns
+    -------
+    Optional[str]
+        The modal value, or None if no non-null values exist.
+
+    Notes
+    -----
+    - For ties, the first modal value is returned.
+    - This function does not coerce dtypes; pass decoded (string) columns.
+    """
+    s = series.dropna()
+    if s.empty:
+        return None
+    modes = s.mode(dropna=True)
+    return None if modes.empty else str(modes.iloc[0])
+
+
+def aggregate_latent_from_decoded(
+    decoded_df: pd.DataFrame,
+    aggregate: str = "median",
+    logger: Optional["logging.Logger"] = None,
+) -> pd.DataFrame:
+    """
+    Aggregate CLIPn latent space per compound using the *decoded* table.
+
+    Parameters
+    ----------
+    decoded_df : pandas.DataFrame
+        Wide decoded table containing latent dimension columns named '0','1',...
+        plus 'cpd_id' and optional categorical columns (e.g. 'cpd_type', 'Library').
+    aggregate : str
+        Aggregation for latent dimensions. One of {'median', 'mean'}.
+    logger : logging.Logger, optional
+        Logger for progress messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per 'cpd_id' with aggregated latent dimensions and decoded
+        categorical columns (mode per compound).
+
+    Notes
+    -----
+    - Latent columns are detected via regex r'^\\d+$' on column names.
+    - Categorical columns are taken as mode; ties break by first observed.
+    - Ensures 'cpd_id' is a stripped string in the output.
+    """
+    # Detect latent columns named as integers "0", "1", ...
+    latent_cols = [c for c in decoded_df.columns if re.fullmatch(pattern=r"^\d+$", string=str(c))]
+    if not latent_cols:
+        raise ValueError("No latent columns detected (expected integer-named columns like '0','1',...).")
+
+    # Columns we will try to keep as decoded categories, if present
+    categorical_cols = [c for c in ["cpd_type", "Library", "Plate_Metadata", "Well_Metadata"] if c in decoded_df.columns]
+
+    # Group by compound
+    grouped = decoded_df.groupby(by="cpd_id", dropna=False, observed=True)
+
+    # Aggregate latent dims
+    if aggregate == "median":
+        lat_agg = grouped[latent_cols].median(numeric_only=True)
+    elif aggregate == "mean":
+        lat_agg = grouped[latent_cols].mean(numeric_only=True)
+    else:
+        raise ValueError(f"Unsupported aggregate='{aggregate}'. Use 'median' or 'mean'.")
+
+    # Aggregate categorical (decoded) as mode
+    cat_frames = {}
+    for col in categorical_cols:
+        cat_frames[col] = grouped[col].apply(func=_mode_nonnull)
+
+    cat_df = pd.DataFrame(data=cat_frames) if cat_frames else pd.DataFrame(index=lat_agg.index)
+
+    # Merge and tidy
+    out = lat_agg.reset_index()
+    if not cat_df.empty:
+        out = out.merge(right=cat_df.reset_index(), on="cpd_id", how="left")
+
+    out["cpd_id"] = out["cpd_id"].astype(str).str.strip()
+
+    if logger is not None:
+        logger.info("Aggregated %d compounds; kept %d latent dims; categorical cols: %s",
+                    out.shape[0], len(latent_cols), categorical_cols)
+
+    # Order columns: cpd_id, latent dims, then categorical
+    ordered = ["cpd_id"] + latent_cols + [c for c in categorical_cols if c in out.columns]
+    return out.loc[:, ordered]
+
 
 # Technical, non-biological columns that must never be used as features
 TECHNICAL_FEATURE_BLOCKLIST = {"ImageNumber","Number_Object_Number","ObjectNumber","TableNumber"}
 
+def _exclude_technical_features(cols, logger):
+    """Remove any technical columns from a list of feature columns."""
+    dropped = sorted(c for c in cols if c in TECHNICAL_FEATURE_BLOCKLIST)
+    kept = [c for c in cols if c not in TECHNICAL_FEATURE_BLOCKLIST]
+    if dropped:
+        logger.info("Excluding technical feature columns: %s", ", ".join(dropped))
+    return kept
 
 
-def apply_threads(n: int, logger):
+def ensure_library_column(
+    df: pd.DataFrame,
+    filepath: str,
+    logger: logging.Logger,
+    value: str | None = None,
+) -> pd.DataFrame:
+    """
+    Ensure a 'Library' column exists; use provided value or file stem.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to update.
+    filepath : str
+        Source path for the data (used for fallback name).
+    logger : logging.Logger
+        Logger for status messages.
+    value : str | None
+        Explicit value for the Library column; if None, uses file stem.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with ensured 'Library' column.
+    """
+    if "Library" not in df.columns:
+        base_library = value if value is not None else Path(filepath).stem
+        df["Library"] = base_library
+        logger.info("'Library' column not found. Set to: %s", base_library)
+    return df
+
+
+def log_memory_usage(
+    logger: logging.Logger,
+    prefix: str = "",
+    extra_msg: str | None = None,
+) -> None:
+    """
+    Log the current and peak memory usage (resident set size).
+
+    Parameters
+    ----------
+    logger : logging.Logger
+        Logger instance.
+    prefix : str
+        Optional prefix for the log message.
+    extra_msg : str | None
+        Optional additional message.
+    """
+    process = psutil.Process(os.getpid())
+    mem_bytes = process.memory_info().rss
+    mem_gb = mem_bytes / (1024 ** 3)
+
+    peak_gb = None
+    try:
+        # ru_maxrss is kilobytes on Linux
+        import resource  # noqa: PLC0415
+
+        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if os.uname().sysname == "Linux":
+            peak_gb = peak_rss / (1024 ** 2)
+        else:
+            peak_gb = peak_rss / (1024 ** 3)
+    except Exception:
+        pass
+
+    elapsed = time.time() - _SCRIPT_START_TIME
+    msg = f"{prefix} Memory usage: {mem_gb:.2f} GB (resident set size)"
+    if peak_gb is not None:
+        msg += f", Peak: {peak_gb:.2f} GB"
+    msg += f", Elapsed: {elapsed/60:.1f} min"
+    if extra_msg:
+        msg += " | " + extra_msg
+    logger.info(msg)
+
+
+def scale_features(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    plate_col: str | None = None,
+    mode: str = "all",
+    method: str = "robust",
+    logger: logging.Logger | None = None,
+) -> pd.DataFrame:
+    """
+    Scale features globally or per-plate.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with features and metadata.
+    feature_cols : list[str]
+        Names of feature columns to scale.
+    plate_col : str | None
+        Plate column name (required if mode='per_plate').
+    mode : str
+        One of: 'all', 'per_plate', 'none'.
+    method : str
+        One of: 'robust' or 'standard'.
+    logger : logging.Logger | None
+        Logger for status messages.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with scaled features.
+    """
+    logger = logger or logging.getLogger("scaling")
+
+    if not feature_cols:
+        logger.warning("No feature columns to scale; skipping scaling.")
+        return df
+
+    if mode == "none":
+        logger.info("No scaling applied.")
+        return df
+
+    scaler_cls = RobustScaler if method == "robust" else StandardScaler
+    df_scaled = df.copy()
+
+    if mode == "all":
+        scaler = scaler_cls()
+        df_scaled.loc[:, feature_cols] = scaler.fit_transform(df[feature_cols])
+        logger.info("Scaled all features together using %s scaler.", method)
+
+    elif mode == "per_plate":
+        if plate_col is None or plate_col not in df.columns:
+            raise ValueError("plate_col must be provided for per_plate scaling.")
+        n_groups = df[plate_col].nunique(dropna=False)
+        logger.info("Scaling per-plate across %d plate groups using %s scaler.", n_groups, method)
+        for plate, idx in df.groupby(plate_col).groups.items():
+            scaler = scaler_cls()
+            idx = list(idx)
+            df_scaled.loc[idx, feature_cols] = scaler.fit_transform(df.loc[idx, feature_cols])
+
+    else:
+        logger.warning("Unknown scaling mode '%s'. No scaling applied.", mode)
+
+    return df_scaled
+
+
+from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics import pairwise_distances
+
+def _mode_strict(series: pd.Series) -> Optional[str]:
+    """
+    Return the most frequent non-null string in a Series, or None.
+
+    Parameters
+    ----------
+    series : pandas.Series
+
+    Returns
+    -------
+    Optional[str]
+    """
+    s = series.dropna()
+    if s.empty:
+        return None
+    mode_vals = s.mode(dropna=True)
+    return None if mode_vals.empty else str(mode_vals.iloc[0])
+
+
+def aggregate_for_knn(
+    *,
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    level: str = "compound",
+    logger: logging.Logger,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Aggregate the table to the chosen granularity for k-NN.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Cleaned and scaled table with MultiIndex (Dataset, Sample) and metadata.
+    feature_cols : list[str]
+        Numeric feature columns used for distance computations.
+    level : str
+        One of {'compound', 'well', 'image'}.
+    logger : logging.Logger
+
+    Returns
+    -------
+    (X, meta) : tuple[pd.DataFrame, pd.DataFrame]
+        X  : numeric matrix (rows = entities).
+        meta : metadata for each row with an 'EntityID' column.
+
+    Notes
+    -----
+    - 'compound' groups by cpd_id and takes the median of features.
+    - 'well' groups by (Plate_Metadata, Well_Metadata).
+    - 'image' keeps rows as-is, with EntityID = 'Dataset::Sample'.
+    """
+    meta_cols = [c for c in ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"] if c in df.columns]
+
+    if level == "compound":
+        if "cpd_id" not in df.columns:
+            raise ValueError("aggregate_for_knn(level='compound') requires 'cpd_id' column.")
+        g = df.groupby("cpd_id", sort=False, dropna=False)
+        X = g[feature_cols].median(numeric_only=True)
+        meta = pd.DataFrame({
+            "EntityID": X.index.astype(str),
+            "cpd_id": X.index.astype(str),
+            "cpd_type": g["cpd_type"].apply(_mode_strict) if "cpd_type" in df.columns else None,
+            "Library": g["Library"].apply(_mode_strict) if "Library" in df.columns else None,
+        })
+        meta = meta.dropna(axis=1, how="all")
+        logger.info("Aggregated to compounds: %d unique cpd_id.", X.shape[0])
+
+    elif level == "well":
+        needed = {"Plate_Metadata", "Well_Metadata"}
+        if not needed.issubset(df.columns):
+            raise ValueError("aggregate_for_knn(level='well') requires Plate_Metadata and Well_Metadata.")
+        g = df.groupby(["Plate_Metadata", "Well_Metadata"], sort=False, dropna=False)
+        X = g[feature_cols].median(numeric_only=True)
+        meta = X.reset_index()[["Plate_Metadata", "Well_Metadata"]].copy()
+        meta["EntityID"] = meta["Plate_Metadata"].astype(str) + "::" + meta["Well_Metadata"].astype(str)
+        # Attach optional modes
+        if "cpd_id" in df.columns:
+            meta["cpd_id"] = g["cpd_id"].apply(_mode_strict).reset_index(drop=True)
+        if "cpd_type" in df.columns:
+            meta["cpd_type"] = g["cpd_type"].apply(_mode_strict).reset_index(drop=True)
+        if "Library" in df.columns:
+            meta["Library"] = g["Library"].apply(_mode_strict).reset_index(drop=True)
+        meta = meta.set_index(X.index)
+        logger.info("Aggregated to wells: %d unique Plate×Well.", X.shape[0])
+
+    elif level == "image":
+        # Keep as-is; define an ID string from MultiIndex
+        if not isinstance(df.index, pd.MultiIndex) or df.index.names != ["Dataset", "Sample"]:
+            raise ValueError("Expected MultiIndex ['Dataset','Sample'] for image-level KNN.")
+        X = df[feature_cols].copy()
+        meta = df[meta_cols].copy()
+        meta = meta if not meta.empty else pd.DataFrame(index=X.index)
+        meta = meta.reset_index()
+        meta["EntityID"] = meta["Dataset"].astype(str) + "::" + meta["Sample"].astype(str)
+        meta = meta.set_index(X.index)
+        logger.info("Using image-level entities: %d rows.", X.shape[0])
+
+    else:
+        raise ValueError("level must be one of: 'compound', 'well', 'image'.")
+
+    # Ensure clean indices for downstream
+    X = X.reset_index(drop=True)
+    meta = meta.reset_index(drop=True)
+    return X, meta
+
+
+def run_knn_analysis(
+    *,
+    X: pd.DataFrame,
+    meta: pd.DataFrame,
+    k: int = 50,
+    metric: str = "cosine",
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    """
+    Compute top-k nearest neighbours for each row in X.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Numeric feature matrix; rows are entities.
+    meta : pandas.DataFrame
+        Metadata with 'EntityID' column, aligned to X by row.
+    k : int
+        Number of neighbours to return (excluding self).
+    metric : str
+        One of {'cosine', 'euclidean', 'correlation'}.
+    logger : logging.Logger
+
+    Returns
+    -------
+    pandas.DataFrame
+        Long table with columns:
+        ['QueryID','NeighbourID','rank','distance', ...metadata columns for query and neighbour...]
+    """
+    if metric in {"cosine", "euclidean"}:
+        nn = NearestNeighbors(n_neighbors=min(k + 1, len(X)), metric=metric)
+        nn.fit(X.values)
+        dists, idxs = nn.kneighbors(X.values, return_distance=True)
+    elif metric == "correlation":
+        # Full pairwise distances just once; for large X this can be heavy
+        logger.info("Computing pairwise correlation distances; this can be memory intensive.")
+        D = pairwise_distances(X.values, metric="correlation")
+        # Argsort rows; skip the diagonal later
+        idxs = np.argsort(D, axis=1)[:, : min(k + 1, X.shape[0])]
+        # Gather distances
+        row_indices = np.arange(X.shape[0])[:, None]
+        dists = D[row_indices, idxs]
+        del D
+    else:
+        raise ValueError("metric must be 'cosine', 'euclidean' or 'correlation'.")
+
+    rows = []
+    entity_ids = meta["EntityID"].astype(str).tolist()
+    # Prepare neighbour metadata access
+    meta_cols = [c for c in meta.columns if c != "EntityID"]
+
+    for i in range(len(X)):
+        # Remove self if present at position 0
+        neigh_i = idxs[i].tolist()
+        dist_i = dists[i].tolist()
+        pairs = [(j, d) for j, d in zip(neigh_i, dist_i) if j != i]
+        pairs = pairs[:k]
+
+        for rank, (j, d) in enumerate(pairs, start=1):
+            row = {
+                "QueryID": entity_ids[i],
+                "NeighbourID": entity_ids[j],
+                "rank": rank,
+                "distance": float(d),
+            }
+            # Attach selected metadata for query and neighbour
+            for c in meta_cols:
+                row[f"Query_{c}"] = meta.iloc[i][c]
+                row[f"Neighbour_{c}"] = meta.iloc[j][c]
+            rows.append(row)
+
+    out = pd.DataFrame(rows)
+    logger.info("Computed k-NN: %d query rows × %d neighbours -> %d pairs.",
+                len(X), k, out.shape[0])
+    return out
+
+
+def simple_knn_qc(
+    *,
+    knn_df: pd.DataFrame,
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    """
+    Compute simple quality metrics from a k-NN table.
+
+    Parameters
+    ----------
+    knn_df : pandas.DataFrame
+        Output from run_knn_analysis().
+
+    Returns
+    -------
+    pandas.DataFrame
+        One-row summary with basic neighbour "hit rates" where available.
+    """
+    mets = {}
+    # Same cpd_id rate (if both sides available)
+    if {"Query_cpd_id", "Neighbour_cpd_id"}.issubset(knn_df.columns):
+        same = (knn_df["Query_cpd_id"].astype(str) == knn_df["Neighbour_cpd_id"].astype(str))
+        mets["same_cpd_id_rate"] = float(same.mean())
+
+    if {"Query_cpd_type", "Neighbour_cpd_type"}.issubset(knn_df.columns):
+        same = (knn_df["Query_cpd_type"].astype(str) == knn_df["Neighbour_cpd_type"].astype(str))
+        mets["same_cpd_type_rate"] = float(same.mean())
+
+    # Dataset leakage proxy (prefer mixing rather than matching)
+    if {"Query_Library", "Neighbour_Library"}.issubset(knn_df.columns):
+        same_lib = (knn_df["Query_Library"].astype(str) == knn_df["Neighbour_Library"].astype(str))
+        mets["same_library_neighbour_rate"] = float(same_lib.mean())
+
+    summary = pd.DataFrame([mets]) if mets else pd.DataFrame([{}])
+    logger.info("k-NN QC summary: %s", summary.to_dict(orient="records")[0])
+    return summary
+
+
+def save_knn_outputs(
+    *,
+    knn_df: pd.DataFrame,
+    qc_df: pd.DataFrame,
+    X: pd.DataFrame,
+    meta: pd.DataFrame,
+    out_dir: Path,
+    experiment: str,
+    save_full_matrix: bool = False,
+    metric: str,
+    logger: logging.Logger,
+) -> None:
+    """
+    Persist k-NN outputs as TSVs. Optionally save a full pairwise matrix
+    (guarded to small sizes).
+
+    Parameters
+    ----------
+    knn_df : pandas.DataFrame
+    qc_df : pandas.DataFrame
+    X : pandas.DataFrame
+    meta : pandas.DataFrame
+    out_dir : pathlib.Path
+    experiment : str
+    save_full_matrix : bool
+    metric : str
+    logger : logging.Logger
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    nn_path = out_dir / f"{experiment}_nearest_neighbours.tsv"
+    knn_df.to_csv(nn_path, sep="\t", index=False)
+    logger.info("Wrote k-NN pairs -> %s", nn_path)
+
+    qc_path = out_dir / f"{experiment}_knn_qc_summary.tsv"
+    qc_df.to_csv(qc_path, sep="\t", index=False)
+    logger.info("Wrote k-NN QC summary -> %s", qc_path)
+
+    if save_full_matrix:
+        n = X.shape[0]
+        if n > 5000:
+            logger.warning("Full pairwise matrix skipped (n=%d too large).", n)
+            return
+        if metric == "correlation":
+            D = pairwise_distances(X.values, metric="correlation")
+        else:
+            # Use cosine/Euclidean
+            D = pairwise_distances(X.values, metric=metric)
+        dm = pd.DataFrame(D, index=meta["EntityID"], columns=meta["EntityID"])
+        dm_path = out_dir / f"{experiment}_pairwise_distance_matrix.tsv"
+        dm.to_csv(dm_path, sep="\t")
+        logger.info("Wrote full pairwise matrix (%d×%d) -> %s", n, n, dm_path)
+
+
+
+# ==========================
+# I/O and harmonisation path
+# ==========================
+
+def load_single_dataset(
+    name: str,
+    path: str,
+    logger: logging.Logger,
+    metadata_cols: List[str],
+) -> pd.DataFrame:
+    """
+    Load one dataset, standardise metadata names, and wrap with a MultiIndex.
+
+    Parameters
+    ----------
+    name : str
+        Dataset name used for the MultiIndex level 'Dataset'.
+    path : str
+        Path to the input TSV/CSV file.
+    logger : logging.Logger
+        Logger instance.
+    metadata_cols : list[str]
+        Required metadata column names.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with harmonised metadata and MultiIndex ('Dataset', 'Sample').
+
+    Raises
+    ------
+    ValueError
+        If mandatory metadata columns are missing after standardisation.
+    """
+    delimiter = detect_csv_delimiter(path)
+    delim_name = "tab" if delimiter == "\t" else "comma"
+    logger.info("[%s] Reading %s (delimiter=%s)", name, path, delim_name)
+    df = _read_csv_fast(path, delimiter)
+
+    logger.debug("[%s] Columns after initial load: %s", name, df.columns.tolist())
+
+    if df.index.name in metadata_cols:
+        promoted_col = df.index.name
+        df[promoted_col] = df.index
+        df.index.name = None
+        logger.warning("[%s] Promoted index '%s' to column to preserve metadata.", name, promoted_col)
+
+    df = ensure_library_column(df=df, filepath=path, logger=logger, value=name)
+    df = standardise_metadata_columns(df, logger=logger, dataset_name=name)
+
+    num_cols = df.select_dtypes(include=[np.number]).shape[1]
+    non_num_cols = df.shape[1] - num_cols
+    logger.info("[%s] Column types: numeric=%d, non-numeric=%d",
+                name, num_cols, non_num_cols)
+
+
+    missing_cols = [col for col in metadata_cols if col not in df.columns]
+    if missing_cols:
+        for col in missing_cols:
+            logger.error("[%s] Mandatory column '%s' missing after standardisation.", name, col)
+        raise ValueError(f"[{name}] Mandatory column(s) {missing_cols} missing after standardisation.")
+
+    df = df.reset_index(drop=True)
+    df.index = pd.MultiIndex.from_frame(pd.DataFrame({"Dataset": name, "Sample": range(len(df))}))
+    logger.debug("[%s] Final columns: %s", name, df.columns.tolist())
+    logger.debug("[%s] Final shape: %s", name, df.shape)
+    logger.debug("[%s] Final index names: %s", name, df.index.names)
+    meta = {"cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"}
+    feat_guess = [c for c in df.columns if c not in meta]
+    df.loc[:, feat_guess] = df[feat_guess].apply(pd.to_numeric, errors="ignore")
+    return df
+
+def safe_to_csv(df: pd.DataFrame, path: Path | str, sep: str = "\t", logger: logging.Logger | None = None) -> None:
+    """
+    Write a DataFrame to CSV/TSV robustly by stringifying column names and
+    flattening any MultiIndex columns before saving.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Table to write.
+    path : Path | str
+        Output file path.
+    sep : str
+        Delimiter (default: tab).
+    logger : logging.Logger | None
+        Logger instance.
+    """
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = ["__".join(map(str, t)) for t in out.columns.to_list()]
+    else:
+        out.columns = out.columns.map(str)
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, sep=sep, index=False)
+    if logger:
+        logger.info("Wrote %s rows x %s cols -> %s", out.shape[0], out.shape[1], path)
+
+
+
+def harmonise_numeric_columns(
+    dataframes: Dict[str, pd.DataFrame],
+    logger: logging.Logger,
+    audit_dir: Path | None = None,
+) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+    """
+    Subset to the intersection of numeric columns and preserve metadata columns,
+    with detailed diagnostics.
+    """
+    metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+
+    # 0) Best-effort: coerce potential numeric dtypes (avoid losing int/float stored as strings)
+    for name, df in dataframes.items():
+        before = df.select_dtypes(include=[np.number]).shape[1]
+        cand = [c for c in df.columns if c not in metadata_cols]
+        # Coerce "object" columns to numeric where possible (leave real strings untouched)
+        dataframes[name].loc[:, cand] = df[cand].apply(pd.to_numeric, errors="coerce")
+        after = dataframes[name].select_dtypes(include=[np.number]).shape[1]
+        if after != before:
+            logger.info("[%s] dtype coercion: numeric cols %d -> %d", name, before, after)
+
+    # 1) Build numeric sets per dataset
+    num_sets: Dict[str, set] = {
+        name: set(df.select_dtypes(include=[np.number]).columns) for name, df in dataframes.items()
+    }
+    union = set().union(*num_sets.values()) if num_sets else set()
+    inter = set.intersection(*num_sets.values()) if num_sets else set()
+
+    # 2) Log headline stats before blocklist
+    jacc = (len(inter) / max(1, len(union))) if union else 0.0
+    logger.info("Numeric feature union=%d, intersection=%d (Jaccard=%.3f)", len(union), len(inter), jacc)
+
+    # 3) Apply technical blocklist, but log what it removed
+    inter_before_block = sorted(inter)
+    common_cols = sorted(_exclude_technical_features(inter_before_block, logger))
+    removed_by_block = [c for c in inter_before_block if c not in common_cols]
+    if removed_by_block:
+        logger.info("Technical blocklist removed %d intersecting features (e.g. %s%s)",
+                    len(removed_by_block),
+                    ", ".join(removed_by_block[:5]),
+                    "..." if len(removed_by_block) > 5 else "")
+
+    logger.info("Harmonised numeric columns across datasets (after blocklist): %d", len(common_cols))
+
+    if audit_dir is not None:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        pd.Series(sorted(union), name="feature").to_csv(
+            audit_dir / "feature_union.tsv", sep="\t", index=False
+        )
+        pd.Series(sorted(inter), name="feature").to_csv(
+            audit_dir / "feature_intersection_pre_blocklist.tsv", sep="\t", index=False
+        )
+        pd.Series(common_cols, name="feature").to_csv(
+            audit_dir / "feature_intersection_post_blocklist.tsv", sep="\t", index=False
+        )
+
+    # 4) Per-dataset diagnostics
+    for name, cols in num_sets.items():
+        # What this dataset is missing vs the global intersection (pre-blocklist) and union
+        missing_from_inter = sorted(list(inter - cols))[:20]
+        missing_from_union = sorted(list(union - cols))[:20]
+        logger.debug("[%s] Missing from intersection (first 20): %s",
+                     name, ", ".join(missing_from_inter) if missing_from_inter else "<none>")
+        logger.debug("[%s] Missing from union (first 20): %s",
+                     name, ", ".join(missing_from_union) if missing_from_union else "<none>")
+
+    # 5) Assemble harmonised frames
+    for name, df in dataframes.items():
+        numeric_df = df[common_cols] if common_cols else df.select_dtypes(include=[np.number])
+        metadata_df = df[metadata_cols]
+        df_harmonised = pd.concat([numeric_df, metadata_df], axis=1)
+        assert df_harmonised.index.equals(df.index), f"Index mismatch after harmonisation in '{name}'."
+        dataframes[name] = df_harmonised
+        logger.debug("[%s] Harmonisation successful, final columns: %s",
+                     name, df_harmonised.columns.tolist())
+
+    return dataframes, common_cols
+
+
+
+
+def load_and_harmonise_datasets(
+    datasets_csv: str,
+    logger: logging.Logger,
+    mode: str | None = None,
+    audit_dir: Path | None = None,
+) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+    """
+    Load all datasets listed in the 'datasets_csv' file and harmonise.
+
+    Parameters
+    ----------
+    datasets_csv : str
+        Path to a TSV/CSV mapping of dataset name to path. Must have columns:
+        'dataset' and 'path'.
+    logger : logging.Logger
+        Logger instance.
+    mode : str | None
+        Included for API stability; not used.
+
+    Returns
+    -------
+    tuple[dict[str, pd.DataFrame], list[str]]
+        Mapping dataset name -> harmonised DataFrame, and common numeric columns.
+    """
+    delimiter = detect_csv_delimiter(datasets_csv)
+    datasets_df = pd.read_csv(filepath_or_buffer=datasets_csv, delimiter=delimiter)
+    if not {"dataset", "path"}.issubset(set(datasets_df.columns)):
+        raise ValueError("datasets_csv must contain 'dataset' and 'path' columns.")
+
+    dataset_paths = datasets_df.set_index("dataset")["path"].to_dict()
+    metadata_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+
+    dataframes: Dict[str, pd.DataFrame] = {}
+
+    logger.info("Loading datasets individually (%d listed in %s)",
+            len(dataset_paths), datasets_csv)
+    for name, path in dataset_paths.items():
+        try:
+            logger.info(" -> [%s] %s", name, path)
+            dataframes[name] = load_single_dataset(name=name, path=path, logger=logger, metadata_cols=metadata_cols)
+        except ValueError as exc:
+            logger.error("Loading dataset '%s' failed: %s", name, exc)
+            raise
+
+    return harmonise_numeric_columns(dataframes=dataframes, logger=logger, audit_dir=audit_dir)
+
+
+
+# ============================
+# Encoding / Decoding utilities
+# ============================
+
+def decode_labels(df: pd.DataFrame, encoders: Dict[str, LabelEncoder], logger: logging.Logger) -> pd.DataFrame:
+    """
+    Decode categorical columns using fitted LabelEncoders.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame whose columns may be label-encoded.
+    encoders : dict[str, LabelEncoder]
+        Mapping of column names to fitted LabelEncoder objects.
+    logger : logging.Logger
+        Logger for progress and warnings.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with decoded columns where possible.
+
+    Notes
+    -----
+    - Robust to columns that are integer-like but stored as 'object' or 'float'
+      (e.g. '0'/'1' strings or 0.0/1.0 floats).
+    - Leaves already-decoded string columns unchanged.
+    """
+    for col, le in encoders.items():
+        if col not in df.columns:
+            logger.warning("decode_labels: Column '%s' not found in DataFrame. Skipping.", col)
+            continue
+
+        s = df[col]
+
+        # Try to coerce to integer codes robustly
+        s_codes = pd.to_numeric(s, errors="coerce").astype("Int64")
+        n_codes = int(s_codes.notna().sum())
+
+        if n_codes == 0:
+            # Nothing integer-like to decode; assume already-decoded strings
+            logger.info("decode_labels: Column '%s' appears already decoded or non-integer; leaving as-is.", col)
+            continue
+
+        # Build a mapping from code -> original label
+        mapping = {i: cls for i, cls in enumerate(le.classes_)}
+
+        decoded = s_codes.map(mapping)
+        # Keep original values where decode failed (e.g. unexpected codes)
+        df[col] = decoded.where(decoded.notna(), other=s.astype(str))
+
+        logger.info("decode_labels: Decoded column '%s' (%d/%d values).", col, int(decoded.notna().sum()), len(s))
+    return df
+
+
+def encode_labels(df: pd.DataFrame, logger: logging.Logger) -> Tuple[pd.DataFrame, Dict[str, LabelEncoder]]:
+    """
+    Encode object/category columns (excluding 'cpd_id') using LabelEncoder.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to encode.
+    logger : logging.Logger
+        Logger for debug information.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, dict[str, LabelEncoder]]
+        The encoded DataFrame and a mapping of column name to LabelEncoder.
+    """
+    encoders: Dict[str, LabelEncoder] = {}
+    skip_columns = {"cpd_id"}
+
+    obj_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    logger.info("Encoding %d object/category columns (excluding 'cpd_id' if present).", len(obj_cols))
+
+    for col in obj_cols:
+        if col in skip_columns:
+            logger.debug("Skipping encoding for column '%s'", col)
+            continue
+        le = LabelEncoder()
+        df.loc[:, col] = le.fit_transform(df[col])
+        encoders[col] = le
+        logger.debug("Encoded column '%s' with %d classes.", col, len(le.classes_))
+    return df, encoders
+
+
+# ====================
+# CLIPn core functions
+# ====================
+
+def extend_model_encoders(
+    model: CLIPn,
+    new_keys: Iterable[int],
+    reference_key: int,
+    logger: logging.Logger,
+) -> None:
+    """
+    Extend CLIPn model's encoder mapping for new datasets using a reference encoder.
+
+    Parameters
+    ----------
+    model : CLIPn
+        Trained CLIPn model object.
+    new_keys : Iterable[int]
+        Keys of new datasets to be projected.
+    reference_key : int
+        Key of the reference dataset to copy the encoder from.
+    logger : logging.Logger
+        Logger instance.
+    """
+    for new_key in new_keys:
+        model.model.encoders[new_key] = model.model.encoders[reference_key]
+        logger.debug("Assigned encoder for dataset key %s using reference encoder %s", new_key, reference_key)
+
+
+def _apply_threads(n: int, logger):
     """
     Set BLAS/OpenMP and PyTorch threads to exactly 'n'.
 
@@ -256,6 +1727,466 @@ def apply_threads(n: int, logger):
 
 
 
+
+def run_clipn_integration(
+    df: pd.DataFrame,
+    logger: logging.Logger,
+    clipn_param: str,
+    output_path: str | Path,
+    experiment: str,
+    mode: str,
+    latent_dim: int,
+    lr: float,
+    epochs: int,
+    skip_standardise: bool = False,
+    plot_loss: bool = True,
+) -> Tuple[pd.DataFrame, Dict[str, List[str]], CLIPn, Dict[int, str]]:
+    """
+    Train a CLIPn model on the provided DataFrame and return latent representations.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Combined input DataFrame with MultiIndex (Dataset, Sample).
+    logger : logging.Logger
+        Logger instance.
+    clipn_param : str
+        Optional parameter for logging (no functional effect here).
+    output_path : str | Path
+        Directory to save latent arrays.
+    experiment : str
+        Experiment name.
+    mode : str
+        Operation mode (for filename context).
+    latent_dim : int
+        Dimensionality of the latent space.
+    lr : float
+        Learning rate.
+    epochs : int
+        Number of training epochs.
+    skip_standardise : bool
+        Unused here (kept for API compatibility).
+
+    Returns
+    -------
+    tuple[pd.DataFrame, dict[str, list[str]], CLIPn, dict[int, str]]
+        Combined latent DataFrame (MultiIndex),
+        dictionary of cpd_ids per dataset,
+        trained CLIPn model,
+        dataset key mapping.
+    """
+    logger.info("Running CLIPn integration with param: %s", clipn_param)
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    logger.info("Numeric feature column count: %d", len(numeric_cols))
+    logger.info("Combined DataFrame shape: %s", df.shape)
+    logger.debug("Head of combined DataFrame:\n%s", df.head())
+
+    if not numeric_cols:
+        logger.error(
+            "No numeric feature columns found after harmonisation. "
+            "Possible causes: no overlap of features, all numeric columns are NaN, or wrong dtypes."
+        )
+        raise ValueError("No numeric columns available for CLIPn.")
+
+    data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df)
+    latent_dict, model, loss = run_clipn_simple(
+        data_dict,
+        label_dict,
+        latent_dim=latent_dim,
+        lr=lr,
+        epochs=epochs,
+    )
+    logger.info("CLIPn training completed.")
+    # Save loss curve (TSV + PNG) if available
+    if plot_loss and loss is not None:
+        try:
+            save_training_loss(
+                loss_values=loss,
+                out_dir=output_path,
+                experiment=experiment,
+                mode=mode,
+                logger=logger,
+            )
+        except Exception as exc:
+            logger.warning("Failed to save/plot training loss: %s", exc)
+
+
+    if isinstance(loss, (list, np.ndarray)):
+        logger.info("CLIPn final loss: %.6f", loss[-1])
+    else:
+        logger.info("CLIPn loss: %s", loss)
+
+    latent_frames = []
+    for i, latent in latent_dict.items():
+        name = dataset_key_mapping[i]
+        df_latent = pd.DataFrame(latent)
+        df_latent.index = pd.MultiIndex.from_product(
+            [[name], range(len(df_latent))], names=["Dataset", "Sample"]
+        )
+        latent_frames.append(df_latent)
+
+    latent_combined = pd.concat(latent_frames)
+
+    # Save latent as NPZ (with string keys)
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    latent_file = output_path / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
+    latent_dict_str_keys = {str(k): v for k, v in latent_dict.items()}
+    np.savez(file=latent_file, **latent_dict_str_keys)
+    logger.info("Latent representations saved to: %s", latent_file)
+
+    latent_file_id = output_path / f"{experiment}_{mode}_CLIPn_latent_representations_cpd_id.npz"
+    cpd_ids_array = {f"cpd_ids_{k}": np.array(v) for k, v in cpd_ids.items()}
+    np.savez(file=latent_file_id, **latent_dict_str_keys, **cpd_ids_array)
+
+    post_clipn_dir = output_path / "post_clipn"
+    post_clipn_dir.mkdir(parents=True, exist_ok=True)
+    post_latent_file = post_clipn_dir / f"{experiment}_{mode}_CLIPn_latent_representations.npz"
+    np.savez(file=post_latent_file, **latent_dict_str_keys)
+
+    return latent_combined, cpd_ids, model, dataset_key_mapping
+
+
+# =========================
+# Downstream / merge helpers
+# =========================
+
+def merge_annotations(
+    latent_df_or_path: str | pd.DataFrame,
+    annotation_file: str,
+    output_prefix: str,
+    logger: logging.Logger,
+) -> None:
+    """
+    Merge compound annotations into the CLIPn latent output on plate/well.
+
+    Parameters
+    ----------
+    latent_df_or_path : str | pd.DataFrame
+        Path to latent TSV or a DataFrame of latent outputs.
+    annotation_file : str
+        Path to an annotation TSV file with plate/well mappings.
+    output_prefix : str
+        Base path prefix for output files (no extension).
+    logger : logging.Logger
+        Logger instance.
+    """
+    try:
+        if isinstance(latent_df_or_path, str):
+            latent_df = pd.read_csv(filepath_or_buffer=latent_df_or_path, sep="\t")
+        else:
+            latent_df = latent_df_or_path.copy()
+
+        # instead of fixed sep="\t"
+        annot_df = read_table_auto(annotation_file)
+
+
+        # Try to derive Plate/Well if only generic columns provided
+        if "Plate_Metadata" not in annot_df.columns and "Plate" in annot_df.columns:
+            annot_df["Plate_Metadata"] = annot_df["Plate"]
+        if "Well_Metadata" not in annot_df.columns and "Well" in annot_df.columns:
+            annot_df["Well_Metadata"] = annot_df["Well"]
+
+        logger.info("Merging annotations on keys: Plate_Metadata, Well_Metadata")
+        logger.info("Latent columns: %s", latent_df.columns.tolist())
+        logger.info("Annotation columns: %s", annot_df.columns.tolist())
+        logger.info("Latent shape: %s, Annotation shape: %s", latent_df.shape, annot_df.shape)
+
+        if "Plate_Metadata" not in latent_df.columns or "Well_Metadata" not in latent_df.columns:
+            logger.warning("Plate_Metadata or Well_Metadata missing in latent data — merge skipped.")
+            return
+
+        merged = pd.merge(
+            left=latent_df,
+            right=annot_df,
+            on=["Plate_Metadata", "Well_Metadata"],
+            how="left",
+            validate="many_to_one",
+        )
+
+        logger.info("Merged shape: %s", merged.shape)
+        if "cpd_id" in merged.columns:
+            n_merged = merged["cpd_id"].notna().sum()
+            logger.info("Successfully merged rows with non-null cpd_id: %s", n_merged)
+
+        merged_tsv = f"{output_prefix}_latent_with_annotations.tsv"
+        merged.to_csv(path_or_buf=merged_tsv, sep="\t", index=False)
+        logger.info("Merged annotation saved to: %s", merged_tsv)
+
+    except Exception as exc:
+        logger.warning("Annotation merging failed: %s", exc)
+
+
+def _read_csv_fast(path: str, delimiter: str) -> pd.DataFrame:
+    # Try pyarrow engine (fast); fall back to pandas' python engine.
+    try:
+        return pd.read_csv(path, delimiter=delimiter, engine="pyarrow")
+    except Exception:
+        return pd.read_csv(path, delimiter=delimiter, engine="python", compression="infer")
+
+
+def read_table_auto(path: str) -> pd.DataFrame:
+    """Read CSV/TSV with automatic delimiter detection (prefers tab)."""
+    sep = detect_csv_delimiter(path)
+    return pd.read_csv(filepath_or_buffer=path, sep=sep)
+
+
+def clean_and_impute_features_knn(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    logger: logging.Logger,
+    *,
+    groupby_cols: list[str] = None,           # e.g. ["Dataset", "Plate_Metadata"]
+    max_nan_col_frac: float = 0.30,           # drop features with >30% NaN
+    max_nan_row_frac: float = 0.80,           # drop rows with >80% NaN across kept features
+    n_neighbors: int = 5,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    KNN imputation (optionally per-group), with robust in-place scaling
+    (median/IQR) before KNN to avoid scale dominance, and unscaling after.
+
+    Returns
+    -------
+    (df_imputed, dropped_features)
+    """
+    if not feature_cols:
+        return df, []
+
+    df = df.copy()
+
+    # Replace inf with NaN
+    df.loc[:, feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+
+    # Drop very sparse features
+    col_nan_frac = df[feature_cols].isna().mean(axis=0)
+    drop_feats = col_nan_frac[col_nan_frac > max_nan_col_frac].index.tolist()
+    keep_feats = [c for c in feature_cols if c not in drop_feats]
+    if drop_feats:
+        logger.warning("KNN: dropping %d/%d features with > %.0f%% NaN (e.g. %s)",
+                       len(drop_feats), len(feature_cols), max_nan_col_frac*100, drop_feats[:10])
+
+    # Drop extremely incomplete rows
+    if keep_feats:
+        row_nan_frac = df[keep_feats].isna().mean(axis=1)
+        drop_rows = row_nan_frac > max_nan_row_frac
+        n_drop_rows = int(drop_rows.sum())
+        if n_drop_rows:
+            logger.warning("KNN: dropping %d rows with > %.0f%% NaN across kept features.",
+                           n_drop_rows, max_nan_row_frac*100)
+        df = df.loc[~drop_rows]
+    else:
+        logger.error("KNN: all features would be dropped. Loosen thresholds.")
+        return df.iloc[0:0], feature_cols
+
+    if not keep_feats:
+        return df, drop_feats
+
+    # Grouped KNN impute
+    groupby_cols = groupby_cols or ["Dataset"]
+    imputer = None  # created per group (k may change if group very small)
+
+    def _robust_scale_matrix(mat: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+        med = mat.median(axis=0, skipna=True)
+        iqr = mat.quantile(0.75) - mat.quantile(0.25)
+        iqr = iqr.replace(0, 1.0)  # avoid divide by zero
+        scaled = (mat - med) / iqr
+        return scaled, med, iqr
+
+    def _unscale_matrix(scaled: np.ndarray, med: pd.Series, iqr: pd.Series) -> pd.DataFrame:
+        return (scaled * iqr.values) + med.values
+
+    def _impute_group(g: pd.DataFrame) -> pd.DataFrame:
+        X = g[keep_feats]
+
+        # If group too small for KNN, fallback to median
+        if len(X) < 2:
+            med = X.median(numeric_only=True)
+            g.loc[:, keep_feats] = X.fillna(med)
+            return g
+
+        # Robust scale → KNN → unscale
+        X_scaled, med, iqr = _robust_scale_matrix(X)
+        k_eff = max(1, min(n_neighbors, len(X)))
+        imp = KNNImputer(n_neighbors=k_eff, weights="uniform")
+        X_imp_scaled = imp.fit_transform(X_scaled.values)
+        X_imp = _unscale_matrix(X_imp_scaled, med, iqr)
+
+        g.loc[:, keep_feats] = X_imp
+        return g
+
+    logger.info("Imputing with KNN (k=%d) per group=%s", n_neighbors, groupby_cols)
+    df = df.groupby(groupby_cols, dropna=False, sort=False).apply(_impute_group)
+
+    # pandas >=2.1 can leave group keys in the index; restore original
+    if isinstance(df.index, pd.MultiIndex) and df.index.names != ["Dataset", "Sample"]:
+        try:
+            df.index = df.index.droplevel(list(range(len(groupby_cols))))
+        except Exception:
+            pass
+
+    # Final check (rare): any NaNs left → fill with global medians to be safe
+    if df[keep_feats].isna().any().any():
+        logger.warning("KNN: residual NaNs after impute; filling with global medians.")
+        df.loc[:, keep_feats] = df[keep_feats].fillna(df[keep_feats].median(numeric_only=True))
+
+    return df, drop_feats
+
+
+def clean_and_impute_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    logger: logging.Logger,
+    *,
+    groupby_cols: list[str] = None,           # e.g. ["Dataset", "Plate_Metadata"]
+    max_nan_col_frac: float = 0.3,            # drop features with >30% NaN
+    max_nan_row_frac: float = 0.8,            # drop rows with >80% NaN across features
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Replace ±inf with NaN, drop very sparse features/rows, and impute remaining NaNs.
+
+    Returns
+    -------
+    (df_clean, dropped_features)
+    """
+    if not feature_cols:
+        return df, []
+
+    df = df.copy()
+    # 1) replace inf
+    df.loc[:, feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+
+    # 2) drop sparse features
+    col_nan_frac = df[feature_cols].isna().mean(axis=0)
+    drop_feats = col_nan_frac[col_nan_frac > max_nan_col_frac].index.tolist()
+    if drop_feats:
+        logger.warning(
+            "Dropping %d/%d features with > %.0f%% NaN: first few %s",
+            len(drop_feats), len(feature_cols), max_nan_col_frac * 100, drop_feats[:10],
+        )
+        keep_feats = [c for c in feature_cols if c not in drop_feats]
+    else:
+        keep_feats = feature_cols
+
+    # 3) drop extremely incomplete rows (across kept features)
+    if keep_feats:
+        row_nan_frac = df[keep_feats].isna().mean(axis=1)
+        drop_rows = row_nan_frac > max_nan_row_frac
+        n_drop_rows = int(drop_rows.sum())
+        if n_drop_rows:
+            logger.warning(
+                "Dropping %d rows with > %.0f%% NaN across kept features.",
+                n_drop_rows, max_nan_row_frac * 100,
+            )
+        df = df.loc[~drop_rows]
+    else:
+        logger.error("All features would be dropped. Loosen max_nan_col_frac or inspect inputs.")
+        return df.iloc[0:0], feature_cols  # empty df
+
+    # 4) impute remaining NaNs (median per group)
+    groupby_cols = groupby_cols or ["Dataset"]
+    missing_before = int(df[keep_feats].isna().sum().sum())
+    if missing_before:
+        logger.info(
+            "Imputing %d remaining NaNs using median per group=%s.",
+            missing_before, groupby_cols,
+        )
+        def _impute_group(g: pd.DataFrame) -> pd.DataFrame:
+            med = g[keep_feats].median(numeric_only=True)
+            g.loc[:, keep_feats] = g[keep_feats].fillna(med)
+            return g
+        df = df.groupby(groupby_cols, dropna=False, sort=False).apply(_impute_group)
+        # pandas >= 2.1 leaves group keys in index name sometimes; ensure same index
+        if isinstance(df.index, pd.MultiIndex) and df.index.names != ["Dataset", "Sample"]:
+            try:
+                df.index = df.index.droplevel(list(range(len(groupby_cols))))
+            except Exception:
+                pass
+
+    still_missing = int(df[keep_feats].isna().sum().sum())
+    if still_missing:
+        logger.warning("After median impute, %d NaNs remain; filling with global medians.", still_missing)
+        global_med = df[keep_feats].median(numeric_only=True)
+        df.loc[:, keep_feats] = df[keep_feats].fillna(global_med)
+
+    return df, drop_feats
+
+def clean_nonfinite_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    logger: logging.Logger,
+    label: str = "",
+) -> pd.DataFrame:
+    """
+    Replace ±inf with NaN in selected feature columns and log counts.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table.
+    feature_cols : list[str]
+        Numeric feature column names to clean.
+    logger : logging.Logger
+        Logger for status messages.
+    label : str
+        Short label to include in log messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy of the input with non-finite values replaced by NaN.
+    """
+    out = df.copy()
+    n_pos = int(np.isinf(out[feature_cols]).sum().sum())
+    n_neg = int(np.isneginf(out[feature_cols]).sum().sum())
+    if n_pos or n_neg:
+        logger.warning("[%s] Replacing %d inf and %d -inf with NaN.", label, n_pos, n_neg)
+        out.loc[:, feature_cols] = out[feature_cols].replace([np.inf, -np.inf], np.nan)
+    return out
+
+
+def aggregate_latent_per_compound(
+    df: pd.DataFrame,
+    group_col: str = "cpd_id",
+    latent_cols: List[str] | None = None,
+    method: str = "median",
+) -> pd.DataFrame:
+    """
+    Aggregate image-level latent vectors to a single row per compound.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing image-level latent and metadata.
+    group_col : str
+        Name of the compound identifier column.
+    latent_cols : list[str] | None
+        Names of latent columns. If None, uses integer-named columns.
+    method : str
+        Aggregation method: 'median', 'mean', 'min', or 'max'.
+
+    Returns
+    -------
+    pd.DataFrame
+        Aggregated DataFrame (one row per compound).
+    """
+    if group_col not in df.columns:
+        raise ValueError(f"Column '{group_col}' not found in DataFrame.")
+
+    if latent_cols is None:
+        latent_cols = [
+            col for col in df.columns
+            if isinstance(col, int) or (isinstance(col, str) and col.isdigit())
+        ]
+        if not latent_cols:
+            raise ValueError("No integer-named latent columns found.")
+
+    latent_cols = sorted(latent_cols, key=int)
+    aggfunc = method if method in {"mean", "median", "min", "max"} else "median"
+    aggregated = df.groupby(group_col, as_index=False)[latent_cols].agg(aggfunc)
+    return aggregated
+
+
 # =====
 # Main
 # =====
@@ -276,11 +2207,11 @@ def main(args: argparse.Namespace) -> None:
 
 
     # Threading: simple and explicit
-    _CLIPN_THREADS = apply_threads(args.cpu_threads, logger)
+    _CLIPN_THREADS = _apply_threads(args.cpu_threads, logger)
 
 
 
-    register_clipn_for_pickle()
+    _register_clipn_for_pickle()
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
 
@@ -348,7 +2279,7 @@ def main(args: argparse.Namespace) -> None:
         if col not in meta_columns and pd.api.types.is_numeric_dtype(combined_df[col])
     ]
     # drop technicals from the features we’re going to scale/project
-    feature_cols = exclude_technical_features(feature_cols, logger)
+    feature_cols = _exclude_technical_features(feature_cols, logger)
     if not feature_cols:
         raise ValueError("No numeric feature columns found after harmonisation. Check feature overlap and dtypes.")
 
@@ -495,158 +2426,19 @@ def main(args: argparse.Namespace) -> None:
 
 
     # Encode labels (cpd_id is explicitly not encoded)
-    # ============================================================
-    # Encode ONLY cpd_type for training labels; exclude other metadata
-    # ============================================================
+    logger.info("Encoding categorical labels for CLIPn compatibility")
+    # Ensure key categoricals are strings so they get encoded → can be decoded later
+    for _col in ("cpd_type", "Library", "Plate_Metadata", "Well_Metadata"):
+        if _col in df_scaled_all.columns:
+            df_scaled_all.loc[:, _col] = df_scaled_all[_col].astype("string")
 
-    meta_cols = ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+    df_encoded, encoders = encode_labels(df=df_scaled_all.copy(), logger=logger)
+    log_memory_usage(logger, prefix="[After encoding] ")
 
-    # Model features: strictly numeric, excluding metadata
-    feature_cols_model = [
-        c for c in df_scaled_all.columns
-        if (c not in meta_cols) and pd.api.types.is_numeric_dtype(df_scaled_all[c])
-    ]
-    if not feature_cols_model:
-        raise ValueError("No numeric feature columns for CLIPn after excluding metadata.")
-
-    df_features = df_scaled_all.loc[:, feature_cols_model].copy()
-
-    # Encode cpd_type (required for CLIPn training labels)
-    if "cpd_type" not in df_scaled_all.columns:
-        raise ValueError("Column 'cpd_type' is required but missing.")
-    le_cpd = LabelEncoder()
-    cpd_type_codes = le_cpd.fit_transform(df_scaled_all["cpd_type"].astype("string").fillna("NA"))
-
-    # Build df_encoded: numeric features + 'cpd_type' (+ 'cpd_id' for bookkeeping)
-    df_encoded = df_features.copy()
-    df_encoded["cpd_type"] = cpd_type_codes.astype(np.int32)
-    df_encoded["cpd_id"] = df_scaled_all["cpd_id"].astype("string").fillna("NA").astype("category")
-
-    # Invariants: forbid other metadata in training matrix; ensure cpd_id is non-numeric
-    bad_cols = set(df_encoded.columns) & {"Library", "Plate_Metadata", "Well_Metadata"}
-    if bad_cols:
-        raise ValueError(f"Unexpected metadata leaked into training matrix: {sorted(bad_cols)}")
-    assert not pd.api.types.is_numeric_dtype(df_encoded["cpd_id"]), "cpd_id must be non-numeric."
-
-    # Features actually used for the model (all numeric except the label)
-    features_for_model = [
-        c for c in df_encoded.select_dtypes(include=[np.number]).columns
-        if c != "cpd_type"
-    ]
-
-    # computed this earlier:
-    features_for_model = [
-        c for c in df_encoded.select_dtypes(include=[np.number]).columns
-        if c != "cpd_type"
-    ]
-    logger.info(
-        "Training matrix validated: %d rows, %d feature cols + 'cpd_type' label (plus 'cpd_id' for bookkeeping).",
-        df_encoded.shape[0], len(features_for_model)
-    )
-
-
-    # Optional: write the columns you really train on (exclude cpd_id)
-    train_cols_path = Path(args.out) / "clipn_training_columns.tsv"
-    pd.Series([*features_for_model, "cpd_type"], name="column").to_csv(
-                train_cols_path, sep="\t", index=False)
-    logger.info("Wrote final list of training columns to %s", train_cols_path)  
-
-    # Expose encoder mapping for downstream decode/exports
-    encoders = {"cpd_type": le_cpd}
-
-    logger.info(
-        "Prepared CLIPn inputs: features=%d, rows=%d; encoded 'cpd_type' with %d classes.",
-        len(feature_cols_model), df_encoded.shape[0], len(le_cpd.classes_)
-    )
-    log_memory_usage(logger=logger, prefix="[After cpd_type-only encoding] ")
-
-    # (Optional) save cpd_type mapping
-    mapping_df = pd.DataFrame({
-        "cpd_type": le_cpd.classes_,
-        "cpd_type_encoded": np.arange(len(le_cpd.classes_), dtype=int),
-    })
-    safe_to_csv(
-        df=mapping_df,
-        path=(Path(args.out) / "label_mapping_cpd_type.tsv"),
-        sep="\t",
-        logger=logger,
-    )
-
-    # Report training input columns
-    logger.info("CLIPn training DataFrame shape: %s", df_encoded.shape)
-    logger.info("Training columns: %d total", df_encoded.shape[1])
-    logger.info("First 10 training columns: %s", df_encoded.columns[:10].tolist())
-
-    # dump all column names to a TSV for inspection
-    all_cols_path = Path(args.out) / "clipn_all_columns.tsv"
-    pd.Series(df_encoded.columns, name="column").to_csv(
-        all_cols_path, sep="\t", index=False, header=True
-    )
-    logger.info("Wrote full list of columns to %s", all_cols_path)
-    # Sanity: training matrix must be (features + exactly one label column 'cpd_type')
-
-    bad_cols = set(df_encoded.columns) & {"Library", "Plate_Metadata", "Well_Metadata"}
-    assert not bad_cols, f"Unexpected metadata in training matrix: {sorted(bad_cols)}"
-
-    _non_numeric = [
-        c for c in df_encoded.columns
-        if c not in {"cpd_type", "cpd_id"} and not pd.api.types.is_numeric_dtype(df_encoded[c])
-    ]
-
-
-    assert not _non_numeric, f"Non-numeric feature columns present: {_non_numeric}"
-
-    logger.info(
-    "Training matrix validated: %d rows, %d feature cols + 'cpd_type' label.",
-    df_encoded.shape[0], len(features_for_model)
-)
-
-
-    assert pd.api.types.is_integer_dtype(df_encoded["cpd_type"]) or pd.api.types.is_numeric_dtype(df_encoded["cpd_type"]), \
-        f"'cpd_type' should be numeric-encoded; got {df_encoded['cpd_type'].dtype}"
-
-    # Columns we want to carry along
-    meta_cols = ["cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library"]
-
-    # Start from a reset copy
-    decoded_meta_df = df_scaled_all.reset_index()
-
-    # If index names were lost, rename common fallbacks to Dataset/Sample
-    rename_map = {}
-    if "Dataset" not in decoded_meta_df.columns:
-        if "level_0" in decoded_meta_df.columns:
-            rename_map["level_0"] = "Dataset"
-        elif "index" in decoded_meta_df.columns:
-            rename_map["index"] = "Dataset"
-    if "Sample" not in decoded_meta_df.columns:
-        if "level_1" in decoded_meta_df.columns:
-            rename_map["level_1"] = "Sample"
-    if rename_map:
-        logger.warning("Index names lost; renaming columns: %s", rename_map)
-        decoded_meta_df = decoded_meta_df.rename(columns=rename_map)
-
-    # As a soft fallback, rebuild from the original index if still missing
-    if "Dataset" not in decoded_meta_df.columns:
-        if isinstance(df_scaled_all.index, pd.MultiIndex) and df_scaled_all.index.nlevels >= 1:
-            decoded_meta_df["Dataset"] = df_scaled_all.index.get_level_values(0).to_numpy()
-            logger.warning("Constructed 'Dataset' from original index.")
-        else:
-            decoded_meta_df["Dataset"] = "unknown"
-            logger.warning("Could not recover 'Dataset'; filled with 'unknown'.")
-
-    if "Sample" not in decoded_meta_df.columns:
-        if isinstance(df_scaled_all.index, pd.MultiIndex) and df_scaled_all.index.nlevels >= 2:
-            decoded_meta_df["Sample"] = df_scaled_all.index.get_level_values(1).to_numpy()
-            logger.warning("Constructed 'Sample' from original index.")
-        else:
-            decoded_meta_df["Sample"] = np.arange(len(decoded_meta_df), dtype=int)
-            logger.warning("Could not recover 'Sample'; using 0..n-1 sequence.")
-
-    # Keep only what we need (IMPORTANT: check columns on decoded_meta_df, not df_scaled_all)
-    keep_cols = ["Dataset", "Sample"] + [c for c in meta_cols if c in decoded_meta_df.columns]
-    decoded_meta_df = decoded_meta_df.loc[:, keep_cols].copy()
-
-
+    # Keep a decoded metadata view for later merge
+    decoded_meta_df = decode_labels(df=df_encoded.copy(), encoders=encoders, logger=logger)[
+        ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
+    ].reset_index()
 
     # =========================
     # Mode: reference-only flow
@@ -684,7 +2476,7 @@ def main(args: argparse.Namespace) -> None:
 
 
             # Prepare and predict training references
-            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_encoded)
+            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(reference_df)
             latent_dict = model.predict(data_dict)
 
             latent_frames = []
@@ -701,7 +2493,7 @@ def main(args: argparse.Namespace) -> None:
             # Train a new model on references
             logger.info("Training new CLIPn model on reference datasets")
             latent_df, cpd_ids, model, dataset_key_mapping = run_clipn_integration(
-                df=df_encoded,
+                df=reference_df,
                 logger=logger,
                 clipn_param=args.clipn_param,
                 output_path=args.out,
