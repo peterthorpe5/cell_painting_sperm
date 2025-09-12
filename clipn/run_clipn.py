@@ -1656,6 +1656,9 @@ def encode_labels(df: pd.DataFrame, logger: logging.Logger) -> tuple[pd.DataFram
             logger.info("encode_labels: Encoded 'cpd_type' with %d classes.", len(le.classes_))
         else:
             logger.warning("encode_labels: 'cpd_type' present but all values are NA; left as-is.")
+            # Ensure dtype is integer-compatible even when all values are NA
+            out["cpd_type"] = pd.Series(pd.NA, index=out.index, dtype="Int64")
+
     return out, encoders
 
 
