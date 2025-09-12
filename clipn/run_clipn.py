@@ -93,7 +93,10 @@ if torch.cuda.is_available():
 from cell_painting.process_data import (
     prepare_data_for_clipn_from_df,
     run_clipn_simple,
-    standardise_metadata_columns,)
+    standardise_metadata_columns,
+    assert_cpd_type_encoded,
+    validate_frozen_features_manifest,
+    assert_xy_alignment_strict)
 
 # Global timer (for memory log timestamps)
 _SCRIPT_START_TIME = time.time()
@@ -904,6 +907,14 @@ def aggregate_latent_from_decoded(
 # Technical, non-biological columns that must never be used as features
 TECHNICAL_FEATURE_BLOCKLIST = {"ImageNumber","Number_Object_Number","ObjectNumber","TableNumber"}
 
+# Columns that are metadata (never model inputs), case-insensitive match by name
+METADATA_COL_BLOCKLIST = {
+    "cpd_id", "cpd_type", "dataset", "sample", "replicate", "library",
+    "plate_metadata", "well_metadata", "plate", "well",
+    "chemid", "compound_id", "concentration", "dose", "timepoint", "batch", "site"
+}
+
+
 def _exclude_technical_features(cols, logger):
     """Remove any technical columns from a list of feature columns."""
     dropped = sorted(c for c in cols if c in TECHNICAL_FEATURE_BLOCKLIST)
@@ -1618,37 +1629,38 @@ def decode_labels(df: pd.DataFrame, encoders: Dict[str, LabelEncoder], logger: l
     return df
 
 
-def encode_labels(df: pd.DataFrame, logger: logging.Logger) -> Tuple[pd.DataFrame, Dict[str, LabelEncoder]]:
+def encode_labels(df: pd.DataFrame, logger: logging.Logger) -> tuple[pd.DataFrame, dict[str, LabelEncoder]]:
     """
-    Encode object/category columns (excluding 'cpd_id') using LabelEncoder.
+    Encode label columns needed for downstream evaluation, without leaking
+    metadata into features. Only 'cpd_type' is encoded; 'cpd_id', 'Library',
+    'Plate_Metadata', 'Well_Metadata', and 'Dataset' remain as-is.
 
     Parameters
     ----------
-    df : pd.DataFrame
-        DataFrame to encode.
+    df : pandas.DataFrame
+        Input table with metadata and features.
     logger : logging.Logger
-        Logger for debug information.
+        Logger for progress messages.
 
     Returns
     -------
     tuple[pd.DataFrame, dict[str, LabelEncoder]]
-        The encoded DataFrame and a mapping of column name to LabelEncoder.
+        (df_encoded, encoders)
     """
     encoders: Dict[str, LabelEncoder] = {}
-    skip_columns = {"cpd_id"}
+    out = df.copy()
 
-    obj_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
-    logger.info("Encoding %d object/category columns (excluding 'cpd_id' if present).", len(obj_cols))
-
-    for col in obj_cols:
-        if col in skip_columns:
-            logger.debug("Skipping encoding for column '%s'", col)
-            continue
+    if "cpd_type" in out.columns:
+        out.loc[:, "cpd_type"] = out["cpd_type"].astype("string")
         le = LabelEncoder()
-        df.loc[:, col] = le.fit_transform(df[col])
-        encoders[col] = le
-        logger.debug("Encoded column '%s' with %d classes.", col, len(le.classes_))
-    return df, encoders
+        mask = out["cpd_type"].notna()
+        if mask.any():
+            out.loc[mask, "cpd_type"] = le.fit_transform(out.loc[mask, "cpd_type"])
+            encoders["cpd_type"] = le
+            logger.info("encode_labels: Encoded 'cpd_type' with %d classes.", len(le.classes_))
+        else:
+            logger.warning("encode_labels: 'cpd_type' present but all values are NA; left as string.")
+    return out, encoders
 
 
 # ====================
@@ -1727,6 +1739,95 @@ def _apply_threads(n: int, logger):
 
 
 
+def select_clipn_features_and_write(
+    df: pd.DataFrame,
+    out_dir: str | Path,
+    experiment: str,
+    logger: logging.Logger,
+    features_expected: list[str] | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Select the final CLIPn feature set, exclude all metadata (incl. 'cpd_type'),
+    enforce column order, and write QC files.
+
+    Rules
+    -----
+    - Keep only numeric columns.
+    - Exclude any column whose lower-cased name is in METADATA_COL_BLOCKLIST.
+    - Always exclude 'cpd_type' even if encoded as integers.
+    - If `features_expected` is provided (projection), reindex to that exact list
+      and raise if any are missing.
+    - Write:
+        <out_dir>/<experiment>_features_used.tsv   (ordered list of features)
+        <out_dir>/<experiment>_columns_full.tsv    (all columns + dtype + is_feature)
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table containing features + metadata.
+    out_dir : str | pathlib.Path
+        Output directory for QC files.
+    experiment : str
+        Name for output files.
+    logger : logging.Logger
+        Logger.
+    features_expected : list[str] | None
+        Known-good ordered feature list to enforce (for projection).
+
+    Returns
+    -------
+    tuple[pd.DataFrame, list[str]]
+        (df_features_only, feature_cols)
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Start with numeric columns only
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    # Case-insensitive metadata exclusion (incl. cpd_type)
+    meta_lower = {m.lower() for m in METADATA_COL_BLOCKLIST}
+    def is_meta(col: str) -> bool:
+        return col.lower() in meta_lower
+
+    feature_cols = [c for c in numeric_cols if not is_meta(c) and c != "cpd_type"]
+
+    if features_expected is not None:
+        missing = [c for c in features_expected if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"Missing {len(missing)} expected feature(s): {missing[:10]} ..."
+            )
+        feature_cols = list(features_expected)
+
+    if not feature_cols:
+        raise ValueError("No usable numeric feature columns after excluding metadata.")
+
+    df_features = df.loc[:, feature_cols].copy()
+
+    # QC manifests
+    feats_path = out_dir / f"{experiment}_features_used.tsv"
+    cols_path = out_dir / f"{experiment}_columns_full.tsv"
+
+    feats_df = pd.DataFrame(
+        {"feature": feature_cols, "dtype": [str(df[c].dtype) for c in feature_cols]}
+    )
+    safe_to_csv(df=feats_df, path=feats_path, sep="\t", logger=logger)
+
+    cols_df = pd.DataFrame(
+        {
+            "column": list(df.columns),
+            "dtype": [str(df[c].dtype) for c in df.columns],
+            "is_feature": [c in feature_cols for c in df.columns],
+        }
+    )
+    safe_to_csv(df=cols_df, path=cols_path, sep="\t", logger=logger)
+
+    logger.info("Feature freeze complete: %d features", len(feature_cols))
+    return df_features, feature_cols
+
+
+
 
 def run_clipn_integration(
     df: pd.DataFrame,
@@ -1777,19 +1878,45 @@ def run_clipn_integration(
     """
     logger.info("Running CLIPn integration with param: %s", clipn_param)
 
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    logger.info("Numeric feature column count: %d", len(numeric_cols))
     logger.info("Combined DataFrame shape: %s", df.shape)
     logger.debug("Head of combined DataFrame:\n%s", df.head())
 
-    if not numeric_cols:
-        logger.error(
-            "No numeric feature columns found after harmonisation. "
-            "Possible causes: no overlap of features, all numeric columns are NaN, or wrong dtypes."
-        )
-        raise ValueError("No numeric columns available for CLIPn.")
+    # Central feature freeze (training path): write QC + remove all metadata
+    df_features, feature_cols = select_clipn_features_and_write(
+        df=df,
+        out_dir=output_path,
+        experiment=experiment,
+        logger=logger,
+        features_expected=None,
+    )
 
-    data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df)
+    # Get dataset keys + labels (y) from the FULL df (which still has 'cpd_type')
+    _, label_dict, label_mappings, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df)
+
+    # Build data_dict (X) from the frozen feature table to ensure no metadata leak
+    data_dict: Dict[int, np.ndarray] = {}
+    for key, name in dataset_key_mapping.items():
+        # keep row order identical to df / label_dict by slicing with the MultiIndex
+        X_block = df_features.loc[name].droplevel("Dataset")
+        data_dict[key] = X_block.values
+
+    # many sanity checks!!
+    # 1) cpd_type must be integer-encoded in the full df used for labels
+    assert_cpd_type_encoded(df=df, logger=logger)
+
+    # 2) frozen feature file must not contain metadata or 'cpd_type'
+    feature_list_path = Path(output_path) / f"{experiment}_features_used.tsv"
+    _ = validate_frozen_features_manifest(feature_list_path=feature_list_path, logger=logger)
+
+    # 3) lengths of X and y must match for every dataset id
+    assert_xy_alignment_strict(X=data_dict, y=label_dict, logger=logger)
+
+    logger.info(
+        "Prepared data for CLIPn: %d datasets, feature dim=%d, labels per dataset: %s",
+        len(data_dict), len(feature_cols), {k: len(v) for k, v in label_dict.items()}
+    )
+
+
     latent_dict, model, loss = run_clipn_simple(
         data_dict,
         label_dict,
@@ -1797,6 +1924,7 @@ def run_clipn_integration(
         lr=lr,
         epochs=epochs,
     )
+
     logger.info("CLIPn training completed.")
     # Save loss curve (TSV + PNG) if available
     if plot_loss and loss is not None:
@@ -2476,7 +2604,23 @@ def main(args: argparse.Namespace) -> None:
 
 
             # Prepare and predict training references
-            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(reference_df)
+            # Prepare and predict training references (freeze features; re-use expected list if present)
+            feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
+            if feature_list_path.exists():
+                features_expected = pd.read_csv(feature_list_path, sep="\t")["feature"].tolist()
+            else:
+                features_expected = None  # will freeze now
+
+            ref_features, _ = select_clipn_features_and_write(
+                df=reference_df,
+                out_dir=args.out,
+                experiment=args.experiment,
+                logger=logger,
+                features_expected=features_expected,
+            )
+            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(ref_features)
+
+
             latent_dict = model.predict(data_dict)
 
             latent_frames = []
@@ -2570,14 +2714,23 @@ def main(args: argparse.Namespace) -> None:
             # Build model input for queries (drop metadata cols that the model should not see)
             dataset_key_mapping_inv = {v: k for k, v in dataset_key_mapping.items()}
             query_groups = query_df.groupby(level="Dataset", sort=False)
-            cols_to_drop = [
-                c for c in ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Well_Metadata"]
-                if c in query_df.columns
-            ]
-            query_data_dict_corrected = {
-                dataset_key_mapping_inv[name]: group.droplevel("Dataset").drop(columns=cols_to_drop).values
-                for name, group in query_groups if name in dataset_key_mapping_inv
-            }
+
+            # Load frozen training feature order
+            feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
+            features_expected = pd.read_csv(feature_list_path, sep="\t")["feature"].tolist()
+
+            meta_drop = [c for c in query_df.columns if c.lower() in {m.lower() for m in METADATA_COL_BLOCKLIST}]
+
+            query_data_dict_corrected: Dict[int, np.ndarray] = {}
+            for name, group in query_groups:
+                if name not in dataset_key_mapping_inv:
+                    continue
+                X = group.droplevel("Dataset").drop(columns=meta_drop, errors="ignore")
+                missing = [c for c in features_expected if c not in X.columns]
+                if missing:
+                    raise ValueError(f"[{name}] Missing {len(missing)} expected feature(s): {missing[:10]} ...")
+                X = X.reindex(columns=features_expected)
+                query_data_dict_corrected[dataset_key_mapping_inv[name]] = X.values
 
             projected_dict = model.predict(query_data_dict_corrected)
             if not projected_dict:
@@ -2633,10 +2786,27 @@ def main(args: argparse.Namespace) -> None:
             model = torch_load_compat(model_path=model_path, weights_only=False)
 
 
+            # Prepare and predict latent with loaded model (use frozen features/order)
+            feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
+            features_expected = pd.read_csv(feature_list_path, sep="\t")["feature"].tolist() if feature_list_path.exists() else None
 
-            # Prepare and predict latent with loaded model
-            data_dict, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_encoded)
+            feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
+            _ = validate_frozen_features_manifest(feature_list_path=feature_list_path, logger=logger)
+            df_features, _ = select_clipn_features_and_write(
+                df=df_encoded,
+                out_dir=args.out,
+                experiment=args.experiment,
+                logger=logger,
+                features_expected=features_expected,
+            )
+
+            # Build data_dict (X) from frozen features; labels not needed for prediction
+            _, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_encoded)  # for ids + keys only
+            data_dict = {k: df_features.loc[name].droplevel("Dataset").values
+                        for k, name in dataset_key_mapping.items()}
+
             latent_dict = model.predict(data_dict)
+
 
             latent_frames = []
             for i, latent in latent_dict.items():

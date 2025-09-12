@@ -13,6 +13,8 @@ import time
 import argparse
 import re
 import os
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 import logging
 import numpy as np
 import pandas as pd
@@ -42,6 +44,17 @@ from scipy.spatial.distance import squareform
 import optuna
 logger = logging.getLogger(__name__)
 
+
+
+# Technical, non-biological columns that must never be used as features
+TECHNICAL_FEATURE_BLOCKLIST = {"ImageNumber","Number_Object_Number","ObjectNumber","TableNumber"}
+
+# Columns that are metadata (never model inputs), case-insensitive match by name
+METADATA_COL_BLOCKLIST = {
+    "cpd_id", "cpd_type", "dataset", "sample", "replicate", "library",
+    "plate_metadata", "well_metadata", "plate", "well",
+    "chemid", "compound_id", "concentration", "dose", "timepoint", "batch", "site"
+}
 
 
 
@@ -1042,69 +1055,117 @@ def encode_cpd_data(dataframes, encode_labels=False):
         results[name] = output
     return results
 
-def prepare_data_for_clipn_from_df(df):
+
+
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+import pandas as pd
+
+
+def prepare_data_for_clipn_from_df(
+    df: pd.DataFrame,
+) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray],
+           Dict[str, Optional[Dict[int, str]]], Dict[str, List[str]],
+           Dict[int, str]]:
     """
-    Prepares input data for CLIPn training from a MultiIndex DataFrame.
+    Build CLIPn-ready dictionaries from a MultiIndex DataFrame.
+
+    Assumptions
+    -----------
+    - Index is a MultiIndex with levels ['Dataset', 'Sample'].
+    - 'cpd_type' has been globally label-encoded to integer already.
+    - Input features X must exclude all metadata (case-insensitive match
+      against METADATA_COL_BLOCKLIST and TECHNICAL_FEATURE_BLOCKLIST),
+      and must exclude 'cpd_type' even if it is integer-encoded.
 
     Parameters
     ----------
-    df : pd.DataFrame
-        Input DataFrame with MultiIndex (Dataset, Sample). Should contain numeric features and metadata.
+    df : pandas.DataFrame
+        Input table indexed by ('Dataset', 'Sample'), containing numeric
+        features and metadata columns (e.g., 'cpd_id', 'cpd_type').
 
     Returns
     -------
     tuple
-        data_dict : dict
-            Dictionary mapping integer ID to feature matrix (np.ndarray).
-        label_dict : dict
-            Dictionary mapping integer ID to label vector (np.ndarray).
-        label_mappings : dict
-            Dictionary mapping dataset name to {label_id: label_name}.
-        cpd_ids : dict
-            Dictionary mapping dataset name to list of compound IDs.
-        dataset_key_mapping : dict
-            Dictionary mapping integer keys to original dataset names.
+        data_dict : dict[int, np.ndarray]
+            Integer dataset key -> feature matrix (X), numeric only and
+            metadata-free.
+        label_dict : dict[int, np.ndarray]
+            Integer dataset key -> encoded labels (y) taken directly from
+            the (already-encoded) 'cpd_type' column. If absent, an empty
+            array of length N is returned for that dataset.
+        label_mappings : dict[str, Optional[dict[int, str]]]
+            Per-dataset label mapping placeholder (None here; keep the
+            global LabelEncoder mapping elsewhere).
+        cpd_ids : dict[str, list[str]]
+            Dataset name -> list of 'cpd_id' values aligned to rows (empty
+            strings if column absent).
+        dataset_key_mapping : dict[int, str]
+            Integer-to-dataset-name mapping for CLIPn.
+
+    Raises
+    ------
+    ValueError
+        If the index is not a MultiIndex with names ['Dataset', 'Sample'].
+        If 'cpd_type' exists but is not integer-encoded.
     """
-    from collections import defaultdict
+    if not isinstance(df.index, pd.MultiIndex) or df.index.names != ["Dataset", "Sample"]:
+        raise ValueError("Expected a MultiIndex with levels ['Dataset', 'Sample'].")
 
-    data_dict = {}
-    label_dict = {}
-    label_mappings = {}
-    cpd_ids = {}
+    # Use the global blocklists defined elsewhere in this module.
+    # They must be available in the module scope:
+    #   TECHNICAL_FEATURE_BLOCKLIST = {...}
+    #   METADATA_COL_BLOCKLIST = {...}
+    meta_lower = {m.lower() for m in METADATA_COL_BLOCKLIST | TECHNICAL_FEATURE_BLOCKLIST}
 
-    # Ensure it's a MultiIndex
-    if not isinstance(df.index, pd.MultiIndex):
-        raise ValueError("Expected a MultiIndex DataFrame with levels ['Dataset', 'Sample']")
+    def is_meta(col: str) -> bool:
+        return col.lower() in meta_lower
 
-    dataset_keys = df.index.get_level_values('Dataset').unique()
+    data_dict_by_name: Dict[str, np.ndarray] = {}
+    label_dict_by_name: Dict[str, np.ndarray] = {}
+    label_mappings: Dict[str, Optional[Dict[int, str]]] = {}
+    cpd_ids: Dict[str, List[str]] = {}
 
-    for dataset_name in dataset_keys:
-        dataset_df = df.loc[dataset_name]
+    dataset_names = df.index.get_level_values("Dataset").unique().tolist()
 
-        # Get feature columns (exclude metadata)
-        feature_cols = dataset_df.select_dtypes(include=[np.number]).columns.tolist()
-        meta_cols = ['cpd_id', 'cpd_type', 'Library']
-        feature_cols = [col for col in feature_cols if col not in meta_cols]
+    for ds_name in dataset_names:
+        ds_df = df.loc[ds_name]
 
-        X = dataset_df[feature_cols].to_numpy()
-        y = dataset_df['cpd_type'].astype(str).to_numpy()
-        ids = dataset_df['cpd_id'].astype(str).tolist()
+        # Labels (y): use globally encoded integers if present
+        if "cpd_type" in ds_df.columns:
+            if not pd.api.types.is_integer_dtype(ds_df["cpd_type"]):
+                raise ValueError(
+                    "Column 'cpd_type' must be globally label-encoded to integer "
+                    "before calling prepare_data_for_clipn_from_df()."
+                )
+            # Fill any NA with -1 to keep dtype stable (model can ignore -1s if needed)
+            y = ds_df["cpd_type"].fillna(-1).astype(int).to_numpy()
+        else:
+            y = np.empty((len(ds_df),), dtype=int)
 
-        unique_labels = sorted(set(y))
-        label_map = {label: idx for idx, label in enumerate(unique_labels)}
-        y_encoded = np.array([label_map[label] for label in y])
+        # Features (X): numeric only, drop all metadata and 'cpd_type'
+        numeric_cols = ds_df.select_dtypes(include=[np.number]).columns.tolist()
+        feature_cols = [c for c in numeric_cols if (not is_meta(c)) and c != "cpd_type"]
+        X = ds_df.loc[:, feature_cols].to_numpy()
 
-        data_dict[dataset_name] = X
-        label_dict[dataset_name] = y_encoded
-        label_mappings[dataset_name] = {v: k for k, v in label_map.items()}
-        cpd_ids[dataset_name] = ids
+        # IDs aligned to rows
+        if "cpd_id" in ds_df.columns:
+            ids = ds_df["cpd_id"].astype(str).tolist()
+        else:
+            ids = ["" for _ in range(len(ds_df))]
 
-    # Reindex with integers for CLIPn compatibility
-    indexed_data_dict = {i: data_dict[k] for i, k in enumerate(data_dict)}
-    indexed_label_dict = {i: label_dict[k] for i, k in enumerate(label_dict)}
-    dataset_key_mapping = {i: k for i, k in enumerate(data_dict)}
+        data_dict_by_name[ds_name] = X
+        label_dict_by_name[ds_name] = y
+        label_mappings[ds_name] = None  # keep global mapping externally
+        cpd_ids[ds_name] = ids
 
-    return indexed_data_dict, indexed_label_dict, label_mappings, cpd_ids, dataset_key_mapping
+    # Reindex dataset keys to integers for CLIPn
+    dataset_key_mapping: Dict[int, str] = {i: name for i, name in enumerate(data_dict_by_name.keys())}
+    data_dict: Dict[int, np.ndarray] = {i: data_dict_by_name[name] for i, name in dataset_key_mapping.items()}
+    label_dict: Dict[int, np.ndarray] = {i: label_dict_by_name[name] for i, name in dataset_key_mapping.items()}
+
+    return data_dict, label_dict, label_mappings, cpd_ids, dataset_key_mapping
+
 
 
 def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experiment_label_mapping,
@@ -1404,3 +1465,106 @@ def restore_multiindex(imputed_df, index_backup, dataset_name="Unknown"):
         logger.error(f"{dataset_name}: Failed to restore MultiIndex: {e}")
 
     return imputed_df
+
+
+
+
+def assert_cpd_type_encoded(*, df: pd.DataFrame, logger: logging.Logger) -> None:
+    """
+    Assert that 'cpd_type' exists and is globally label-encoded to integer.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table expected to contain an integer-encoded 'cpd_type' column.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Raises
+    ------
+    ValueError
+        If 'cpd_type' is missing or not integer dtype.
+    """
+    if "cpd_type" not in df.columns:
+        raise ValueError("Expected column 'cpd_type' before CLIPn training.")
+    if not pd.api.types.is_integer_dtype(df["cpd_type"]):
+        raise ValueError("Column 'cpd_type' must be globally integer-encoded before training.")
+    n_na = int(df["cpd_type"].isna().sum())
+    if n_na:
+        logger.warning("cpd_type contains %d NA values; these rows may be ignored by the trainer.", n_na)
+    logger.info("cpd_type dtype is integer; OK.")
+
+
+def validate_frozen_features_manifest(
+    *,
+    feature_list_path: Path,
+    logger: logging.Logger,
+) -> list[str]:
+    """
+    Validate that the frozen feature manifest contains no metadata or 'cpd_type'.
+
+    Parameters
+    ----------
+    feature_list_path : pathlib.Path
+        Path to the '<experiment>_features_used.tsv' file.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    list[str]
+        Ordered list of features from the manifest.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the manifest file does not exist.
+    ValueError
+        If any metadata or 'cpd_type' is present in the feature list.
+    """
+    if not feature_list_path.exists():
+        raise FileNotFoundError(f"Frozen feature manifest not found: {feature_list_path}")
+
+    feats = pd.read_csv(feature_list_path, sep="\t")["feature"].astype(str).tolist()
+    lower = {f.lower() for f in feats}
+    meta = {m.lower() for m in (METADATA_COL_BLOCKLIST | TECHNICAL_FEATURE_BLOCKLIST)}  # uses your globals
+    bad = lower.intersection(meta.union({"cpd_type"}))
+    if bad:
+        raise ValueError(f"Feature manifest contains metadata columns: {sorted(bad)}")
+    logger.info("Frozen feature manifest validated: %d features; no metadata present.", len(feats))
+    return feats
+
+
+def assert_xy_alignment_strict(
+    *,
+    X: Dict[int, np.ndarray],
+    y: Dict[int, np.ndarray],
+    logger: logging.Logger,
+) -> None:
+    """
+    Strictly assert that X and y lengths match per dataset.
+
+    Parameters
+    ----------
+    X : dict[int, numpy.ndarray]
+        Feature matrices per dataset id.
+    y : dict[int, numpy.ndarray]
+        Label vectors per dataset id.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Raises
+    ------
+    ValueError
+        If any dataset has a length mismatch.
+    """
+    for k in sorted(set(X) | set(y)):
+        if k not in X:
+            raise ValueError(f"Dataset id {k} present in y but missing in X.")
+        if k not in y:
+            raise ValueError(f"Dataset id {k} present in X but missing in y.")
+        nx = int(X[k].shape[0])
+        ny = int(len(y[k]))
+        if nx != ny:
+            raise ValueError(f"Length mismatch for dataset id {k}: X={nx}, y={ny}.")
+    logger.info("X/y alignment OK across %d dataset(s).", len(X))
