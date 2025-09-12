@@ -96,7 +96,8 @@ from cell_painting.process_data import (
     standardise_metadata_columns,
     assert_cpd_type_encoded,
     validate_frozen_features_manifest,
-    assert_xy_alignment_strict)
+    assert_xy_alignment_strict,
+    validate_frozen_features_manifest)
 
 # Global timer (for memory log timestamps)
 _SCRIPT_START_TIME = time.time()
@@ -1916,7 +1917,6 @@ def run_clipn_integration(
         len(data_dict), len(feature_cols), {k: len(v) for k, v in label_dict.items()}
     )
 
-
     latent_dict, model, loss = run_clipn_simple(
         data_dict,
         label_dict,
@@ -2801,11 +2801,31 @@ def main(args: argparse.Namespace) -> None:
             )
 
             # Build data_dict (X) from frozen features; labels not needed for prediction
-            _, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_encoded)  # for ids + keys only
-            data_dict = {k: df_features.loc[name].droplevel("Dataset").values
-                        for k, name in dataset_key_mapping.items()}
+            # Prepare and predict latent with loaded model (manifest-enforced features)
+            feature_list_path = Path(args.out) / f"{args.experiment}_features_used.tsv"
+            features_expected = validate_frozen_features_manifest(
+                feature_list_path=feature_list_path,
+                logger=logger,
+            )
+
+            # Freeze to the saved feature order; never let metadata creep in
+            df_features, _ = select_clipn_features_and_write(
+                df=df_encoded,
+                out_dir=args.out,
+                experiment=args.experiment,
+                logger=logger,
+                features_expected=features_expected,
+            )
+
+            # Build data_dict using the frozen features but keep the dataset key mapping from the full df
+            _, _, _, cpd_ids, dataset_key_mapping = prepare_data_for_clipn_from_df(df_encoded)
+            data_dict = {
+                k: df_features.loc[name].droplevel("Dataset").values
+                for k, name in dataset_key_mapping.items()
+            }
 
             latent_dict = model.predict(data_dict)
+
 
 
             latent_frames = []
