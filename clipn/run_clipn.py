@@ -1894,10 +1894,14 @@ def run_clipn_integration(
 
     # Build data_dict (X) from the frozen feature table to ensure no metadata leak
     data_dict: Dict[int, np.ndarray] = {}
+    if not isinstance(df_features.index, pd.MultiIndex) or "Dataset" not in df_features.index.names:
+        raise ValueError("df_features must have a MultiIndex with level 'Dataset' before building data_dict.")
+
     for key, name in dataset_key_mapping.items():
-        # keep row order identical to df / label_dict by slicing with the MultiIndex
-        X_block = df_features.loc[name].droplevel("Dataset")
+        # robust to MultiIndex; returns a frame indexed by 'Sample'
+        X_block = df_features.xs(name, level="Dataset", drop_level=True)
         data_dict[key] = X_block.values
+
 
     # many sanity checks!!
     # 1) cpd_type must be integer-encoded in the full df used for labels
