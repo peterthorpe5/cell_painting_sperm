@@ -2937,6 +2937,7 @@ def main(args: argparse.Namespace) -> None:
         logger.warning("Dropped %d rows with missing cpd_id after decoding/merge.", n_before - n_after)
 
     # Optionally L2-normalise latent columns (default: on)
+    # modifies inplace
     if not args.no_l2_normalise_latent:
         _latent_cols_normed = l2_normalise_latent_columns(df=decoded_df, logger=logger)
         if _latent_cols_normed:
