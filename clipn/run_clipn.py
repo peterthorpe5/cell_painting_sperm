@@ -1738,6 +1738,64 @@ def _apply_threads(n: int, logger):
 
 
 
+def l2_normalise_rows_torch(*, x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    Return a row-wise L2-normalised copy of a 2D tensor.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Tensor of shape (n_samples, n_features) to be normalised per row.
+    eps : float
+        Small positive constant to avoid division by zero.
+
+    Returns
+    -------
+    torch.Tensor
+        Row-wise L2-normalised tensor with the same shape as `x`.
+    """
+    norms = x.norm(p=2, dim=1, keepdim=True).clamp_min(eps)
+    return x / norms
+
+
+
+def l2_normalise_latent_columns(*, df: pd.DataFrame, logger: logging.Logger, eps: float = 1e-12) -> list[str]:
+    """
+    L2-normalise the latent-space columns (integer-named: '0','1',...) row-wise.
+
+    Behaviour
+    ---------
+    - Detects latent columns by integer-like names (e.g. '0','1',...).
+    - Divides each row vector by its L2 norm (with a small stabiliser `eps`).
+    - Operates in-place on `df` (returns the list of columns normalised).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Decoded table that includes latent dimension columns.
+    logger : logging.Logger
+        Logger for status messages.
+    eps : float, optional
+        Numerical stabiliser to avoid division by zero, by default 1e-12.
+
+    Returns
+    -------
+    list[str]
+        The latent column names that were normalised.
+    """
+    latent_cols = [c for c in df.columns if str(c).isdigit()]
+    if not latent_cols:
+        logger.warning("No integer-named latent columns found to L2-normalise.")
+        return []
+
+    X = df.loc[:, latent_cols].to_numpy(copy=False)
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    np.maximum(norms, eps, out=norms)   # clamp to eps
+    df.loc[:, latent_cols] = X / norms
+    logger.info("Applied L2-normalisation to %d latent columns.", len(latent_cols))
+    return latent_cols
+
+
 def select_clipn_features_and_write(
     df: pd.DataFrame,
     out_dir: str | Path,
@@ -2878,6 +2936,15 @@ def main(args: argparse.Namespace) -> None:
     if n_before != n_after:
         logger.warning("Dropped %d rows with missing cpd_id after decoding/merge.", n_before - n_after)
 
+    # Optionally L2-normalise latent columns (default: on)
+    if not args.no_l2_normalise_latent:
+        _latent_cols_normed = l2_normalise_latent_columns(df=decoded_df, logger=logger)
+        if _latent_cols_normed:
+            logger.info("L2-normalised latent columns prior to saving and diagnostics.")
+    else:
+        logger.info("Skipping L2-normalisation of latent columns (--no_l2_normalise_latent set).")
+
+
     # Persist decoded outputs (TSV only)
     main_decoded_path = Path(args.out) / f"{args.experiment}_decoded.tsv"
     safe_to_csv(df=decoded_df,
@@ -3107,6 +3174,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable post-training diagnostics (Precision@k, mixing entropy, silhouette, variance, WBDR).",
     )
+
+    parser.add_argument(
+    "--no_l2_normalise_latent",
+    action="store_true",
+    help="Do not L2-normalise latent vectors before saving/diagnostics "
+         "(default behaviour is to normalise).",  )
+
+
     parser.add_argument(
         "--diag_level",
         choices=["compound", "image"],
