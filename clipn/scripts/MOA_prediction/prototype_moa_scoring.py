@@ -249,10 +249,16 @@ def build_moa_prototypes(
     n_prototypes_per_moa: int = 1,
     prototype_method: str = "median",
     prototype_shrinkage: float = 0.0,
+    min_members_per_moa: int = 1,
+    skip_tiny_moas: bool = False,
+    adaptive_shrinkage: bool = False,
+    adaptive_shrinkage_c: float = 0.5,
+    adaptive_shrinkage_max: float = 0.3,
     random_seed: int = 0,
 ) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
     """
-    Build one or more prototypes per MOA.
+    Build one or more prototypes per MOA, with optional minimum-members gate
+    and size-aware (adaptive) shrinkage for small-n prototypes.
 
     Parameters
     ----------
@@ -270,7 +276,19 @@ def build_moa_prototypes(
     prototype_method : str, optional
         'median' or 'mean' when n_prototypes_per_moa == 1, by default 'median'.
     prototype_shrinkage : float, optional
-        Shrinkage towards the global mean (0..1), by default 0.0.
+        Baseline shrinkage towards the global mean (0..1), by default 0.0.
+    min_members_per_moa : int, optional
+        Minimum labelled members to form a prototype, by default 1.
+    skip_tiny_moas : bool, optional
+        If True, MOAs with < min_members_per_moa are skipped; otherwise they
+        are kept, but may be stabilised via adaptive shrinkage if enabled.
+    adaptive_shrinkage : bool, optional
+        If True, add a size-aware term alpha_add = min(adaptive_shrinkage_max,
+        adaptive_shrinkage_c / n_members). Effective alpha is clamped to [0, 1].
+    adaptive_shrinkage_c : float, optional
+        C constant for the size-aware term (default 0.5).
+    adaptive_shrinkage_max : float, optional
+        Maximum size-aware addition (default 0.3).
     random_seed : int, optional
         Random seed for subclustering, by default 0.
 
@@ -278,7 +296,8 @@ def build_moa_prototypes(
     -------
     Tuple[pd.DataFrame, np.ndarray, List[str]]
         (prototypes_summary_df, P_matrix, proto_moas)
-        - prototypes_summary_df: columns [moa, proto_index, n_members, method]
+        - prototypes_summary_df: columns [moa, proto_index, n_members,
+          method, shrinkage_effective]
         - P_matrix: prototype matrix (n_prototypes x d), L2-normalised
         - proto_moas: per-prototype MOA labels (length n_prototypes)
     """
@@ -297,6 +316,13 @@ def build_moa_prototypes(
     labelled = labelled[labelled[id_col].isin(id_idx.keys())]
     moa_groups = labelled.groupby(moa_col)
 
+    def effective_alpha(n_members: int) -> float:
+        """Combine baseline and optional size-aware shrinkage; clamp to [0, 1]."""
+        alpha = float(prototype_shrinkage)
+        if adaptive_shrinkage and n_members > 0:
+            alpha += min(float(adaptive_shrinkage_max), float(adaptive_shrinkage_c) / float(n_members))
+        return float(min(1.0, max(0.0, alpha)))
+
     P_list: List[np.ndarray] = []
     proto_moas: List[str] = []
     summary_rows: List[Dict[str, object]] = []
@@ -304,6 +330,15 @@ def build_moa_prototypes(
     for moa, sub in moa_groups:
         idxs = [id_idx[c] for c in sub[id_col].tolist()]
         X_m = X_all[idxs, :]
+        n_members_moa = int(X_m.shape[0])
+
+        # Tiny MOA gate
+        if n_members_moa < int(min_members_per_moa) and bool(skip_tiny_moas):
+            summary_rows.append(
+                {"moa": moa, "proto_index": -1, "n_members": n_members_moa,
+                 "method": "skipped_tiny", "shrinkage_effective": 0.0}
+            )
+            continue
 
         if n_prototypes_per_moa <= 1 or X_m.shape[0] <= 2:
             if prototype_method == "median":
@@ -312,14 +347,17 @@ def build_moa_prototypes(
                 proto = np.mean(X_m, axis=0)
             else:
                 raise ValueError(f"Unknown prototype_method '{prototype_method}'")
-            if prototype_shrinkage > 0:
-                proto = (1 - prototype_shrinkage) * proto + prototype_shrinkage * gmean
+
+            alpha = effective_alpha(n_members=n_members_moa)
+            if alpha > 0:
+                proto = (1 - alpha) * proto + alpha * gmean
             proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
+
             P_list.append(proto)
             proto_moas.append(str(moa))
             summary_rows.append(
-                {"moa": moa, "proto_index": 0, "n_members": int(X_m.shape[0]),
-                 "method": f"{prototype_method}(shrink={prototype_shrinkage})"}
+                {"moa": moa, "proto_index": 0, "n_members": n_members_moa,
+                 "method": f"{prototype_method}", "shrinkage_effective": float(alpha)}
             )
         else:
             # k-means within this MOA to create sub-prototypes
@@ -330,32 +368,49 @@ def build_moa_prototypes(
                 labels = km.fit_predict(X_m)
                 for j in range(n_k):
                     sel = X_m[labels == j, :]
-                    if sel.shape[0] == 0:
+                    n_sub = int(sel.shape[0])
+                    if n_sub == 0:
                         continue
+                    # Tiny subcluster gate mirrors the MOA-level gate
+                    if n_sub < int(min_members_per_moa) and bool(skip_tiny_moas):
+                        summary_rows.append(
+                            {"moa": moa, "proto_index": j, "n_members": n_sub,
+                             "method": "skipped_tiny_subcluster", "shrinkage_effective": 0.0}
+                        )
+                        continue
+
                     proto = np.median(sel, axis=0) if prototype_method == "median" else np.mean(sel, axis=0)
-                    if prototype_shrinkage > 0:
-                        proto = (1 - prototype_shrinkage) * proto + prototype_shrinkage * gmean
+
+                    alpha = effective_alpha(n_members=n_sub)
+                    if alpha > 0:
+                        proto = (1 - alpha) * proto + alpha * gmean
                     proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
+
                     P_list.append(proto)
                     proto_moas.append(str(moa))
                     summary_rows.append(
-                        {"moa": moa, "proto_index": j, "n_members": int(sel.shape[0]),
-                         "method": f"kmeans/{prototype_method}(shrink={prototype_shrinkage})"}
+                        {"moa": moa, "proto_index": j, "n_members": n_sub,
+                         "method": f"kmeans/{prototype_method}", "shrinkage_effective": float(alpha)}
                     )
             except Exception:
                 # Fallback: single prototype if k-means unavailable
                 proto = np.median(X_m, axis=0) if prototype_method == "median" else np.mean(X_m, axis=0)
+                alpha = effective_alpha(n_members=n_members_moa)
+                if alpha > 0:
+                    proto = (1 - alpha) * proto + alpha * gmean
                 proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
+
                 P_list.append(proto)
                 proto_moas.append(str(moa))
                 summary_rows.append(
-                    {"moa": moa, "proto_index": 0, "n_members": int(X_m.shape[0]),
-                     "method": f"{prototype_method}(fallback_no_kmeans)"}
+                    {"moa": moa, "proto_index": 0, "n_members": n_members_moa,
+                     "method": f"{prototype_method}(fallback_no_kmeans)", "shrinkage_effective": float(alpha)}
                 )
 
     P = np.vstack(P_list) if P_list else np.zeros((0, X_all.shape[1]), dtype=float)
     summary_df = pd.DataFrame(summary_rows)
     return summary_df, P, proto_moas
+
 
 
 # -------------------------- scoring: cosine / CSLS --------------------------- #
@@ -676,13 +731,19 @@ def main() -> None:
         choices=["median", "mean", "trimmed_mean", "geometric_median"],
         help="Replicate aggregation method (default: median).",
     )
-    parser.add_argument("--trimmed_frac", type=float, default=0.1, help="Trim fraction for trimmed_mean (default: 0.1).")
+    parser.add_argument("--trimmed_frac", type=float, 
+                        default=0.1, help="Trim fraction for trimmed_mean (default: 0.1).")
 
-    parser.add_argument("--n_prototypes_per_moa", type=int, default=1, help="Sub-prototypes per MOA (k-means if >1).")
-    parser.add_argument("--prototype_method", type=str, default="median", choices=["median", "mean"], help="Prototype estimator when n_prototypes_per_moa<=1 (default: median).")
-    parser.add_argument("--prototype_shrinkage", type=float, default=0.0, help="Shrink prototypes towards global mean (0..1).")
+    parser.add_argument("--n_prototypes_per_moa", type=int, 
+                        default=1, help="Sub-prototypes per MOA (k-means if >1).")
+    parser.add_argument("--prototype_method", type=str, 
+                        default="median", choices=["median", "mean"], help="Prototype estimator when n_prototypes_per_moa<=1 (default: median).")
+    parser.add_argument("--prototype_shrinkage", type=float, 
+                        default=0.0, help="Shrink prototypes towards global mean (0..1).")
 
-    parser.add_argument("--moa_score_agg", type=str, default="max", choices=["max", "mean"], help="Aggregate prototype→MOA score (default: max).")
+    parser.add_argument("--moa_score_agg", type=str, 
+                        default="max", choices=["max", "mean"], 
+                        help="Aggregate prototype→MOA score (default: max).")
 
     parser.add_argument(
         "--use_csls",
@@ -713,10 +774,44 @@ def main() -> None:
         help="When --primary_score auto: if cosine margin < this, switch to CSLS for the decision.",
     )
 
-    parser.add_argument("--exclude_anchors_from_queries", action="store_true", help="Do not produce predictions for anchor compounds.")
+    parser.add_argument("--exclude_anchors_from_queries", 
+                        action="store_true", help="Do not produce predictions for anchor compounds.")
 
-    parser.add_argument("--n_permutations", type=int, default=0, help="Permutations for FDR (0 to disable).")
-    parser.add_argument("--random_seed", type=int, default=0, help="Random seed for reproducibility (default: 0).")
+    parser.add_argument("--n_permutations", type=int, 
+                        default=200, help="Permutations for FDR (0 to disable). Default: 200.")
+    parser.add_argument("--random_seed", type=int, 
+                        default=0, help="Random seed for reproducibility (default: 0).")
+        parser.add_argument(
+        "--min_members_per_moa",
+        type=int,
+        default=1,
+        help="Minimum labelled members needed to form a prototype (default: 1 keeps all).",
+    )
+    parser.add_argument(
+        "--skip_tiny_moas",
+        action="store_true",
+        help="If set, MOAs with < min_members_per_moa are skipped (no prototype built).",
+    )
+    parser.add_argument(
+        "--adaptive_shrinkage",
+        action="store_true",
+        help=("If set, adds size-aware shrinkage for small prototypes: "
+              "alpha_eff = prototype_shrinkage + min(adaptive_shrinkage_max, "
+              "adaptive_shrinkage_c / n_members)."),
+    )
+    parser.add_argument(
+        "--adaptive_shrinkage_c",
+        type=float,
+        default=0.5,
+        help="C constant for size-aware shrinkage term (default: 0.5).",
+    )
+    parser.add_argument(
+        "--adaptive_shrinkage_max",
+        type=float,
+        default=0.3,
+        help="Maximum extra shrinkage due to size-aware term (default: 0.3).",
+    )
+
 
     args = parser.parse_args()
 
@@ -751,16 +846,22 @@ def main() -> None:
         raise ValueError(f"Anchors file must contain MOA column '{args.moa_col}'.")
 
     # Build prototypes
-    protos_df, P, proto_moas = build_moa_prototypes(
-        embeddings=agg_out,
-        anchors=anchors,
-        id_col=id_col,
-        moa_col=args.moa_col,
-        n_prototypes_per_moa=args.n_prototypes_per_moa,
-        prototype_method=args.prototype_method,
-        prototype_shrinkage=args.prototype_shrinkage,
-        random_seed=args.random_seed,
-    )
+    protos_df, P, proto_moas = build_moa_prototypes(embeddings=agg_out,
+                                                    anchors=anchors,
+                                                    id_col=id_col,
+                                                    moa_col=args.moa_col,
+                                                    n_prototypes_per_moa=args.n_prototypes_per_moa,
+                                                    prototype_method=args.prototype_method,
+                                                    prototype_shrinkage=args.prototype_shrinkage,
+                                                    min_members_per_moa=args.min_members_per_moa,
+                                                    skip_tiny_moas=args.skip_tiny_moas,
+                                                    adaptive_shrinkage=args.adaptive_shrinkage,
+                                                    adaptive_shrinkage_c=args.adaptive_shrinkage_c,
+                                                    adaptive_shrinkage_max=args.adaptive_shrinkage_max,
+                                                    random_seed=args.random_seed,
+                                                )
+
+
     protos_df.to_csv(out_dir / "prototypes_summary.tsv", sep="\t", index=False)
 
     # If no prototypes, bail gracefully with empty, schema-matching outputs

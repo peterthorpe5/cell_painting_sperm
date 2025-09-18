@@ -8,19 +8,25 @@ Create pseudo-anchors (unsupervised clusters) for prototype MOA scoring.
 This script clusters aggregated compound embeddings and writes:
 1) anchors TSV mapping each compound to a pseudo-MOA cluster;
 2) a one-row run summary TSV with algorithm/quality metrics;
-3) a per-cluster stats TSV.
+3) a per-cluster stats TSV including per-cluster cosine silhouette and
+   nearest-centroid cosine (and nearest cluster id).
 
 - Input can be well-level; we aggregate to compound using a robust method.
 - Clustering:
-    * 'auto' (default): HDBSCAN-first; if unavailable/degenerate, fall back to KMeans with auto-k.
+    * 'kmeans' (default): supports fixed k or auto-k via cosine silhouette.
+    * 'auto': HDBSCAN-first; if unavailable/degenerate, fall back to KMeans auto-k.
     * 'hdbscan': force HDBSCAN (error if not installed).
-    * 'kmeans': force KMeans (supports fixed k or auto-k).
 
 Outputs (TSV; never comma-separated)
 ------------------------------------
 - anchors_pseudo.tsv          : columns [id_col, moa, cluster_id]
 - anchors_pseudo_summary.tsv  : one row of run metadata and QC
-- anchors_pseudo_clusters.tsv : cluster-level counts
+- anchors_pseudo_clusters.tsv : per-cluster stats:
+    [cluster_id, moa, n_members, silhouette_cosine,
+     nearest_cluster_id, nearest_centroid_cosine]
+
+In this script, silhouette is a quality score for clustering computed with cosine distance on the L2-normalised embeddings.
+     
 """
 
 from __future__ import annotations
@@ -194,7 +200,40 @@ def aggregate_compounds(
     return out[[id_col] + num_cols]
 
 
-# --------------------------------- clustering -------------------------------- #
+# ------------------------------- clustering utils ---------------------------- #
+
+def cosine_silhouette_scores(*, X: np.ndarray, labels: np.ndarray) -> Tuple[float, np.ndarray]:
+    """
+    Compute overall and per-sample cosine silhouette scores.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Normalised data (n_samples × n_features).
+    labels : np.ndarray
+        Cluster labels (length n_samples).
+
+    Returns
+    -------
+    Tuple[float, np.ndarray]
+        (overall_silhouette, per_sample_silhouette) where the first is NaN if
+        there are <2 clusters with at least 2 members.
+    """
+    try:
+        from sklearn.metrics import silhouette_score, silhouette_samples
+    except Exception as exc:
+        raise SystemExit("scikit-learn is required for silhouette computation.") from exc
+
+    uniq = np.unique(labels)
+    # Need at least two clusters with >=2 members
+    valid_clusters = [u for u in uniq if (labels == u).sum() >= 2]
+    if len(valid_clusters) < 2:
+        return float("nan"), np.full(shape=(X.shape[0],), fill_value=np.nan, dtype=float)
+
+    overall = float(silhouette_score(X=X, labels=labels, metric="cosine"))
+    per_sample = silhouette_samples(X=X, labels=labels, metric="cosine")
+    return overall, per_sample
+
 
 def try_hdbscan(
     *,
@@ -238,7 +277,7 @@ def handle_noise(
     *,
     X: np.ndarray,
     labels: np.ndarray,
-    strategy: str = "own_cluster",
+    strategy: str = "nearest",
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Handle HDBSCAN noise labels (-1) according to a chosen strategy.
@@ -250,7 +289,7 @@ def handle_noise(
     labels : np.ndarray
         Labels with possible -1 values for noise.
     strategy : str, optional
-        One of {"own_cluster", "drop", "nearest"}, by default "own_cluster".
+        One of {"own_cluster", "drop", "nearest"}, by default "nearest".
 
     Returns
     -------
@@ -335,180 +374,91 @@ def auto_kmeans(
     if n < 3:
         return np.zeros(shape=(n,), dtype=int), 1
 
-    # Build a compact grid of candidate ks
+    # Candidate ks
     ks: List[int] = sorted(set([
         max(2, min_k),
         int(round(np.sqrt(n))),
         int(round(1.5 * np.sqrt(n))),
         int(round(2.0 * np.sqrt(n))),
-        max_k,
+        min(max_k, max(2, n - 1)),
     ]))
     ks = [k for k in ks if 2 <= k <= min(max_k, n - 1)]
     if not ks:
         ks = [min(2, n - 1)]
 
-    # Subsample indices (without replacement) for silhouette
     rng = np.random.default_rng(random_seed)
-    if n > sample_size:
-        sample_idx = rng.choice(n, size=sample_size, replace=False)
-    else:
-        sample_idx = np.arange(n)
+    sample_idx = rng.choice(n, size=min(n, sample_size), replace=False)
 
-    best_k = None
+    best_k: Optional[int] = None
     best_score = -np.inf
-    best_labels = None
+    best_labels: Optional[np.ndarray] = None
 
     for k in ks:
-        try:
-            km = KMeans(n_clusters=k, random_state=random_seed, n_init="auto")
-            labels = km.fit_predict(X)
-            if len(np.unique(labels)) < 2:
-                continue
-            score = silhouette_score(X[sample_idx, :], labels[sample_idx], metric="cosine")
-            if (score > best_score) or (np.isclose(score, best_score) and (best_k is None or k < best_k)):
-                best_score = score
-                best_k = k
-                best_labels = labels
-        except Exception:
+        km = KMeans(n_clusters=k, random_state=random_seed, n_init="auto")
+        labels = km.fit_predict(X)
+        if len(np.unique(labels)) < 2:
             continue
+        score = silhouette_score(X=X[sample_idx, :], labels=labels[sample_idx], metric="cosine")
+        if (score > best_score) or (np.isclose(score, best_score) and (best_k is None or k < best_k)):
+            best_score = float(score)
+            best_k = int(k)
+            best_labels = labels
 
     if best_labels is None:
-        # Fallback: a reasonable k
-        k = min(max(2, int(round(np.sqrt(n)))), n - 1)
-        from sklearn.cluster import KMeans  # re-import inside function for clarity
-        km = KMeans(n_clusters=k, random_state=random_seed, n_init="auto")
+        # Fallback: k=2
+        from sklearn.cluster import KMeans as _KMeans
+        km = _KMeans(n_clusters=2, random_state=random_seed, n_init="auto")
         best_labels = km.fit_predict(X)
-        best_k = k
+        best_k = 2
 
-    return best_labels.astype(int), int(best_k)
-
-
-def force_kmeans(*, X: np.ndarray, k: int, random_seed: int) -> np.ndarray:
-    """
-    Run KMeans with a fixed k.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Normalised data.
-    k : int
-        Number of clusters.
-    random_seed : int
-        Random seed.
-
-    Returns
-    -------
-    np.ndarray
-        Labels array (length n_samples).
-    """
-    from sklearn.cluster import KMeans
-
-    k_eff = max(2, min(k, X.shape[0]))
-    km = KMeans(n_clusters=k_eff, random_state=random_seed, n_init="auto")
-    return km.fit_predict(X).astype(int)
+    return best_labels, int(best_k)
 
 
-def cosine_silhouette(
-    *,
-    X: np.ndarray,
-    labels: np.ndarray,
-    sample_size: int,
-    random_seed: int,
-) -> float:
-    """
-    Compute cosine silhouette (optionally on a subsample). NaN if undefined.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Normalised data.
-    labels : np.ndarray
-        Cluster labels.
-    sample_size : int
-        Subsample size for efficiency.
-    random_seed : int
-        Random seed.
-
-    Returns
-    -------
-    float
-        Silhouette score in [-1, 1], or NaN if <2 clusters.
-    """
-    from sklearn.metrics import silhouette_score
-
-    if len(np.unique(labels)) < 2 or X.shape[0] < 2:
-        return float("nan")
-    rng = np.random.default_rng(random_seed)
-    if X.shape[0] > sample_size:
-        idx = rng.choice(X.shape[0], size=sample_size, replace=False)
-        return float(silhouette_score(X[idx, :], labels[idx], metric="cosine"))
-    return float(silhouette_score(X, labels, metric="cosine"))
-
-
-# ---------------------------------- main ------------------------------------ #
+# ----------------------------------- main ------------------------------------ #
 
 def main() -> None:
     """
-    Parse arguments, cluster embeddings into pseudo-anchors, and write TSVs.
-
-    Notes
-    -----
-    - Outputs are always TSV (tab-separated) to comply with “never comma-separated”.
-    - 'auto' mode: HDBSCAN-first (if installed), then KMeans with auto-k if needed.
+    Parse arguments and write pseudo-anchors TSVs (anchors, summary, clusters).
     """
     parser = argparse.ArgumentParser(description="Make pseudo-anchors by clustering embeddings (TSV in/out, UK English).")
     parser.add_argument("--embeddings_tsv", type=str, required=True, help="TSV with embeddings (well- or compound-level).")
     parser.add_argument("--out_anchors_tsv", type=str, required=True, help="Output TSV path for pseudo-anchors.")
-    parser.add_argument("--out_summary_tsv", type=str, default="", help="Optional TSV path for run summary. Defaults next to anchors.")
-    parser.add_argument("--out_clusters_tsv", type=str, default="", help="Optional TSV path for per-cluster stats. Defaults next to anchors.")
+    parser.add_argument("--out_summary_tsv", type=str, required=True, help="Output TSV path for run summary.")
+    parser.add_argument("--out_clusters_tsv", type=str, required=True, help="Output TSV path for per-cluster stats.")
     parser.add_argument("--id_col", type=str, default="cpd_id", help="Identifier column name (default: cpd_id).")
 
-    parser.add_argument(
-        "--aggregate_method",
-        type=str,
-        default="median",
-        choices=["median", "mean", "trimmed_mean", "geometric_median"],
-        help="Replicate aggregation method.",
-    )
+    parser.add_argument("--aggregate_method", type=str, default="median",
+                        choices=["median", "mean", "trimmed_mean", "geometric_median"],
+                        help="Replicate aggregation method (default: median).")
     parser.add_argument("--trimmed_frac", type=float, default=0.1, help="Trim fraction for trimmed_mean (default: 0.1).")
 
-    parser.add_argument(
-        "--clusterer",
-        type=str,
-        default="auto",
-        choices=["auto", "kmeans", "hdbscan"],
-        help="Clustering algorithm: 'auto' (HDBSCAN-first, KMeans fallback), 'kmeans', or 'hdbscan'.",
-    )
-    parser.add_argument("--n_clusters", type=int, default=-1, help="KMeans clusters (use -1 for auto-k).")
+    parser.add_argument("--clusterer", type=str, default="kmeans",
+                        choices=["kmeans", "auto", "hdbscan"],
+                        help="Clustering algorithm: 'kmeans' (default), 'auto' (HDBSCAN-first), or 'hdbscan'.")
+    parser.add_argument("--n_clusters", type=int, default=-1, help="KMeans clusters (-1 for auto-k).")
+    parser.add_argument("--auto_min_clusters", type=int, default=8, help="Minimum k considered in auto-k (default: 8).")
+    parser.add_argument("--auto_max_clusters", type=int, default=64, help="Maximum k considered in auto-k (default: 64).")
 
-    parser.add_argument("--auto_min_clusters", type=int, default=8, help="Lower bound for auto-k search (default: 8).")
-    parser.add_argument("--auto_max_clusters", type=int, default=64, help="Upper bound for auto-k search (default: 64).")
-    parser.add_argument("--silhouette_sample_size", type=int, default=2000, help="Sample size for silhouette (default: 2000).")
+    parser.add_argument("--hdbscan_min_cluster_size", type=int, default=-1, help="HDBSCAN min_cluster_size (<=0 → heuristic).")
+    parser.add_argument("--hdbscan_min_samples", type=int, default=-1, help="HDBSCAN min_samples (<=0 → default).")
+    parser.add_argument("--hdbscan_noise", type=str, default="nearest",
+                        choices=["own_cluster", "drop", "nearest"],
+                        help="How to handle HDBSCAN noise (default: nearest).")
 
-    parser.add_argument("--hdbscan_min_cluster_size", type=int, default=-1, help="HDBSCAN min_cluster_size (<=0 for auto).")
-    parser.add_argument("--hdbscan_min_samples", type=int, default=-1, help="HDBSCAN min_samples (<=0 for default).")
-    parser.add_argument(
-        "--hdbscan_noise",
-        type=str,
-        default="own_cluster",
-        choices=["own_cluster", "drop", "nearest"],
-        help="What to do with HDBSCAN noise (-1): keep as singletons, drop, or assign to nearest cluster.",
-    )
+    parser.add_argument("--hdbscan_min_silhouette", type=float, default=0.02,
+                        help="If HDBSCAN cosine silhouette < this, fall back to KMeans.")
+    parser.add_argument("--max_singleton_frac", type=float, default=0.15,
+                        help="If fraction of singleton clusters > this, fall back to KMeans.")
+    parser.add_argument("--silhouette_sample_size", type=int, default=2000,
+                        help="Subsample size for auto-k silhouette scoring (default: 2000).")
 
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed.")
     args = parser.parse_args()
 
-    # Resolve paths
-    anchors_path = Path(args.out_anchors_tsv)
-    default_summary = anchors_path.with_name("anchors_pseudo_summary.tsv")
-    default_clusters = anchors_path.with_name("anchors_pseudo_clusters.tsv")
-    summary_path = Path(args.out_summary_tsv) if args.out_summary_tsv else default_summary
-    clusters_path = Path(args.out_clusters_tsv) if args.out_clusters_tsv else default_clusters
-    anchors_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Load and aggregate
-    df = pd.read_csv(filepath_or_buffer=args.embeddings_tsv, sep="\t")
+    # Load embeddings and aggregate to compounds
+    df = pd.read_csv(args.embeddings_tsv, sep="\t")
     id_col = detect_id_column(df=df, id_col=args.id_col)
+
     agg = aggregate_compounds(
         df=df,
         id_col=id_col,
@@ -516,108 +466,179 @@ def main() -> None:
         trimmed_frac=args.trimmed_frac,
     )
     num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
-    X = l2_normalise(X=agg[num_cols].to_numpy())
-    ids = agg[id_col].astype(str).to_numpy()
-    n_in = int(X.shape[0])
+    X_all = l2_normalise(X=agg[num_cols].to_numpy())
+    ids_all = agg[id_col].astype(str).tolist()
 
-    # Decide clustering path
+    n_input = int(len(ids_all))
+
+    # Choose clustering path
+    chosen_algo = None
     labels: Optional[np.ndarray] = None
-    chosen_algo: str = ""
-    chosen_k: Optional[int] = None
-    noise_handling_used: Optional[str] = None
+    keep_mask: Optional[np.ndarray] = None
     dropped_count = 0
+    k_if_kmeans = -1
+    noise_handling = "n/a"
+    silhouette_overall = float("nan")
 
     if args.clusterer in {"auto", "hdbscan"}:
-        labels_hdb = try_hdbscan(
-            X=X,
-            min_cluster_size=(args.hdbscan_min_cluster_size if args.hdbscan_min_cluster_size > 0 else None),
-            min_samples=(args.hdbscan_min_samples if args.hdbscan_min_samples > 0 else None),
+        # Try HDBSCAN
+        labels_h = try_hdbscan(
+            X=X_all,
+            min_cluster_size=(None if args.hdbscan_min_cluster_size <= 0 else args.hdbscan_min_cluster_size),
+            min_samples=(None if args.hdbscan_min_samples <= 0 else args.hdbscan_min_samples),
         )
-        if labels_hdb is not None:
-            lbls, keep_mask = handle_noise(X=X, labels=labels_hdb, strategy=args.hdbscan_noise)
-            noise_handling_used = args.hdbscan_noise
-            if keep_mask is not None:
-                X = X[keep_mask, :]
-                ids = ids[keep_mask]
-                dropped_count = int((~keep_mask).sum())
-            if len(np.unique(lbls)) >= 2:
+        if labels_h is not None:
+            lbls, keep_mask = handle_noise(X=X_all, labels=labels_h, strategy=args.hdbscan_noise)
+            # Quality checks
+            uniq, counts = np.unique(lbls, return_counts=True)
+            singleton_frac = float((counts == 1).sum()) / float(counts.sum())
+
+            try:
+                sil_overall, sil_samples = cosine_silhouette_scores(X=(X_all if keep_mask is None else X_all[keep_mask, :]),
+                                                                    labels=lbls)
+            except SystemExit:
+                sil_overall, sil_samples = float("nan"), np.full(lbls.shape, np.nan)
+
+            ok = True
+            if np.isnan(sil_overall) or (sil_overall < float(args.hdbscan_min_silhouette)):
+                ok = False
+            if singleton_frac > float(args.max_singleton_frac):
+                ok = False
+
+            if ok:
                 labels = lbls
                 chosen_algo = "hdbscan"
+                silhouette_overall = sil_overall
+                noise_handling = args.hdbscan_noise
+                if keep_mask is not None:
+                    dropped_count = int((~keep_mask).sum())
+            # else: fall through to kmeans
+        # elif: fall through to kmeans
+
+    if (labels is None) and (args.clusterer in {"auto", "kmeans"}):
+        # KMeans path (auto-k or fixed)
+        from sklearn.cluster import KMeans
+        if int(args.n_clusters) == -1:
+            labels_k, k_chosen = auto_kmeans(
+                X=X_all,
+                random_seed=args.random_seed,
+                min_k=args.auto_min_clusters,
+                max_k=args.auto_max_clusters,
+                sample_size=args.silhouette_sample_size,
+            )
+            labels = labels_k
+            k_if_kmeans = int(k_chosen)
+        else:
+            k_fixed = max(2, min(int(args.n_clusters), X_all.shape[0]))
+            km = KMeans(n_clusters=k_fixed, random_state=args.random_seed, n_init="auto")
+            labels = km.fit_predict(X=X_all)
+            k_if_kmeans = int(k_fixed)
+        chosen_algo = "kmeans"
+        keep_mask = None  # we used all rows
+        noise_handling = "n/a"
+        # Overall silhouette on full data
+        try:
+            sil_overall, _ = cosine_silhouette_scores(X=X_all, labels=labels)
+        except SystemExit:
+            sil_overall = float("nan")
+        silhouette_overall = sil_overall
 
     if labels is None:
-        # KMeans path (forced or fallback)
-        chosen_algo = "kmeans"
-        noise_handling_used = "n/a"
-        if args.clusterer == "kmeans" and args.n_clusters and args.n_clusters > 1:
-            labels = force_kmeans(X=X, k=args.n_clusters, random_seed=args.random_seed)
-            chosen_k = int(args.n_clusters)
-        else:
-            # Auto-k range bounded and sane
-            n_used = X.shape[0]
-            min_k = max(2, min(args.auto_min_clusters, n_used - 1))
-            max_k = min(max(args.auto_max_clusters, min_k + 1), n_used - 1)
-            labels, chosen_k = auto_kmeans(
-                X=X,
-                random_seed=args.random_seed,
-                min_k=min_k,
-                max_k=max_k,
-                sample_size=max(100, args.silhouette_sample_size),
-            )
+        raise SystemExit("Clustering failed in all modes.")
 
-    # Build sequential cluster IDs and names
-    uniq = sorted(np.unique(labels).tolist())
-    remap = {lab: i for i, lab in enumerate(uniq)}
-    cluster_id = np.array([remap[int(lab)] for lab in labels], dtype=int)
-    moa = [f"Cluster_{i + 1:04d}" for i in cluster_id]
+    # If 'drop' strategy was used, subset data and ids
+    if keep_mask is not None:
+        X = X_all[keep_mask, :]
+        ids = [cid for cid, keep in zip(ids_all, keep_mask) if bool(keep)]
+    else:
+        X = X_all
+        ids = ids_all
 
-    # Compute QC metrics
-    n_used = int(X.shape[0])
-    num_clusters = int(len(uniq))
-    sil = cosine_silhouette(
-        X=X,
-        labels=cluster_id,
-        sample_size=args.silhouette_sample_size,
-        random_seed=args.random_seed,
-    )
+    # Reindex cluster ids to 0..C-1 and build Cluster_#### names
+    uniq = np.unique(labels)
+    remap = {old: new for new, old in enumerate(sorted(uniq))}
+    cl_ids = np.array([remap[int(l)] for l in labels], dtype=int)
+    cluster_names = {new: f"Cluster_{new + 1:04d}" for new in sorted(remap.values())}
+    moa = [cluster_names[int(c)] for c in cl_ids]
 
-    # Write anchors: cpd_id → cluster
-    anchors_df = pd.DataFrame(data={id_col: ids, "moa": moa, "cluster_id": cluster_id})
-    anchors_df.to_csv(path_or_buf=anchors_path, sep="\t", index=False)
+    # Per-sample silhouette (for per-cluster mean)
+    try:
+        _, sil_samples = cosine_silhouette_scores(X=X, labels=cl_ids)
+    except SystemExit:
+        sil_samples = np.full(shape=(X.shape[0],), fill_value=np.nan, dtype=float)
 
-    # Per-cluster stats
-    counts = pd.Series(data=cluster_id, dtype=int).value_counts().sort_index()
-    clust_df = pd.DataFrame(
-        data={
-            "cluster_id": counts.index.astype(int),
-            "moa": [f"Cluster_{i + 1:04d}" for i in counts.index.astype(int)],
-            "n_members": counts.values.astype(int),
-        }
-    )
-    clust_df.to_csv(path_or_buf=clusters_path, sep="\t", index=False)
+    # Centroids for nearest-centroid cosine
+    centroids = []
+    for k in sorted(cluster_names.keys()):
+        idx = np.where(cl_ids == k)[0]
+        if idx.size == 0:
+            centroids.append(np.zeros(X.shape[1], dtype=float))
+            continue
+        c = X[idx, :].mean(axis=0)
+        nrm = np.linalg.norm(c)
+        centroids.append((c / nrm) if nrm > 0 else c)
+    C = np.vstack(centroids) if centroids else np.zeros((0, X.shape[1]), dtype=float)
 
-    # One-row summary
-    summary = pd.DataFrame(
-        data=[{
-            "algorithm": chosen_algo,
-            "clusterer_requested": args.clusterer,
-            "k_if_kmeans": (chosen_k if chosen_algo == "kmeans" else np.nan),
-            "num_clusters": num_clusters,
-            "n_samples_input": n_in,
-            "n_samples_used": n_used,
-            "dropped_count": dropped_count,
-            "noise_handling": (noise_handling_used if noise_handling_used is not None else "n/a"),
+    # Pairwise centroid cosine (avoid self)
+    if C.shape[0] >= 2:
+        M = C @ C.T
+        np.fill_diagonal(M, -np.inf)
+        nearest_idx = np.argmax(M, axis=1)
+        nearest_cos = M[np.arange(M.shape[0]), nearest_idx]
+    else:
+        nearest_idx = np.full(shape=(C.shape[0],), fill_value=-1, dtype=int)
+        nearest_cos = np.full(shape=(C.shape[0],), fill_value=np.nan, dtype=float)
+
+    # Build cluster stats table
+    cluster_rows: List[Dict[str, object]] = []
+    for k in sorted(cluster_names.keys()):
+        idx = np.where(cl_ids == k)[0]
+        n_members = int(idx.size)
+        sil = float(np.nan) if (sil_samples is None or n_members == 0) else float(np.nanmean(sil_samples[idx]))
+        near_id = int(nearest_idx[k]) if (C.shape[0] >= 2) else -1
+        near_cos = float(nearest_cos[k]) if (C.shape[0] >= 2) else float("nan")
+        cluster_rows.append({
+            "cluster_id": k,
+            "moa": cluster_names[k],
+            "n_members": n_members,
             "silhouette_cosine": sil,
-            "aggregate_method": args.aggregate_method,
-            "trimmed_frac": args.trimmed_frac if args.aggregate_method == "trimmed_mean" else np.nan,
-            "auto_min_clusters": args.auto_min_clusters,
-            "auto_max_clusters": args.auto_max_clusters,
-            "n_clusters_requested": args.n_clusters,
-            "hdbscan_min_cluster_size": args.hdbscan_min_cluster_size,
-            "hdbscan_min_samples": args.hdbscan_min_samples,
-            "random_seed": args.random_seed,
-        }]
-    )
-    summary.to_csv(path_or_buf=summary_path, sep="\t", index=False)
+            "nearest_cluster_id": near_id,
+            "nearest_centroid_cosine": near_cos,
+        })
+    clusters_df = pd.DataFrame(cluster_rows)
+
+    # Anchors table
+    anchors_df = pd.DataFrame({id_col: ids, "moa": moa, "cluster_id": cl_ids})
+    anchors_df = anchors_df[[id_col, "moa", "cluster_id"]]
+
+    # Summary row
+    summary = pd.DataFrame([{
+        "algorithm": chosen_algo,
+        "clusterer_requested": args.clusterer,
+        "k_if_kmeans": k_if_kmeans,
+        "num_clusters": int(len(cluster_names)),
+        "n_samples_input": n_input,
+        "n_samples_used": int(X.shape[0]),
+        "dropped_count": int(dropped_count),
+        "noise_handling": noise_handling,
+        "silhouette_cosine": float(silhouette_overall),
+        "aggregate_method": args.aggregate_method,
+        "trimmed_frac": float(args.trimmed_frac),
+        "auto_min_clusters": int(args.auto_min_clusters),
+        "auto_max_clusters": int(args.auto_max_clusters),
+        "n_clusters_requested": int(args.n_clusters),
+        "hdbscan_min_cluster_size": int(args.hdbscan_min_cluster_size),
+        "hdbscan_min_samples": int(args.hdbscan_min_samples),
+        "hdbscan_min_silhouette": float(args.hdbscan_min_silhouette),
+        "max_singleton_frac": float(args.max_singleton_frac),
+        "random_seed": int(args.random_seed),
+    }])
+
+    # Write outputs (TSV only)
+    Path(args.out_anchors_tsv).parent.mkdir(parents=True, exist_ok=True)
+    anchors_df.to_csv(args.out_anchors_tsv, sep="\t", index=False)
+    clusters_df.to_csv(args.out_clusters_tsv, sep="\t", index=False)
+    summary.to_csv(args.out_summary_tsv, sep="\t", index=False)
 
 
 if __name__ == "__main__":
