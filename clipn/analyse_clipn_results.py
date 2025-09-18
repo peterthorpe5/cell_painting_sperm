@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -225,6 +226,137 @@ def select_latent_features(df: pd.DataFrame, prefix: str | None, logger: logging
 
     logger.info("Selected %d latent columns. Feature matrix shape: %s", len(cols), X.shape)
     return X, cols
+
+
+
+
+def build_mutual_knn_edges(*, nn_df: pd.DataFrame, k_mutual: int = 10) -> List[Tuple[str, str, float]]:
+    """
+    Construct an undirected edge set using mutual k-NN to reduce hubbiness.
+
+    Parameters
+    ----------
+    nn_df : pandas.DataFrame
+        Columns: ['cpd_id', 'neighbour_id', 'distance'] (smaller = closer).
+    k_mutual : int, optional
+        k for mutual k-NN (default: 10).
+
+    Returns
+    -------
+    list[tuple[str, str, float]]
+        Edges as (source, target, distance), undirected and de-duplicated.
+    """
+    ranks: Dict[str, Dict[str, int]] = {}
+    for src, group in nn_df.groupby("cpd_id"):
+        g = group.sort_values("distance", ascending=True).reset_index(drop=True)
+        ranks[src] = {row["neighbour_id"]: int(i) for i, row in g.head(k_mutual).iterrows()}
+
+    pairs = set()
+    for i, neighs in ranks.items():
+        for j in neighs:
+            if i in ranks.get(j, {}):
+                a, b = sorted([i, j])
+                pairs.add((a, b))
+
+    dist_lookup: Dict[Tuple[str, str], float] = {}
+    for _, r in nn_df.iterrows():
+        a, b = sorted([r["cpd_id"], r["neighbour_id"]])
+        d = float(r["distance"])
+        if (a, b) not in dist_lookup or d < dist_lookup[(a, b)]:
+            dist_lookup[(a, b)] = d
+
+    return [(a, b, dist_lookup[(a, b)]) for a, b in pairs]
+
+
+def local_scaling_weights(
+    *, nn_df: pd.DataFrame, edges: List[Tuple[str, str, float]], k_sigma: int = 7
+) -> List[Tuple[str, str, float, float]]:
+    """
+    Apply Zelnik-Manor & Perona local scaling to compute robust affinities.
+
+    w_ij = exp( - d_ij^2 / (sigma_i * sigma_j) ), where sigma_i is the
+    distance to the k_sigma-th neighbour of node i.
+
+    Parameters
+    ----------
+    nn_df : pandas.DataFrame
+        Neighbour table with 'cpd_id', 'neighbour_id', 'distance'.
+    edges : list[tuple[str, str, float]]
+        Undirected edges as (source, target, distance).
+    k_sigma : int, optional
+        Rank used to estimate local scale (default: 7).
+
+    Returns
+    -------
+    list[tuple[str, str, float, float]]
+        (source, target, distance, local_scaled_weight).
+    """
+    sigma: Dict[str, float] = {}
+    for src, group in nn_df.groupby("cpd_id"):
+        g = group.sort_values("distance", ascending=True).reset_index(drop=True)
+        s = float(g.iloc[min(k_sigma - 1, len(g) - 1)]["distance"])
+        sigma[src] = s if s > 0.0 else 1e-12
+
+    out: List[Tuple[str, str, float, float]] = []
+    for a, b, d in edges:
+        si, sj = sigma.get(a, 1e-12), sigma.get(b, 1e-12)
+        denom = max(si * sj, 1e-12)
+        w = math.exp(- (d * d) / denom)
+        out.append((a, b, float(d), float(w)))
+    return out
+
+
+def cap_degrees_greedily(
+    *, weighted_edges: List[Tuple[str, str, float, float]], max_degree: int = 6
+) -> List[Tuple[str, str, float, float]]:
+    """
+    Greedily keep strongest edges while enforcing degree ≤ max_degree.
+
+    Parameters
+    ----------
+    weighted_edges : list[tuple[str, str, float, float]]
+        Edges as (source, target, distance, weight).
+    max_degree : int, optional
+        Degree cap per node (default: 6).
+
+    Returns
+    -------
+    list[tuple[str, str, float, float]]
+        Pruned edge list.
+    """
+    deg: Dict[str, int] = {}
+    kept: List[Tuple[str, str, float, float]] = []
+    for a, b, d, w in sorted(weighted_edges, key=lambda x: x[3], reverse=True):
+        if deg.get(a, 0) < max_degree and deg.get(b, 0) < max_degree:
+            kept.append((a, b, d, w))
+            deg[a] = deg.get(a, 0) + 1
+            deg[b] = deg.get(b, 0) + 1
+    return kept
+
+
+def rescale_for_vis(*, weights: np.ndarray, new_min: float = 1.0, new_max: float = 10.0) -> np.ndarray:
+    """
+    Rescale weights into a range suitable for vis-network edge widths.
+
+    Parameters
+    ----------
+    weights : numpy.ndarray
+        Original weights (e.g., local scaling affinities in [0, 1]).
+    new_min : float, optional
+        New minimum (default: 1.0).
+    new_max : float, optional
+        New maximum (default: 10.0).
+
+    Returns
+    -------
+    numpy.ndarray
+        Rescaled weights in [new_min, new_max].
+    """
+    w = weights.astype(float)
+    w_min, w_max = float(w.min()), float(w.max())
+    if w_max == w_min:
+        return np.full_like(w, new_min)
+    return new_min + (w - w_min) * (new_max - new_min) / (w_max - w_min)
 
 
 def write_tsv(df: pd.DataFrame, path: str | Path, logger: logging.Logger, index: bool = False) -> None:
@@ -492,41 +624,51 @@ def generate_network(
     logger: logging.Logger,
 ) -> None:
     """
-    Generate an interactive compound similarity network and TSV edges/nodes.
+    Generate an interactive compound similarity network and TSV nodes/edges
+    using mutual k-NN + local scaling, with a degree cap.
+
+    Notes
+    -----
+    The `threshold` parameter now applies to the **locally scaled weight**
+    in [0, 1] (higher = stronger), rather than raw distance. If you previously
+    used a small distance threshold (e.g. 0.2), start with 0.4–0.6 here.
+    Lower values keep more edges; higher values prune more.
 
     Parameters
     ----------
-    df : pd.DataFrame
+    df : pandas.DataFrame
         DataFrame with latent features and metadata.
     output_dir : str | Path
-        Directory where network files will be saved.
+        Output directory for TSVs and HTML.
     threshold : float
-        Distance threshold to draw an edge (<= threshold).
-        Note: for cosine distance, values lie in [0, 2]; smaller is more similar.
+        Local-scaling weight threshold in [0, 1] to keep edges.
     metric : str
-        Distance metric for NearestNeighbours.
+        Nearest neighbour metric (e.g., 'cosine', 'euclidean').
     prefix : str | None
-        Latent feature prefix for selection.
+        Latent feature prefix; if None, uses digit-named columns.
     id_col : str
-        Identifier column name.
+        Identifier column name (e.g., 'cpd_id').
     dataset_col : str
-        Dataset column name.
+        Dataset/Library column name.
     type_col : str
-        Compound type column name.
+        Optional type/label column name (e.g., 'cpd_type'); can be missing.
     max_edges_per_node : int
-        Cap the number of kept edges per node (prevents hairballs).
+        Degree cap per node (higher = denser graph).
     logger : logging.Logger
         Logger instance.
     """
-    X, cols = select_latent_features(df=df, prefix=prefix, logger=logger)
+    # 1) Select latent features
+    X, latent_cols = select_latent_features(df=df, prefix=prefix, logger=logger)
     n_samples = X.shape[0]
+    logger.info("Selected %d latent columns. Feature matrix shape: %s", len(latent_cols), X.shape)
+
     if n_samples < 2:
-        logger.warning("Not enough rows (%d) to build a network.", n_samples)
+        logger.warning("Not enough samples for a network. Skipping.")
         return
 
-    k = min(100, n_samples)  # initial local neighbourhood for candidate edges
-    logger.info("Finding candidate edges with k=%d (metric=%s), threshold=%.4f", k, metric, threshold)
-    nn = NearestNeighbors(n_neighbors=k, metric=metric)
+    # 2) Nearest neighbours
+    k_all = min(n_samples, max(2, max_edges_per_node * 2))
+    nn = NearestNeighbors(n_neighbors=k_all, metric=metric)
     nn.fit(X)
     distances, indices = nn.kneighbors(X)
 
@@ -534,56 +676,68 @@ def generate_network(
     dsets = df[dataset_col].astype(str).values
     types = df[type_col].astype(str).values if type_col in df.columns else np.array([""] * n_samples)
 
-    # Build undirected edge list with thresholding and per-node cap
-    edges = []
-    kept_per_node = {i: 0 for i in range(n_samples)}
+    # 3) Build full directional NN table (exclude self)
+    records = []
     for i in range(n_samples):
-        for dist, j in zip(distances[i][1:], indices[i][1:]):  # skip self
-            if dist <= threshold:
-                if kept_per_node[i] >= max_edges_per_node:
-                    continue
-                kept_per_node[i] += 1
-                a, b = sorted((i, j))
-                edges.append((a, b, float(dist)))
+        for dist, j in zip(distances[i][1:], indices[i][1:]):
+            records.append((ids[i], ids[j], float(dist)))
+    nn_df = pd.DataFrame(records, columns=["cpd_id", "neighbour_id", "distance"])
 
-    # Deduplicate undirected edges
-    unique_edges = {}
-    for a, b, w in edges:
-        unique_edges[(a, b)] = min(unique_edges.get((a, b), w), w)
-    logger.info("Kept %d unique edges after dedup.", len(unique_edges))
+    # 4) Mutual k-NN + local scaling + degree cap
+    k_mutual = max_edges_per_node * 2  # a little more generous
+    k_sigma = min(7, max(3, k_all - 1))
 
-    # Write TSV nodes/edges
-    nodes_df = pd.DataFrame(
-        {id_col: ids, dataset_col: dsets, type_col: types}
-    )
-    edges_df = pd.DataFrame(
-        [{"source": ids[a], "target": ids[b], "distance": w} for (a, b), w in unique_edges.items()]
+    mutual_edges = build_mutual_knn_edges(nn_df=nn_df, k_mutual=k_mutual)
+    weighted = local_scaling_weights(nn_df=nn_df, edges=mutual_edges, k_sigma=k_sigma)
+
+    # Apply local-scale weight threshold
+    if threshold is not None:
+        weighted = [e for e in weighted if e[3] >= float(threshold)]
+
+    # Enforce degree cap
+    weighted = cap_degrees_greedily(weighted_edges=weighted, max_degree=max_edges_per_node)
+
+    # 5) TSV outputs (nodes + edges)
+    nodes_df = pd.DataFrame({id_col: ids, dataset_col: dsets})
+    if type_col in df.columns:
+        nodes_df[type_col] = types
+
+    edges_df = pd.DataFrame(weighted, columns=["source", "target", "distance", "weight_local_scaled"])
+    edges_df["weight_for_vis"] = rescale_for_vis(
+        weights=edges_df["weight_local_scaled"].to_numpy(), new_min=1.0, new_max=10.0
     )
 
     write_tsv(df=nodes_df, path=Path(output_dir) / "network_nodes.tsv", logger=logger, index=False)
     write_tsv(df=edges_df, path=Path(output_dir) / "network_edges.tsv", logger=logger, index=False)
 
-    # Optional HTML visualisation
+    # 6) Optional HTML visualisation
     if not PYVIS_AVAILABLE:
         logger.warning("pyvis not available. Skipping interactive HTML network.")
         return
 
     try:
         net = Network(height="800px", width="100%", notebook=False, directed=False)
-        # Map datasets to groups/colours
+
+        # Colour nodes: prefer type_col if present, else dataset_col
+        colour_by = type_col if type_col in df.columns else dataset_col
         for i in range(n_samples):
-            net.add_node(n_id=ids[i], label=ids[i], title=f"{dataset_col}: {dsets[i]}", group=dsets[i])
-        for (a, b), w in unique_edges.items():
-            net.add_edge(source=ids[a], to=ids[b], value=max(1.0, 1.0 / (w + 1e-6)))
+            label = ids[i]
+            group = (types[i] if colour_by == type_col else dsets[i])
+            title = f"{colour_by}: {group}"
+            net.add_node(n_id=label, label=label, title=title, group=group)
+
+        for r in edges_df.itertuples(index=False):
+            net.add_edge(source=r.source, to=r.target, value=float(r.weight_for_vis))
+
         html_path = Path(output_dir) / "compound_similarity_network.html"
-        # be robust to pyvis versions
         try:
-            net.write_html(str(html_path))        # newish pyvis
+            net.write_html(str(html_path))
         except TypeError:
-            net.save_graph(str(html_path))        # older pyvis fallback
+            net.save_graph(str(html_path))
         logger.info("Interactive network visualisation saved to %s", html_path)
     except Exception as exc:
         logger.error("Failed to render network HTML: %s", exc)
+
 
 
 # =====
