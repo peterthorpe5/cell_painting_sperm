@@ -30,7 +30,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Dict
 import re
 import networkx as nx
 import numpy as np
@@ -611,7 +611,89 @@ def analyse_test_vs_reference(
     return out
 
 
+def _l2_normalise_rows(*, X: np.ndarray) -> np.ndarray:
+    """
+    L2-normalise each row vector in a 2-D array.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Array of shape (n_samples, n_dims).
+
+    Returns
+    -------
+    numpy.ndarray
+        Row-normalised array with the same shape.
+    """
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+    return X / norms
+
+
+def cosine_csls_neighbour_table(
+    *,
+    X: np.ndarray,
+    ids: np.ndarray,
+    k_all: int,
+    k_csls: int = 10
+) -> pd.DataFrame:
+    """
+    Build a nearest-neighbour table ranked by CSLS-corrected similarity.
+
+    CSLS(i, j) = 2 * cos(i, j) - r_i - r_j, where r_i is the mean cosine
+    similarity from i to its k_csls nearest neighbours (excluding itself).
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Feature matrix (n_samples, n_dims). Will be L2-normalised row-wise.
+    ids : numpy.ndarray
+        Array of identifiers (n_samples,), typically cpd_id as str.
+    k_all : int
+        Number of neighbours to return per query (including all others is fine).
+    k_csls : int, optional
+        Neighbourhood size for the local mean terms r_i and r_j (default: 10).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: ['cpd_id', 'neighbour_id', 'distance', 'csls'], where
+        'distance' = -csls (lower is better for downstream code).
+    """
+    Xn = _l2_normalise_rows(X=X)
+    # Cosine similarity matrix
+    S = Xn @ Xn.T  # (n, n), in [-1, 1]
+    np.fill_diagonal(S, -np.inf)  # exclude self for ranking
+
+    n = S.shape[0]
+    k_eff = max(1, min(k_csls, n - 1))
+    # r_i: mean of top-k_csls similarities for each row
+    topk_idx = np.argpartition(-S, kth=k_eff, axis=1)[:, :k_eff]
+    row_means = S[np.arange(n)[:, None], topk_idx].mean(axis=1)  # (n,)
+
+    # CSLS matrix
+    # csls_ij = 2*s_ij - r_i - r_j
+    csls = 2.0 * S - row_means[:, None] - row_means[None, :]
+    # Restore diagonal to -inf to avoid self
+    np.fill_diagonal(csls, -np.inf)
+
+    # For each i, take top k_all neighbours by CSLS
+    k_out = max(1, min(k_all, n - 1))
+    idx = np.argpartition(-csls, kth=k_out, axis=1)[:, :k_out]
+
+    recs: List[Tuple[str, str, float, float]] = []
+    for i in range(n):
+        js = idx[i]
+        # Sort those top-k by CSLS descending
+        order = np.argsort(-csls[i, js])
+        for j in js[order]:
+            recs.append((str(ids[i]), str(ids[j]), float(-csls[i, j]), float(csls[i, j])))
+
+    nn_df = pd.DataFrame(recs, columns=["cpd_id", "neighbour_id", "distance", "csls"])
+    return nn_df
+
 def generate_network(
+    *,
     df: pd.DataFrame,
     output_dir: str | Path,
     threshold: float,
@@ -621,18 +703,18 @@ def generate_network(
     dataset_col: str,
     type_col: str,
     max_edges_per_node: int,
+    hubness: str,
+    csls_k: int,
     logger: logging.Logger,
 ) -> None:
     """
-    Generate an interactive compound similarity network and TSV nodes/edges
-    using mutual k-NN + local scaling, with a degree cap.
+    Generate an interactive compound similarity network and TSV nodes/edges.
 
-    Notes
-    -----
-    The `threshold` parameter now applies to the **locally scaled weight**
-    in [0, 1] (higher = stronger), rather than raw distance. If you previously
-    used a small distance threshold (e.g. 0.2), start with 0.4–0.6 here.
-    Lower values keep more edges; higher values prune more.
+    Hubness handling
+    ----------------
+    - local-scaling: mutual-kNN + Zelnik–Manor local scaling; threshold applies to weight in [0, 1].
+    - csls: mutual-kNN on CSLS similarity; threshold applies to similarity (higher = stronger).
+    - none: mutual-kNN on raw metric; similarity = -distance for filtering/widths.
 
     Parameters
     ----------
@@ -641,71 +723,106 @@ def generate_network(
     output_dir : str | Path
         Output directory for TSVs and HTML.
     threshold : float
-        Local-scaling weight threshold in [0, 1] to keep edges.
+        Edge filter threshold (see Hubness handling above).
     metric : str
-        Nearest neighbour metric (e.g., 'cosine', 'euclidean').
+        Nearest neighbour metric for the plain kNN path (e.g., 'cosine').
     prefix : str | None
         Latent feature prefix; if None, uses digit-named columns.
-    id_col : str
-        Identifier column name (e.g., 'cpd_id').
-    dataset_col : str
-        Dataset/Library column name.
-    type_col : str
-        Optional type/label column name (e.g., 'cpd_type'); can be missing.
+    id_col, dataset_col, type_col : str
+        Metadata column names.
     max_edges_per_node : int
-        Degree cap per node (higher = denser graph).
+        Degree cap per node.
+    hubness : str
+        One of {'local-scaling', 'csls', 'none'}.
+    csls_k : int
+        k for CSLS local mean similarity r_i.
     logger : logging.Logger
-        Logger instance.
+        Logger.
     """
-    # 1) Select latent features
+    # 1) Features and IDs
     X, latent_cols = select_latent_features(df=df, prefix=prefix, logger=logger)
     n_samples = X.shape[0]
     logger.info("Selected %d latent columns. Feature matrix shape: %s", len(latent_cols), X.shape)
-
     if n_samples < 2:
         logger.warning("Not enough samples for a network. Skipping.")
         return
-
-    # 2) Nearest neighbours
-    k_all = min(n_samples, max(2, max_edges_per_node * 2))
-    nn = NearestNeighbors(n_neighbors=k_all, metric=metric)
-    nn.fit(X)
-    distances, indices = nn.kneighbors(X)
 
     ids = df[id_col].astype(str).values
     dsets = df[dataset_col].astype(str).values
     types = df[type_col].astype(str).values if type_col in df.columns else np.array([""] * n_samples)
 
-    # 3) Build full directional NN table (exclude self)
-    records = []
-    for i in range(n_samples):
-        for dist, j in zip(distances[i][1:], indices[i][1:]):
-            records.append((ids[i], ids[j], float(dist)))
-    nn_df = pd.DataFrame(records, columns=["cpd_id", "neighbour_id", "distance"])
+    # 2) Build neighbour table (nn_df) according to hubness mode
+    k_all = min(n_samples, max(2, max_edges_per_node * 2))
 
-    # 4) Mutual k-NN + local scaling + degree cap
-    k_mutual = max_edges_per_node * 2  # a little more generous
-    k_sigma = min(7, max(3, k_all - 1))
+    if hubness == "csls":
+        # CSLS neighbour table: columns [cpd_id, neighbour_id, distance=-csls, csls]
+        nn_df = cosine_csls_neighbour_table(
+            X=X,
+            ids=ids,
+            k_all=k_all,
+            k_csls=csls_k,
+        )
+        use_local_scaling = False
+        # For filtering/visualisation in this branch, use similarity = -distance
+        nn_df["similarity"] = -nn_df["distance"]
+    else:
+        # Plain kNN on chosen metric
+        nn = NearestNeighbors(n_neighbors=k_all, metric=metric)
+        nn.fit(X)
+        distances, indices = nn.kneighbors(X)
 
+        rows: List[Dict[str, float | str]] = []
+        for i in range(n_samples):
+            for dist, j in zip(distances[i][1:], indices[i][1:]):  # skip self
+                rows.append(
+                    {"cpd_id": ids[i], "neighbour_id": ids[j], "distance": float(dist)}
+                )
+        nn_df = pd.DataFrame(rows)
+        use_local_scaling = (hubness == "local-scaling")
+        # For similarity-based filtering/widths when hubness == "none"
+        nn_df["similarity"] = -nn_df["distance"]
+
+    # 3) Mutual k-NN backbone
+    k_mutual = max_edges_per_node * 2
     mutual_edges = build_mutual_knn_edges(nn_df=nn_df, k_mutual=k_mutual)
-    weighted = local_scaling_weights(nn_df=nn_df, edges=mutual_edges, k_sigma=k_sigma)
 
-    # Apply local-scale weight threshold
-    if threshold is not None:
-        weighted = [e for e in weighted if e[3] >= float(threshold)]
+    # 4) Weighting + threshold + degree cap
+    if use_local_scaling:
+        # Zelnik–Manor local scaling on raw distance
+        weighted = local_scaling_weights(nn_df=nn_df, edges=mutual_edges, k_sigma=min(7, max(3, k_all - 1)))
+        if threshold is not None:
+            weighted = [e for e in weighted if e[3] >= float(threshold)]  # keep strong weights
+        weighted = cap_degrees_greedily(weighted_edges=weighted, max_degree=max_edges_per_node)
+        edges_df = pd.DataFrame(weighted, columns=["source", "target", "distance", "weight_local_scaled"])
+        edges_df["weight_for_vis"] = rescale_for_vis(weights=edges_df["weight_local_scaled"].to_numpy(), new_min=1.0, new_max=10.0)
+    else:
+        # CSLS or 'none': treat similarity = -distance; threshold on similarity
+        rows2: List[Tuple[str, str, float, float]] = []
+        # Build quick lookup for similarity
+        sim_map: Dict[Tuple[str, str], float] = {}
+        for r in nn_df.itertuples(index=False):
+            a, b = sorted([r.cpd_id, r.neighbour_id])
+            s = float(getattr(r, "similarity"))
+            if (a, b) not in sim_map or s > sim_map[(a, b)]:
+                sim_map[(a, b)] = s
 
-    # Enforce degree cap
-    weighted = cap_degrees_greedily(weighted_edges=weighted, max_degree=max_edges_per_node)
+        for a, b, d in mutual_edges:
+            s = sim_map.get(tuple(sorted([a, b])), float("-inf"))
+            rows2.append((a, b, float(d), float(s)))
 
-    # 5) TSV outputs (nodes + edges)
+        edges_df = pd.DataFrame(rows2, columns=["source", "target", "distance", "similarity"])
+        if threshold is not None:
+            edges_df = edges_df.loc[edges_df["similarity"] >= float(threshold)]
+        # degree cap using similarity as the weight
+        weighted = [(r.source, r.target, float(r.distance), float(r.similarity)) for r in edges_df.itertuples(index=False)]
+        weighted = cap_degrees_greedily(weighted_edges=weighted, max_degree=max_edges_per_node)
+        edges_df = pd.DataFrame(weighted, columns=["source", "target", "distance", "similarity"])
+        edges_df["weight_for_vis"] = rescale_for_vis(weights=edges_df["similarity"].to_numpy(), new_min=1.0, new_max=10.0)
+
+    # 5) Write TSVs
     nodes_df = pd.DataFrame({id_col: ids, dataset_col: dsets})
     if type_col in df.columns:
         nodes_df[type_col] = types
-
-    edges_df = pd.DataFrame(weighted, columns=["source", "target", "distance", "weight_local_scaled"])
-    edges_df["weight_for_vis"] = rescale_for_vis(
-        weights=edges_df["weight_local_scaled"].to_numpy(), new_min=1.0, new_max=10.0
-    )
 
     write_tsv(df=nodes_df, path=Path(output_dir) / "network_nodes.tsv", logger=logger, index=False)
     write_tsv(df=edges_df, path=Path(output_dir) / "network_edges.tsv", logger=logger, index=False)
@@ -717,8 +834,6 @@ def generate_network(
 
     try:
         net = Network(height="800px", width="100%", notebook=False, directed=False)
-
-        # Colour nodes: prefer type_col if present, else dataset_col
         colour_by = type_col if type_col in df.columns else dataset_col
         for i in range(n_samples):
             label = ids[i]
@@ -737,6 +852,7 @@ def generate_network(
         logger.info("Interactive network visualisation saved to %s", html_path)
     except Exception as exc:
         logger.error("Failed to render network HTML: %s", exc)
+
 
 
 
@@ -777,8 +893,29 @@ def parse_args() -> argparse.Namespace:
 
     # Network
     parser.add_argument("--network", action="store_true", help="If set, build the network outputs/HTML")
-    parser.add_argument("--threshold", type=float, default=0.2, help="Distance threshold for network edges (default: 0.2)")
+    parser.add_argument(
+                        "--threshold",
+                        type=float,
+                        default=0.3,
+                        help="Edge filter threshold. If --hubness local-scaling: keep edges with local-scaled weight ≥ threshold (0–1). "
+                            "If --hubness csls/none: keep edges with similarity ≥ threshold (suggest 0.2–0.6)."
+                    )
+
+
     parser.add_argument("--network_max_edges_per_node", type=int, default=10, help="Cap of edges kept per node (default: 10)")
+    parser.add_argument(
+                        "--hubness",
+                        choices=["none", "local-scaling", "csls"],
+                        default="local-scaling",
+                        help="Hubness handling: 'local-scaling' (existing), 'csls' (Cross-domain Similarity Local Scaling), or 'none'."
+                    )
+    parser.add_argument(
+                        "--csls_k",
+                        type=int,
+                        default=10,
+                        help="Neighbourhood size k for CSLS local means r_i and r_j."
+                    )
+
 
     return parser.parse_args()
 
@@ -865,17 +1002,21 @@ def main() -> None:
     # Network (optional)
     if args.network:
         generate_network(
-            df=df,
-            output_dir=args.output_dir,
-            threshold=args.threshold,
-            metric=args.nn_metric,
-            prefix=args.latent_prefix,
-            id_col=args.id_col,
-            dataset_col=args.dataset_col,
-            type_col=args.type_col,
-            max_edges_per_node=args.network_max_edges_per_node,
-            logger=logger,
-        )
+                        df=df,
+                        output_dir=args.output_dir,
+                        threshold=args.threshold,
+                        metric=args.nn_metric,
+                        prefix=args.latent_prefix,
+                        id_col=args.id_col,
+                        dataset_col=args.dataset_col,
+                        type_col=args.type_col,
+                        max_edges_per_node=args.network_max_edges_per_node,
+                        hubness=args.hubness,
+                        csls_k=args.csls_k,
+                        logger=logger,
+                    )
+
+
     else:
         logger.info("Skipping interactive network (enable with --network).")
 
