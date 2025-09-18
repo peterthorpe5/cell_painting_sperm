@@ -177,6 +177,292 @@ def validate_columns(*, df: pd.DataFrame, required: Iterable[str], logger: loggi
         raise ValueError(f"Missing required columns: {missing}")
 
 
+def _html_escape(text: str) -> str:
+    """
+    Escape minimal HTML entities for safe insertion into an HTML string.
+
+    Parameters
+    ----------
+    text : str
+        Raw text to escape.
+
+    Returns
+    -------
+    str
+        HTML-escaped text.
+    """
+    import html
+    return html.escape(text, quote=True)
+
+
+def _inject_html_legend(*, html_text: str, colour_map: dict[str, str],
+                        counts: dict[str, int]) -> str:
+    """
+    Inject a floating legend (category → colour swatch) into a PyVis HTML.
+
+    Parameters
+    ----------
+    html_text : str
+        The original HTML produced by PyVis.
+    colour_map : dict[str, str]
+        Mapping from category string to hex colour (e.g., '#1f77b4').
+    counts : dict[str, int]
+        Mapping from category string to its node count for display.
+
+    Returns
+    -------
+    str
+        Modified HTML with an appended legend container before </body>.
+    """
+    # Build legend items (sorted by category for determinism)
+    items = []
+    for cat in sorted(colour_map.keys()):
+        colour = colour_map[cat]
+        label = cat if cat else "(blank)"
+        n = counts.get(cat, 0)
+        items.append(
+            f'<div class="legend-row">'
+            f'  <span class="swatch" style="background:{_html_escape(colour)};"></span>'
+            f'  <span class="label">{_html_escape(label)}'
+            f'  <span class="count">(n={n})</span></span>'
+            f'</div>'
+        )
+
+    legend_html = f"""
+<!-- Injected legend -->
+<style>
+  .legend-container {{
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    max-height: 70vh;
+    overflow: auto;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #ddd;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    border-radius: 10px;
+    padding: 10px 12px;
+    z-index: 9999;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+                 Arial, "Noto Sans", "Liberation Sans", sans-serif;
+    font-size: 13px;
+    color: #222;
+  }}
+  .legend-title {{
+    font-weight: 600;
+    margin-bottom: 8px;
+  }}
+  .legend-row {{
+    display: flex;
+    align-items: center;
+    margin: 4px 0;
+    gap: 8px;
+    line-height: 1.25;
+    white-space: nowrap;
+  }}
+  .swatch {{
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid rgba(0,0,0,0.15);
+    flex-shrink: 0;
+  }}
+  .label .count {{
+    color: #666;
+    margin-left: 6px;
+    font-weight: 400;
+  }}
+</style>
+<div class="legend-container">
+  <div class="legend-title">Legend: node colour by category</div>
+  {''.join(items)}
+</div>
+"""
+    # Insert just before </body> (fallback: append if tag missing)
+    lower = html_text.lower()
+    idx = lower.rfind("</body>")
+    if idx == -1:
+        return html_text + legend_html
+    return html_text[:idx] + legend_html + html_text[idx:]
+
+
+
+def _categorical_palette(n: int) -> list[str]:
+    """
+    Return a deterministic list of n distinct CSS hex colours.
+
+    Parameters
+    ----------
+    n : int
+        Number of colours required.
+
+    Returns
+    -------
+    list[str]
+        Hex colour strings (e.g., '#1f77b4').
+
+    Notes
+    -----
+    Uses a fixed qualitative palette and repeats deterministically if more
+    categories are requested than the base palette length. This ensures
+    stable colouring across runs.
+    """
+    base = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+        "#393b79", "#637939", "#8c6d31", "#843c39", "#7b4173",
+        "#3182bd", "#e6550d", "#31a354", "#756bb1", "#636363",
+    ]
+    if n <= len(base):
+        return base[:n]
+    # Extend deterministically without randomness
+    out: list[str] = []
+    i: int = 0
+    while len(out) < n:
+        out.append(base[i % len(base)])
+        i += 1
+    return out
+
+
+def _draw_graph_html_pyvis(
+    *,
+    nodes: pd.DataFrame,
+    edges: pd.DataFrame,
+    output_html: Path,
+    logger: logging.Logger
+) -> None:
+    """
+    Write an interactive network HTML using PyVis (fallback if KeplerMapper is unavailable),
+    with coloured and sized nodes and an injected legend.
+
+    Parameters
+    ----------
+    nodes : pd.DataFrame
+        Node table with columns:
+        - 'node_id' : str, node identifier
+        - 'size' : int, number of members in the node (used for node sizing)
+        - 'colour_value' : str, categorical value for colouring (e.g., Dataset)
+        - 'members' : str, semicolon-separated cpd_id list for tooltip
+    edges : pd.DataFrame
+        Edge table with columns: 'source', 'target'.
+    output_html : Path
+        Destination HTML file path.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Behaviour
+    ---------
+    - Colours nodes by the categorical 'colour_value'.
+    - Scales node size by 'size' via the PyVis 'value' attribute.
+    - Adds a floating legend (category → colour, with counts).
+    - Includes informative tooltips with node id, category, and members.
+    """
+    from pyvis.network import Network
+
+    df = nodes.copy()
+    if "colour_value" not in df.columns:
+        df["colour_value"] = ""
+
+    # Normalise types and missing values
+    df["colour_value"] = df["colour_value"].fillna("").astype(str)
+    df["members"] = df.get("members", "").fillna("").astype(str)
+    df["size"] = df.get("size", 1).fillna(1).astype(int)
+    df["node_id"] = df.get("node_id").astype(str)
+
+    # Build categorical colour map and counts
+    categories = sorted(df["colour_value"].unique().tolist())
+    palette = _categorical_palette(n=len(categories))
+    colour_map = dict(zip(categories, palette))
+    cat_counts = df["colour_value"].value_counts(dropna=False).to_dict()
+
+    net = Network(
+        height="800px",
+        width="100%",
+        directed=False,
+        notebook=False,
+        bgcolor="#ffffff",
+        font_color="#000000",
+    )
+    net.toggle_physics(True)
+
+    # Add nodes
+    for _, row in df.iterrows():
+        label = row["node_id"]
+        cat = row["colour_value"]
+        members = row["members"]
+        value = int(row["size"])
+        colour = colour_map.get(cat, "#999999")
+
+        title = (
+            f"<b>Node:</b> {label}"
+            f"<br><b>Colour:</b> {cat if cat else '(blank)'}"
+            f"<br><b>Members:</b> { _html_escape(members) }"
+        )
+
+        net.add_node(
+            n_id=label,
+            label=label,
+            title=title,
+            color=colour,
+            value=value,
+        )
+
+    # Add edges
+    for _, row in edges.iterrows():
+        net.add_edge(
+            str(row["source"]),
+            str(row["target"])
+        )
+
+    # Write to a temporary file first, then inject legend HTML
+    output_html.parent.mkdir(parents=True, exist_ok=True)
+    tmp_html = output_html.with_suffix(".tmp.html")
+    net.write_html(path=str(tmp_html))
+
+    html_text = tmp_html.read_text(encoding="utf-8")
+    html_with_legend = _inject_html_legend(
+        html_text=html_text,
+        colour_map=colour_map,
+        counts=cat_counts,
+    )
+    output_html.write_text(html_with_legend, encoding="utf-8")
+
+    # Best-effort clean-up
+    try:
+        tmp_html.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    logger.info("Saved interactive topology HTML (with legend) to %s", output_html)
+
+
+
+
+def _majority_label_and_purity(
+    *, labels: pd.Series
+) -> tuple[str, float]:
+    """
+    Compute the majority label and its purity.
+
+    Parameters
+    ----------
+    labels : pd.Series
+        Categorical labels for samples in a node.
+
+    Returns
+    -------
+    tuple[str, float]
+        (majority_label, purity_fraction in [0, 1])
+    """
+    if labels.empty:
+        return ("", 0.0)
+    counts = labels.astype(str).value_counts(dropna=False)
+    maj = counts.idxmax()
+    purity = counts.max() / counts.sum()
+    return (str(maj), float(purity))
+
+
 def clean_merge_artifacts(*, df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
     """
     Drop merge artefacts (e.g. *_x, *_y, 'index') and reorder metadata first.
@@ -486,14 +772,17 @@ def build_topological_graph(
                 vals = df_meta.iloc[members][colour_by].astype(str)
                 if len(vals):
                     colour_val = vals.value_counts().idxmax()
+            maj, purity = _majority_label_and_purity(labels=df_meta.iloc[members][colour_by])
             node_rows.append(
                 {
                     "node_id": str(nid),
                     "size": int(len(members)),
-                    "colour_value": colour_val if colour_val is not None else "",
+                    "colour_value": maj,
+                    "purity": purity,
                     "members": ";".join(df_meta.iloc[members]["cpd_id"].astype(str).tolist()),
                 }
-            )
+                            )
+
 
         # Deduplicate undirected edges using string node IDs
         edge_keys = set()
@@ -524,6 +813,7 @@ def build_topological_graph(
         # PDF (static)
         _draw_graph_pdf(nodes=nodes_df, edges=edges_df, output_pdf=pdf_path, logger=logger)
 
+
         # HTML (interactive) via KeplerMapper
         if interactive:
             logger.info("Building interactive HTML visualisation with KeplerMapper.")
@@ -531,18 +821,40 @@ def build_topological_graph(
                 tooltips = _build_tooltips_array(df_meta=df_meta, tooltip_cols=tooltip_cols)
                 tooltips = list(map(str, tooltips))  # ensure list[str], not ndarray/DataFrame
 
-                # KeplerMapper wants a 1-D color vector; use first lens component
-                color_vec = lens[:, 0] if getattr(lens, "ndim", 1) > 1 else lens
+                # --- Point 1: ensure contiguous numpy arrays and 1-D colour vector ---
+                X_arr = np.asarray(X.values if hasattr(X, "values") else X)
+                X_arr = np.ascontiguousarray(X_arr)
+                lens_arr = np.asarray(lens)
+                lens_arr = np.ascontiguousarray(lens_arr)
 
-                mapper.visualize(
-                    graph,
-                    path_html=str(html_path),
-                    title="Topological graph (Mapper)",
-                    X=X.values if hasattr(X, "values") else np.asarray(X),
-                    lens=lens,
-                    color_function=color_vec,
-                    custom_tooltips=tooltips,
-                )
+                # KeplerMapper likes a 1-D colour array; take the first lens component if 2-D
+                if lens_arr.ndim > 1:
+                    color_vec = np.ascontiguousarray(lens_arr[:, 0]).ravel()
+                else:
+                    color_vec = np.ascontiguousarray(lens_arr).ravel()
+
+                # --- Point 2: try color_function, fall back to color_values if TypeError ---
+                try:
+                    mapper.visualize(
+                        graph,
+                        path_html=str(html_path),
+                        title="Topological graph (Mapper)",
+                        X=X_arr,
+                        lens=lens_arr,
+                        color_function=color_vec,
+                        custom_tooltips=tooltips,
+                    )
+                except TypeError:
+                    # Some versions expect 'color_values' instead of 'color_function'
+                    mapper.visualize(
+                        graph,
+                        path_html=str(html_path),
+                        title="Topological graph (Mapper)",
+                        X=X_arr,
+                        lens=lens_arr,
+                        color_values=color_vec,
+                        custom_tooltips=tooltips,
+                    )
                 logger.info("Saved interactive topology HTML to %s", html_path)
             except Exception as exc:
                 logger.warning("KeplerMapper HTML visualisation failed, falling back to PyVis: %s", exc)
@@ -814,11 +1126,11 @@ def parse_args() -> argparse.Namespace:
 
     # Mapper/topo
     p.add_argument("--mapper_lens", choices=["pca", "umap", "identity"], default="pca", help="Lens for Mapper (default: pca).")
-    p.add_argument("--mapper_n_cubes", type=int, default=15, help="Mapper cover n_cubes (default: 15).")
+    p.add_argument("--mapper_n_cubes", type=int, default=12, help="Mapper cover n_cubes (default: 12).")
     p.add_argument("--mapper_overlap", type=float, default=0.4, help="Mapper cover overlap fraction (default: 0.4).")
     p.add_argument("--mapper_cluster", choices=["dbscan", "hdbscan"], default="dbscan", help="Clusterer in bins (default: dbscan).")
-    p.add_argument("--mapper_eps", type=float, default=0.5, help="DBSCAN eps (default: 0.5).")
-    p.add_argument("--mapper_min_samples", type=int, default=5, help="DBSCAN min_samples (default: 5).")
+    p.add_argument("--mapper_eps", type=float, default=0.8, help="DBSCAN eps (default: 0.8).")
+    p.add_argument("--mapper_min_samples", type=int, default=3, help="DBSCAN min_samples (default: 3).")
     p.add_argument("--knn_k", type=int, default=10, help="k for k-NN fallback when Mapper is unavailable (default: 10).")
     p.add_argument("--interactive_topo", action="store_true",
                    help="Write an interactive HTML for the topological graph.")
