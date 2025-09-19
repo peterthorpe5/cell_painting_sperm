@@ -745,7 +745,7 @@ def build_topological_graph(
         # choose clusterer
         if cluster_alg.lower() == "hdbscan" and HDBSCAN_AVAILABLE:
             logger.info("Mapper clustering: HDBSCAN")
-            clusterer = hdbscan.HDBSCAN(min_cluster_size=max(5, dbscan_min_samples))
+            clusterer = hdbscan.HDBSCAN(min_cluster_size=max(4, dbscan_min_samples))
         else:
             from sklearn.cluster import DBSCAN
             logger.info("Mapper clustering: DBSCAN(eps=%.3f, min_samples=%d)", dbscan_eps, dbscan_min_samples)
@@ -821,21 +821,18 @@ def build_topological_graph(
         if interactive:
             logger.info("Building interactive HTML visualisation with KeplerMapper.")
             try:
-                # Filter tooltip columns to those that exist
+                # 1) Filter tooltip columns to those present
                 tooltip_keep = [c for c in tooltip_columns if c in df_meta.columns]
                 if len(tooltip_keep) != len(tooltip_columns):
                     missing = sorted(set(tooltip_columns) - set(tooltip_keep))
                     logger.warning("Dropping missing tooltip columns: %s", ", ".join(missing))
 
-                # Build per-sample tooltip strings (one string per row)
+                # 2) Build per-sample tooltip strings (one string per row)
                 tooltips_df = df_meta[tooltip_keep].astype(str)
-                tooltips = tooltips_df.apply(lambda r: " | ".join(r.values.tolist()), axis=1).tolist()
+                custom_tooltips = tooltips_df.apply(lambda r: " | ".join(r.values.tolist()), axis=1).tolist()
 
-                # Ensure contiguous arrays used earlier for mapper.map (ok to keep)
-                X_arr = np.ascontiguousarray(X.values if hasattr(X, "values") else X)
-                lens_arr = np.ascontiguousarray(np.asarray(lens))
-
-                # KeplerMapper prefers a 1-D colour vector; use first lens component if 2-D
+                # 3) Ensure lens is a 1-D colour vector
+                lens_arr = np.asarray(lens)
                 if lens_arr.ndim > 1:
                     color_vec = np.ascontiguousarray(lens_arr[:, 0]).ravel()
                     color_name = "lens[0]"
@@ -843,26 +840,27 @@ def build_topological_graph(
                     color_vec = np.ascontiguousarray(lens_arr).ravel()
                     color_name = "lens"
 
-                # Render interactive HTML (support both older/newer KM signatures)
+                # 4) KeplerMapper visualise (handle old/new param name)
                 try:
                     mapper.visualize(
                         graph=graph,
-                        path_html=str(out_dir / "topo_mapper.html"),
+                        path_html=str(out_dir / "topo_graph.html"),
                         title="Topological Mapper",
                         color_function=color_vec,
                         color_function_name=color_name,
-                        custom_tooltips=tooltips,
+                        custom_tooltips=custom_tooltips,
                     )
                 except TypeError:
                     mapper.visualize(
                         graph=graph,
-                        path_html=str(out_dir / "topo_mapper.html"),
+                        path_html=str(out_dir / "topo_graph.html"),
                         title="Topological Mapper",
-                        color_values=color_vec,            # fallback param name
+                        color_values=color_vec,  # legacy kw
                         color_function_name=color_name,
-                        custom_tooltips=tooltips,
+                        custom_tooltips=custom_tooltips,
                     )
-                logger.info("Interactive topo HTML saved to %s", out_dir / "topo_mapper.html")
+                logger.info("Saved interactive topology HTML to %s", out_dir / "topo_graph.html")
+
 
             except Exception as exc:
                 logger.warning("KeplerMapper HTML visualisation failed, falling back to PyVis: %s", exc)
@@ -1149,26 +1147,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--colour_by", default="Library", help="Metadata column to colour by (default: Library).")
     p.add_argument("--embedding", choices=["topo", "umap", "phate", "all"], default="all",
                    help="Which outputs to compute (default: topo).")
-
     # Mapper/topo
     p.add_argument("--mapper_lens", choices=["pca", "umap", "identity"], default="pca", help="Lens for Mapper (default: pca).")
-    p.add_argument("--mapper_n_cubes", type=int, default=12, help="Mapper cover n_cubes (default: 12).")
-    p.add_argument("--mapper_overlap", type=float, default=0.4, help="Mapper cover overlap fraction (default: 0.4).")
+    p.add_argument("--mapper_n_cubes", type=int, default=15, help="Mapper cover n_cubes (default: 15).")
+    p.add_argument("--mapper_overlap", type=float, default=0.6, help="Mapper cover overlap fraction (default: 0.6).")
     p.add_argument("--mapper_cluster", choices=["dbscan", "hdbscan"], default="dbscan", help="Clusterer in bins (default: dbscan).")
     p.add_argument("--mapper_eps", type=float, default=0.8, help="DBSCAN eps (default: 0.8).")
-    p.add_argument("--mapper_min_samples", type=int, default=3, help="DBSCAN min_samples (default: 3).")
+    p.add_argument("--mapper_min_samples", type=int, default=1, help="DBSCAN min_samples (default: 1).")
     p.add_argument("--knn_k", type=int, default=10, help="k for k-NN fallback when Mapper is unavailable (default: 10).")
     p.add_argument("--interactive_topo", action="store_true",
                    help="Write an interactive HTML for the topological graph.")
     p.add_argument("--tooltip_columns", nargs="+",
                    default=["cpd_id", "cpd_type", "Library"],
                    help="Columns to include in node/sample tooltips for interactive topo HTML.")
-
-
-    # UMAP / PHATE params
     p.add_argument("--umap_metric", default="cosine", help="UMAP metric (default: cosine).")
-    p.add_argument("--umap_n_neighbors", type=int, default=40, help="UMAP n_neighbours (default: 40).")
-    p.add_argument("--umap_min_dist", type=float, default=0.25, help="UMAP min_dist (default: 0.25).")
+    p.add_argument("--umap_n_neighbors", type=int, default=30, help="UMAP n_neighbours (default: 40).")
+    p.add_argument("--umap_min_dist", type=float, default=0.05, help="UMAP min_dist (default: 0.25).")
     p.add_argument("--phate_knn", type=int, default=15, help="PHATE k-NN (default: 15).")
 
     return p.parse_args()
