@@ -822,9 +822,9 @@ def build_topological_graph(
             logger.info("Building interactive HTML visualisation with KeplerMapper.")
             try:
                 # 1) Filter tooltip columns to those present
-                tooltip_keep = [c for c in tooltip_columns if c in df_meta.columns]
-                if len(tooltip_keep) != len(tooltip_columns):
-                    missing = sorted(set(tooltip_columns) - set(tooltip_keep))
+                tooltip_keep = [c for c in tooltip_cols if c in df_meta.columns]
+                if len(tooltip_keep) != len(tooltip_cols):
+                    missing = sorted(set(tooltip_cols) - set(tooltip_keep))
                     logger.warning("Dropping missing tooltip columns: %s", ", ".join(missing))
 
                 # 2) Build per-sample tooltip strings (one string per row)
@@ -840,7 +840,7 @@ def build_topological_graph(
                     color_vec = np.ascontiguousarray(lens_arr).ravel()
                     color_name = "lens"
 
-                # 4) KeplerMapper visualise (handle old/new param name)
+                # 4) KeplerMapper visualise (handle old/new kw name)
                 try:
                     mapper.visualize(
                         graph=graph,
@@ -855,12 +855,11 @@ def build_topological_graph(
                         graph=graph,
                         path_html=str(out_dir / "topo_graph.html"),
                         title="Topological Mapper",
-                        color_values=color_vec,  # legacy kw
+                        color_values=color_vec,   # legacy kw
                         color_function_name=color_name,
                         custom_tooltips=custom_tooltips,
                     )
                 logger.info("Saved interactive topology HTML to %s", out_dir / "topo_graph.html")
-
 
             except Exception as exc:
                 logger.warning("KeplerMapper HTML visualisation failed, falling back to PyVis: %s", exc)
@@ -999,16 +998,19 @@ def run_umap(
     """
     Compute UMAP (if available) and save PDF + coords TSV.
 
+    The PDF is rendered as a labels-only plot:
+    each sample is drawn as its cpd_id text, coloured by `colour_by`.
+
     Parameters
     ----------
-    X : pd.DataFrame
+    X : pandas.DataFrame
         Feature matrix.
-    df_meta : pd.DataFrame
+    df_meta : pandas.DataFrame
         Metadata (must include 'cpd_id').
-    out_dir : Path
+    out_dir : pathlib.Path
         Output directory.
     colour_by : str
-        Column for colouring if present.
+        Metadata column to colour text by; falls back to 'Library'/'Dataset'.
     metric : str
         'cosine' | 'euclidean'.
     n_neighbors : int
@@ -1022,36 +1024,69 @@ def run_umap(
         logger.warning("UMAP not available; skipping.")
         return
 
+    # Resolve the colour-by column robustly (Library/Dataset fallback)
+    try:
+        colour_col = resolve_meta_column(
+            df=df_meta,
+            requested=colour_by,
+            fallbacks=["Library", "Dataset"],
+            logger=logger,
+        )
+    except Exception:
+        colour_col = colour_by if colour_by in df_meta.columns else "cpd_id"
+        if colour_col == "cpd_id":
+            logger.warning("Could not resolve colour_by column; using 'cpd_id' as a fallback.")
+
     reducer = umap.UMAP(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
         metric=metric,
-        random_state=42
+        random_state=42,
     )
     emb = reducer.fit_transform(X.values)
-    coords = pd.DataFrame({"cpd_id": df_meta["cpd_id"].astype(str), "UMAP1": emb[:, 0], "UMAP2": emb[:, 1]})
+
+    # Save coords (TSV)
+    coords = pd.DataFrame(
+        {
+            "cpd_id": df_meta["cpd_id"].astype(str),
+            "UMAP1": emb[:, 0],
+            "UMAP2": emb[:, 1],
+            colour_col: df_meta[colour_col].astype(str),
+        }
+    )
     write_tsv(df=coords, path=out_dir / "umap_coords.tsv", logger=logger, index=False)
 
-    # simple PDF
-    fig, ax = plt.subplots(figsize=(8, 6))
-    if colour_by in df_meta.columns:
-        # build categorical colour map
-        cats = df_meta[colour_by].astype(str).tolist()
-        uniq = sorted(set(cats))
-        cmap = mpl.colormaps.get("tab20", mpl.colormaps["tab20"])
-        colour_map = {c: cmap(i % cmap.N) for i, c in enumerate(uniq)}
-        colours = [colour_map[c] for c in cats]
-        ax.scatter(coords["UMAP1"], coords["UMAP2"], s=6, c=colours, lw=0, alpha=0.95)
-        ax.set_title(f"UMAP ({metric}) coloured by {colour_by}")
-    else:
-        ax.scatter(coords["UMAP1"], coords["UMAP2"], s=6, c="0.3", lw=0, alpha=0.95)
-        ax.set_title(f"UMAP ({metric})")
+    # Labels-only PDF: text coloured by Library (or resolved column)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    cats = coords[colour_col].astype(str).tolist()
+    uniq = sorted(set(cats))
+    cmap = mpl.colormaps.get("tab20", mpl.colormaps["tab20"])
+    colour_map = {c: cmap(i % cmap.N) for i, c in enumerate(uniq)}
 
-    ax.set_xticks([]); ax.set_yticks([])
+    # Draw text labels only (no scatter points)
+    xs = coords["UMAP1"].to_numpy()
+    ys = coords["UMAP2"].to_numpy()
+    labels = coords["cpd_id"].astype(str).tolist()
+    for x, y, lab, cat in zip(xs, ys, labels, cats):
+        ax.text(
+            x=float(x),
+            y=float(y),
+            s=lab,
+            color=colour_map.get(cat, (0.3, 0.3, 0.3, 1.0)),
+            fontsize=5,
+            ha="center",
+            va="center",
+            alpha=0.95,
+        )
+
+    ax.set_title(f"UMAP ({metric}) — labels: cpd_id, coloured by {colour_col}")
+    ax.set_xticks([])
+    ax.set_yticks([])
     fig.tight_layout()
     fig.savefig(out_dir / "umap.pdf", dpi=300)
     plt.close(fig)
-    logger.info("Saved UMAP PDF + coords.")
+    logger.info("Saved UMAP PDF + coords (labels-only; coloured by %s).", colour_col)
+
 
 
 def resolve_meta_column(*, df: pd.DataFrame, requested: str,
