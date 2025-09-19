@@ -1147,7 +1147,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--plots", required=True, help="Output directory for plots/TSVs.")
     p.add_argument("--latent_prefix", default=None, help="Prefix for latent columns (default: use digit-named).")
     p.add_argument("--colour_by", default="Library", help="Metadata column to colour by (default: Library).")
-    p.add_argument("--embedding", choices=["topo", "umap", "phate", "all"], default="topo",
+    p.add_argument("--embedding", choices=["topo", "umap", "phate", "all"], default="all",
                    help="Which outputs to compute (default: topo).")
 
     # Mapper/topo
