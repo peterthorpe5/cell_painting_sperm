@@ -821,50 +821,49 @@ def build_topological_graph(
         if interactive:
             logger.info("Building interactive HTML visualisation with KeplerMapper.")
             try:
-                tooltips = _build_tooltips_array(df_meta=df_meta, tooltip_cols=tooltip_cols)
+                # Filter tooltip columns to those that exist
                 tooltip_keep = [c for c in tooltip_columns if c in df_meta.columns]
                 if len(tooltip_keep) != len(tooltip_columns):
                     missing = sorted(set(tooltip_columns) - set(tooltip_keep))
                     logger.warning("Dropping missing tooltip columns: %s", ", ".join(missing))
-                tooltips = tooltip_keep
 
-                tooltips = list(map(str, tooltips))  # ensure list[str], not ndarray/DataFrame
+                # Build per-sample tooltip strings (one string per row)
+                tooltips_df = df_meta[tooltip_keep].astype(str)
+                tooltips = tooltips_df.apply(lambda r: " | ".join(r.values.tolist()), axis=1).tolist()
 
-                # --- Point 1: ensure contiguous numpy arrays and 1-D colour vector ---
-                X_arr = np.asarray(X.values if hasattr(X, "values") else X)
-                X_arr = np.ascontiguousarray(X_arr)
-                lens_arr = np.asarray(lens)
-                lens_arr = np.ascontiguousarray(lens_arr)
+                # Ensure contiguous arrays used earlier for mapper.map (ok to keep)
+                X_arr = np.ascontiguousarray(X.values if hasattr(X, "values") else X)
+                lens_arr = np.ascontiguousarray(np.asarray(lens))
 
-                # KeplerMapper likes a 1-D colour array; take the first lens component if 2-D
+                # KeplerMapper prefers a 1-D colour vector; use first lens component if 2-D
                 if lens_arr.ndim > 1:
                     color_vec = np.ascontiguousarray(lens_arr[:, 0]).ravel()
+                    color_name = "lens[0]"
                 else:
                     color_vec = np.ascontiguousarray(lens_arr).ravel()
+                    color_name = "lens"
 
-                # --- Point 2: try color_function, fall back to color_values if TypeError ---
+                # Render interactive HTML (support both older/newer KM signatures)
                 try:
                     mapper.visualize(
-                        graph,
-                        path_html=str(html_path),
-                        title="Topological graph (Mapper)",
-                        X=X_arr,
-                        lens=lens_arr,
+                        graph=graph,
+                        path_html=str(out_dir / "topo_mapper.html"),
+                        title="Topological Mapper",
                         color_function=color_vec,
+                        color_function_name=color_name,
                         custom_tooltips=tooltips,
                     )
                 except TypeError:
-                    # Some versions expect 'color_values' instead of 'color_function'
                     mapper.visualize(
-                        graph,
-                        path_html=str(html_path),
-                        title="Topological graph (Mapper)",
-                        X=X_arr,
-                        lens=lens_arr,
-                        color_values=color_vec,
+                        graph=graph,
+                        path_html=str(out_dir / "topo_mapper.html"),
+                        title="Topological Mapper",
+                        color_values=color_vec,            # fallback param name
+                        color_function_name=color_name,
                         custom_tooltips=tooltips,
                     )
-                logger.info("Saved interactive topology HTML to %s", html_path)
+                logger.info("Interactive topo HTML saved to %s", out_dir / "topo_mapper.html")
+
             except Exception as exc:
                 logger.warning("KeplerMapper HTML visualisation failed, falling back to PyVis: %s", exc)
                 _draw_graph_html_pyvis(
