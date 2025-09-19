@@ -565,37 +565,32 @@ def write_tsv(*, df: pd.DataFrame, path: str | Path, logger: logging.Logger, ind
 
 def _mapper_lens_array(*, X: np.ndarray, method: str, logger: logging.Logger) -> np.ndarray:
     """
-    Compute lens for Mapper.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Feature matrix.
-    method : str
-        'pca', 'umap', or 'identity'.
-    logger : logging.Logger
-        Logger.
-
-    Returns
-    -------
-    np.ndarray
-        Lens array for KeplerMapper.
+    Compute lens for Mapper and always return a NumPy array.
     """
+    from sklearn import config_context
     method = method.lower()
+
     if method == "pca":
         logger.info("Mapper lens: PCA(2)")
-        lens = PCA(n_components=2, random_state=42).fit_transform(X)
-        return lens
+        with config_context(transform_output="default"):  # force NumPy out
+            lens = PCA(n_components=2, random_state=42).fit_transform(X)
+        return np.asarray(lens, dtype=float)
+
     if method == "umap" and UMAP_AVAILABLE:
         logger.info("Mapper lens: UMAP(2)")
         reducer = umap.UMAP(n_neighbors=40, min_dist=0.25, metric="cosine", random_state=42)
         lens = reducer.fit_transform(X)
-        return lens
+        return np.asarray(lens, dtype=float)
+
     if method == "identity":
         logger.info("Mapper lens: identity (raw features)")
-        return X
+        return np.asarray(X, dtype=float)
+
     logger.warning("Mapper lens '%s' unavailable; falling back to PCA(2).", method)
-    return PCA(n_components=2, random_state=42).fit_transform(X)
+    with config_context(transform_output="default"):
+        lens = PCA(n_components=2, random_state=42).fit_transform(X)
+    return np.asarray(lens, dtype=float)
+
 
 
 def _build_tooltips_array(*, df_meta: pd.DataFrame, tooltip_cols: list[str]) -> np.ndarray:
@@ -833,13 +828,15 @@ def build_topological_graph(
                 custom_tooltips = tooltips_df.apply(lambda r: " | ".join(r.values.tolist()), axis=1).tolist()
 
                 # 3) Ensure lens is a 1-D colour vector
-                lens_arr = np.asarray(lens)
-                if lens_arr.ndim > 1:
-                    color_vec = np.ascontiguousarray(lens_arr[:, 0]).ravel()
-                    color_name = "lens[0]"
-                else:
-                    color_vec = np.ascontiguousarray(lens_arr).ravel()
-                    color_name = "lens"
+                # --- Colour vector: STRICT 1-D NumPy, no pandas objects ---
+                # Use categorical codes of the chosen metadata for a stable, interpretable scale.
+                col_series = (df_meta[colour_by].astype(str) if colour_by in df_meta.columns
+                            else pd.Series(["all"] * len(df_meta), index=df_meta.index))
+                cat_codes, cat_uniqs = pd.factorize(col_series, sort=True)
+                color_vec = np.asarray(cat_codes, dtype=float).reshape(-1)  # 1-D NumPy
+                color_name = f"{colour_by} (codes)"
+                assert isinstance(color_vec, np.ndarray) and color_vec.ndim == 1, f"colour vector shape bad: {type(color_vec)}"
+
 
                 # 4) KeplerMapper visualise (support old/new kw)
                 try:
@@ -1226,7 +1223,7 @@ def run_umap(
     # Labels (sparse, collision-aware)
     idx = choose_label_indices(emb=emb, groups=coords[colour_name], mode=label_mode, top_k=label_topk, rng_seed=42)
     if idx:
-        label_xy = repel_label_positions(xy=emb, label_idx=idx, n_iter=80, step=0.02, anchor=0.05)
+        label_xy = repel_label_positions(xy=emb, label_idx=idx, n_iter=60, step=0.02*1, anchor=0.02)
         for (x, y), i in zip(label_xy, idx):
             ax.text(
                 float(x),
@@ -1302,7 +1299,11 @@ def run_phate(
         logger.warning("PHATE not available; skipping.")
         return
 
-    ph = phate.PHATE(k=knn, random_state=42)
+    try:
+        ph = phate.PHATE(knn=knn, random_state=42)
+    except TypeError:
+        ph = phate.PHATE(k=knn, random_state=42)  # fallback for older versions
+
     emb = ph.fit_transform(X.values)
     coords = pd.DataFrame({"cpd_id": df_meta["cpd_id"].astype(str), "PHATE1": emb[:, 0], "PHATE2": emb[:, 1]})
     write_tsv(df=coords, path=out_dir / "phate_coords.tsv", logger=logger, index=False)
@@ -1371,12 +1372,12 @@ def parse_args() -> argparse.Namespace:
                 help="UMAP negative_sample_rate (default: 10).")
     p.add_argument("--umap_densmap", action="store_true",
                 help="Enable densMAP if supported by installed umap-learn.")
-    p.add_argument("--umap_labels", choices=["none", "all", "medoids", "topk"], default="all",
+    p.add_argument("--umap_labels", choices=["none", "all", "medoids", "topk"], default="topk",
                 help="Label strategy for cpd_id (default: medoids).")
-    p.add_argument("--umap_topk", type=int, default=80,
+    p.add_argument("--umap_topk", type=int, default=100,
                 help="If --umap_labels topk, approximate number of labels to place.")
-    p.add_argument("--umap_point_size", type=int, default=7,
-                help="Scatter point size (default: 7).")
+    p.add_argument("--umap_point_size", type=int, default=6,
+                help="Scatter point size (default: 6).")
     p.add_argument("--umap_point_alpha", type=float, default=0.9,
                 help="Scatter point alpha (default: 0.9).")
     p.add_argument("--umap_font_size", type=int, default=2,
