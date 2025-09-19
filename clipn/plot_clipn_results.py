@@ -772,7 +772,10 @@ def build_topological_graph(
                 vals = df_meta.iloc[members][colour_by].astype(str)
                 if len(vals):
                     colour_val = vals.value_counts().idxmax()
-            maj, purity = _majority_label_and_purity(labels=df_meta.iloc[members][colour_by])
+            colour_by_resolved = resolve_meta_column(
+                df=df_meta, requested=colour_by, fallbacks=["Library", "Dataset"], logger=logger
+                        )
+            maj, purity = _majority_label_and_purity(labels=df_meta.iloc[members][colour_by_resolved])
             node_rows.append(
                 {
                     "node_id": str(nid),
@@ -819,6 +822,12 @@ def build_topological_graph(
             logger.info("Building interactive HTML visualisation with KeplerMapper.")
             try:
                 tooltips = _build_tooltips_array(df_meta=df_meta, tooltip_cols=tooltip_cols)
+                tooltip_keep = [c for c in tooltip_columns if c in df_meta.columns]
+                if len(tooltip_keep) != len(tooltip_columns):
+                    missing = sorted(set(tooltip_columns) - set(tooltip_keep))
+                    logger.warning("Dropping missing tooltip columns: %s", ", ".join(missing))
+                tooltips = tooltip_keep
+
                 tooltips = list(map(str, tooltips))  # ensure list[str], not ndarray/DataFrame
 
                 # --- Point 1: ensure contiguous numpy arrays and 1-D colour vector ---
@@ -1048,6 +1057,24 @@ def run_umap(
     logger.info("Saved UMAP PDF + coords.")
 
 
+def resolve_meta_column(*, df: pd.DataFrame, requested: str,
+                        fallbacks: list[str], logger: logging.Logger) -> str:
+    """
+    Return a real column present in df for a requested metadata field (case-insensitive),
+    trying fallbacks if needed.
+    """
+    cols_lower = {c.lower(): c for c in df.columns}
+    req = (requested or "").lower()
+    if req in cols_lower:
+        return cols_lower[req]
+    for name in fallbacks:
+        if name.lower() in cols_lower:
+            real = cols_lower[name.lower()]
+            logger.warning("Column '%s' not found; using '%s' instead.", requested, real)
+            return real
+    raise KeyError(f"None of {[requested, *fallbacks]} present; have: {list(df.columns)}")
+
+
 def run_phate(
     *,
     X: pd.DataFrame,
@@ -1120,7 +1147,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--latent_csv", required=True, help="TSV with latent features + metadata.")
     p.add_argument("--plots", required=True, help="Output directory for plots/TSVs.")
     p.add_argument("--latent_prefix", default=None, help="Prefix for latent columns (default: use digit-named).")
-    p.add_argument("--colour_by", default="Dataset", help="Metadata column to colour by (default: Dataset).")
+    p.add_argument("--colour_by", default="Library", help="Metadata column to colour by (default: Library).")
     p.add_argument("--embedding", choices=["topo", "umap", "phate", "all"], default="topo",
                    help="Which outputs to compute (default: topo).")
 
@@ -1135,7 +1162,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interactive_topo", action="store_true",
                    help="Write an interactive HTML for the topological graph.")
     p.add_argument("--tooltip_columns", nargs="+",
-                   default=["cpd_id", "Dataset", "cpd_type", "Library"],
+                   default=["cpd_id", "cpd_type", "Library"],
                    help="Columns to include in node/sample tooltips for interactive topo HTML.")
 
 
