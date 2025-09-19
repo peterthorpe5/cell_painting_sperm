@@ -108,6 +108,13 @@ try:
     import matplotlib as mpl
 except Exception as exc:
     raise RuntimeError("matplotlib is required for PDF outputs.") from exc
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="'force_all_finite' was renamed to 'ensure_all_finite'",
+    category=FutureWarning,
+    module="sklearn",
+)
 
 
 # =========
@@ -812,31 +819,41 @@ def build_topological_graph(
         # PDF (static)
         _draw_graph_pdf(nodes=nodes_df, edges=edges_df, output_pdf=pdf_path, logger=logger)
 
-
         # HTML (interactive) via KeplerMapper
         if interactive:
             logger.info("Building interactive HTML visualisation with KeplerMapper.")
             try:
-                # 1) Filter tooltip columns to those present
+                # --- tooltips: list[str], NOT pandas objects ---
                 tooltip_keep = [c for c in tooltip_cols if c in df_meta.columns]
                 if len(tooltip_keep) != len(tooltip_cols):
                     missing = sorted(set(tooltip_cols) - set(tooltip_keep))
                     logger.warning("Dropping missing tooltip columns: %s", ", ".join(missing))
                 tooltips_df = df_meta[tooltip_keep].astype(str)
                 custom_tooltips = tooltips_df.apply(lambda r: " | ".join(r.values.tolist()), axis=1).tolist()
+                # just in case:
+                custom_tooltips = [str(t) for t in custom_tooltips]
 
-                # 2) Strictly 1-D NumPy colour vector (no pandas)
-                col_series = (df_meta[colour_by].astype(str) if colour_by in df_meta.columns
-                            else pd.Series(["all"] * len(df_meta), index=df_meta.index))
-                cat_codes, _ = pd.factorize(col_series, sort=True)
-                color_vec = np.asarray(cat_codes, dtype=float).reshape(-1)  # 1-D NumPy
-                color_name = f"{colour_by} (codes)"
-
-                # 3) Ensure X and lens are NumPy (visualize can touch both)
+                # --- STRICT types: NumPy only for X & lens ---
                 X_np = np.asarray(X.values if hasattr(X, "values") else X, dtype=float)
                 lens_np = np.asarray(lens, dtype=float)
 
-                # 4) KeplerMapper visualise (old/new kw compatible)
+                # --- colour vector: 1-D, plain Python list (so KM never calls .ravel on a DF) ---
+                if colour_by in df_meta.columns:
+                    col_series = df_meta[colour_by].astype(str)
+                else:
+                    col_series = pd.Series(["all"] * len(df_meta), index=df_meta.index)
+                cat_codes, _ = pd.factorize(col_series, sort=True)
+                color_vec = np.asarray(cat_codes, dtype=float).reshape(-1)
+                color_vec_list = [float(v) for v in color_vec]   # plain list
+                color_name = f"{colour_by} (codes)"
+
+                # sanity log
+                logger.debug(
+                    "KM types: X=%s lens=%s color=%s; tooltips=%s items",
+                    type(X_np), type(lens_np), type(color_vec_list), len(custom_tooltips)
+                )
+
+                # --- KeplerMapper visualise (support old/new kw) ---
                 try:
                     mapper.visualize(
                         graph=graph,
@@ -844,9 +861,9 @@ def build_topological_graph(
                         title="Topological Mapper",
                         X=X_np,
                         lens=lens_np,
-                        color_function=color_vec,           # 1-D np.ndarray
+                        color_function=color_vec_list,       # list[float], safe
                         color_function_name=color_name,
-                        custom_tooltips=custom_tooltips,    # list[str]
+                        custom_tooltips=custom_tooltips,     # list[str]
                     )
                 except TypeError:
                     mapper.visualize(
@@ -855,15 +872,19 @@ def build_topological_graph(
                         title="Topological Mapper",
                         X=X_np,
                         lens=lens_np,
-                        color_values=color_vec,             # legacy kw
+                        color_values=color_vec_list,         # legacy kw
                         color_function_name=color_name,
                         custom_tooltips=custom_tooltips,
                     )
+
                 logger.info("Saved interactive topology HTML to %s", out_dir / "topo_graph.html")
 
             except Exception as exc:
                 logger.warning("KeplerMapper HTML visualisation failed, falling back to PyVis: %s", exc)
-                _draw_graph_html_pyvis(nodes=nodes_df, edges=edges_df, output_html=html_path, logger=logger)
+                _draw_graph_html_pyvis(
+                    nodes=nodes_df, edges=edges_df,
+                    output_html=html_path, logger=logger
+                )
 
         return
 
