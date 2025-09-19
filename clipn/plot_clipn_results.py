@@ -74,6 +74,7 @@ import pandas as pd
 from sklearn import set_config
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
+from matplotlib import patheffects as pe
 
 set_config(transform_output="pandas")
 
@@ -840,7 +841,7 @@ def build_topological_graph(
                     color_vec = np.ascontiguousarray(lens_arr).ravel()
                     color_name = "lens"
 
-                # 4) KeplerMapper visualise (handle old/new kw name)
+                # 4) KeplerMapper visualise (support old/new kw)
                 try:
                     mapper.visualize(
                         graph=graph,
@@ -855,7 +856,7 @@ def build_topological_graph(
                         graph=graph,
                         path_html=str(out_dir / "topo_graph.html"),
                         title="Topological Mapper",
-                        color_values=color_vec,   # legacy kw
+                        color_values=color_vec,  # legacy kw
                         color_function_name=color_name,
                         custom_tooltips=custom_tooltips,
                     )
@@ -863,10 +864,8 @@ def build_topological_graph(
 
             except Exception as exc:
                 logger.warning("KeplerMapper HTML visualisation failed, falling back to PyVis: %s", exc)
-                _draw_graph_html_pyvis(
-                    nodes=nodes_df, edges=edges_df,
-                    output_html=html_path, logger=logger
-                )
+                _draw_graph_html_pyvis(nodes=nodes_df, edges=edges_df, output_html=html_path, logger=logger)
+
 
 
         return
@@ -980,6 +979,166 @@ def _draw_graph_pdf(*, nodes: pd.DataFrame, edges: pd.DataFrame, output_pdf: Pat
     logger.info("Saved topological graph PDF to %s", output_pdf)
 
 
+def repel_label_positions(
+    *,
+    xy: np.ndarray,
+    label_idx: list[int],
+    n_iter: int = 80,
+    step: float = 0.01,
+    anchor: float = 0.05,
+) -> np.ndarray:
+    """
+    Light-weight label de-overlap: nudges labels apart while keeping them near
+    their anchor points.
+
+    Parameters
+    ----------
+    xy : numpy.ndarray
+        (n, 2) point coordinates.
+    label_idx : list[int]
+        Indices that will be labelled.
+    n_iter : int
+        Iterations of repulsion.
+    step : float
+        Repulsion step size.
+    anchor : float
+        Spring force to keep labels near their points.
+
+    Returns
+    -------
+    numpy.ndarray
+        (m, 2) label coordinates in same space (m = len(label_idx)).
+    """
+    P = xy[np.asarray(label_idx)].astype(float).copy()
+    L = P.copy()
+    for _ in range(n_iter):
+        # spring to anchor
+        L += anchor * (P - L)
+        # pairwise repulsion between labels
+        for i in range(L.shape[0]):
+            d = L[i] - L
+            dist2 = (d ** 2).sum(axis=1) + 1e-9
+            push = (d / dist2[:, None]).sum(axis=0)
+            L[i] += step * push
+    return L
+
+def resolve_colour_series(
+    *,
+    df_meta: pd.DataFrame,
+    requested: str,
+    logger: logging.Logger
+) -> tuple[pd.Series, str]:
+    """
+    Resolve colour-by column robustly (Library/Dataset fallback), return the series
+    and the resolved column name.
+    """
+    try:
+        col = resolve_meta_column(
+            df=df_meta, requested=requested, fallbacks=["Library", "Dataset"], logger=logger
+        )
+    except Exception:
+        col = requested if requested in df_meta.columns else ("Library" if "Library" in df_meta.columns else None)
+        if col is None:
+            logger.warning("Could not resolve colour_by; using constant 'all'.")
+            return pd.Series(["all"] * len(df_meta), index=df_meta.index), "all"
+        if col != requested:
+            logger.warning("Colour column '%s' not found; using '%s'.", requested, col)
+    return df_meta[col].astype(str), col
+
+
+def preprocess_latents(
+    *,
+    X: pd.DataFrame,
+    do_l2: bool = True,
+    pca_max_dims: int | None = 20,
+    pca_whiten: bool = True,
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    """
+    Optional latent-space preprocessing to stabilise neighbourhoods and UMAP.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Latent features (rows=samples).
+    do_l2 : bool
+        If True, L2-normalise rows (good for cosine).
+    pca_max_dims : int | None
+        If set, project to min(pca_max_dims, n_dims) with PCA.
+    pca_whiten : bool
+        If True, whiten PCA components (often helps crowding).
+    logger : logging.Logger
+        Logger instance.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Preprocessed features (same row index).
+    """
+    Xw = X.to_numpy(dtype=float, copy=True)
+
+    if do_l2:
+        norms = np.linalg.norm(Xw, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        Xw = Xw / norms
+
+    if pca_max_dims is not None and pca_max_dims > 0:
+        n_comp = int(min(pca_max_dims, Xw.shape[1]))
+        pca = PCA(n_components=n_comp, whiten=pca_whiten, random_state=42)
+        Xw = pca.fit_transform(Xw)
+        logger.info("Preprocess: PCA -> %d dims (whiten=%s).", n_comp, pca_whiten)
+
+    return pd.DataFrame(Xw, index=X.index)
+
+
+
+
+def choose_label_indices(
+    *,
+    emb: np.ndarray,
+    groups: pd.Series,
+    mode: str = "medoids",
+    top_k: int = 60,
+    rng_seed: int = 42
+) -> list[int]:
+    """
+    Decide which samples to label on a 2-D embedding.
+
+    mode:
+      - 'none'    : no labels
+      - 'all'     : label everything (usually unreadable)
+      - 'medoids' : one label per group (e.g., per Library), placed at group medoid
+      - 'topk'    : greedily spread ~top_k labels across space
+    """
+    n = emb.shape[0]
+    if mode == "none":
+        return []
+    if mode == "all":
+        return list(range(n))
+    if mode == "medoids":
+        out: list[int] = []
+        for _, idx in groups.groupby(groups).groups.items():
+            arr = np.asarray(list(idx))
+            if arr.size == 0:
+                continue
+            centre = emb[arr].mean(axis=0)
+            j = int(arr[np.argmin(np.linalg.norm(emb[arr] - centre, axis=1))])
+            out.append(j)
+        return sorted(set(out))
+    if mode == "topk":
+        k = min(top_k, n)
+        rng = np.random.default_rng(rng_seed)
+        chosen = [int(rng.integers(n))]
+        while len(chosen) < k:
+            d = np.min(((emb[chosen][:, None, :] - emb[None, :, :]) ** 2).sum(axis=2), axis=0) ** 0.5
+            j = int(np.argmax(d))
+            if j in chosen:
+                break
+            chosen.append(j)
+        return sorted(set(chosen))
+    return []
+
+
 # ==========
 # UMAP / PHATE
 # ==========
@@ -994,99 +1153,104 @@ def run_umap(
     n_neighbors: int,
     min_dist: float,
     logger: logging.Logger,
+    # new knobs:
+    preprocess_l2: bool = True,
+    pca_max_dims: int | None = 20,
+    pca_whiten: bool = True,
+    umap_init: str = "spectral",
+    umap_repulsion: float = 1.5,
+    umap_neg_samples: int = 10,
+    densmap: bool = False,           # set True if umap>=0.5 and available
+    label_mode: str = "medoids",     # 'none'|'all'|'medoids'|'topk'
+    label_topk: int = 60,
+    point_size: int = 10,
+    point_alpha: float = 0.9,
+    font_size: int = 6,
 ) -> None:
     """
-    Compute UMAP (if available) and save PDF + coords TSV.
+    UMAP with sensible preprocessing + sparse, collision-aware cpd_id labels.
 
-    The PDF is rendered as a labels-only plot:
-    each sample is drawn as its cpd_id text, coloured by `colour_by`.
-
-    Parameters
-    ----------
-    X : pandas.DataFrame
-        Feature matrix.
-    df_meta : pandas.DataFrame
-        Metadata (must include 'cpd_id').
-    out_dir : pathlib.Path
-        Output directory.
-    colour_by : str
-        Metadata column to colour text by; falls back to 'Library'/'Dataset'.
-    metric : str
-        'cosine' | 'euclidean'.
-    n_neighbors : int
-        UMAP n_neighbours.
-    min_dist : float
-        UMAP min_dist.
-    logger : logging.Logger
-        Logger instance.
+    - Preprocess: optional L2 and PCA(whiten) to stabilise neighbourhoods.
+    - Plot: points coloured by Library (or resolved column).
+    - Labels: cpd_id for a sparse subset (medoids/topk), de-overlapped by a small repulsion.
     """
     if not UMAP_AVAILABLE:
         logger.warning("UMAP not available; skipping.")
         return
 
-    # Resolve the colour-by column robustly (Library/Dataset fallback)
-    try:
-        colour_col = resolve_meta_column(
-            df=df_meta,
-            requested=colour_by,
-            fallbacks=["Library", "Dataset"],
-            logger=logger,
-        )
-    except Exception:
-        colour_col = colour_by if colour_by in df_meta.columns else "cpd_id"
-        if colour_col == "cpd_id":
-            logger.warning("Could not resolve colour_by column; using 'cpd_id' as a fallback.")
+    # 1) Preprocess
+    Xw = preprocess_latents(
+        X=X,
+        do_l2=preprocess_l2,
+        pca_max_dims=pca_max_dims,
+        pca_whiten=pca_whiten,
+        logger=logger,
+    )
 
-    reducer = umap.UMAP(
+    # 2) UMAP
+    umap_kwargs = dict(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
         metric=metric,
+        init=umap_init,
+        repulsion_strength=umap_repulsion,
+        negative_sample_rate=umap_neg_samples,
         random_state=42,
     )
-    emb = reducer.fit_transform(X.values)
+    if densmap:
+        # only works if your umap-learn supports it; harmless to ignore if not
+        try:
+            umap_kwargs["densmap"] = True
+        except Exception:
+            logger.warning("densmap requested but not supported by installed umap; ignoring.")
+    reducer = umap.UMAP(**umap_kwargs)
+    emb = reducer.fit_transform(Xw.values)
 
-    # Save coords (TSV)
+    # 3) Colouring + coords TSV
+    colour_series, colour_name = resolve_colour_series(df_meta=df_meta, requested=colour_by, logger=logger)
     coords = pd.DataFrame(
-        {
-            "cpd_id": df_meta["cpd_id"].astype(str),
-            "UMAP1": emb[:, 0],
-            "UMAP2": emb[:, 1],
-            colour_col: df_meta[colour_col].astype(str),
-        }
+        {"cpd_id": df_meta["cpd_id"].astype(str), "UMAP1": emb[:, 0], "UMAP2": emb[:, 1], colour_name: colour_series.values}
     )
     write_tsv(df=coords, path=out_dir / "umap_coords.tsv", logger=logger, index=False)
 
-    # Labels-only PDF: text coloured by Library (or resolved column)
-    fig, ax = plt.subplots(figsize=(10, 8))
-    cats = coords[colour_col].astype(str).tolist()
+    # 4) Plot – points + sparse labels
+    cats = coords[colour_name].tolist()
     uniq = sorted(set(cats))
     cmap = mpl.colormaps.get("tab20", mpl.colormaps["tab20"])
     colour_map = {c: cmap(i % cmap.N) for i, c in enumerate(uniq)}
+    colours = [colour_map[c] for c in cats]
 
-    # Draw text labels only (no scatter points)
-    xs = coords["UMAP1"].to_numpy()
-    ys = coords["UMAP2"].to_numpy()
-    labels = coords["cpd_id"].astype(str).tolist()
-    for x, y, lab, cat in zip(xs, ys, labels, cats):
-        ax.text(
-            x=float(x),
-            y=float(y),
-            s=lab,
-            color=colour_map.get(cat, (0.3, 0.3, 0.3, 1.0)),
-            fontsize=5,
-            ha="center",
-            va="center",
-            alpha=0.95,
-        )
+    fig, ax = plt.subplots(figsize=(9.5, 7.5))
+    ax.scatter(coords["UMAP1"], coords["UMAP2"], s=point_size, c=colours, lw=0, alpha=point_alpha, zorder=2)
 
-    ax.set_title(f"UMAP ({metric}) — labels: cpd_id, coloured by {colour_col}")
-    ax.set_xticks([])
-    ax.set_yticks([])
+    # Labels (sparse, collision-aware)
+    idx = choose_label_indices(emb=emb, groups=coords[colour_name], mode=label_mode, top_k=label_topk, rng_seed=42)
+    if idx:
+        label_xy = repel_label_positions(xy=emb, label_idx=idx, n_iter=80, step=0.02, anchor=0.05)
+        for (x, y), i in zip(label_xy, idx):
+            ax.text(
+                float(x),
+                float(y),
+                s=str(coords["cpd_id"].iat[i]),
+                fontsize=font_size,
+                ha="center",
+                va="center",
+                color="black",
+                zorder=3,
+                path_effects=[pe.withStroke(linewidth=2.0, foreground="white")],
+            )
+
+    # Compact legend
+    from matplotlib.lines import Line2D
+    handles = [Line2D([0], [0], marker="o", linestyle="none", markersize=6, color=colour_map[c], label=str(c)) for c in uniq]
+    ax.legend(handles=handles, loc="upper right", frameon=True, framealpha=0.9, title=colour_name, fontsize=8)
+
+    ax.set_title(f"UMAP ({metric}) coloured by {colour_name} — labels: {label_mode}")
+    ax.set_xticks([]); ax.set_yticks([])
     fig.tight_layout()
     fig.savefig(out_dir / "umap.pdf", dpi=300)
     plt.close(fig)
-    logger.info("Saved UMAP PDF + coords (labels-only; coloured by %s).", colour_col)
-
+    logger.info("Saved UMAP PDF + coords (labels=%s).", label_mode)
 
 
 def resolve_meta_column(*, df: pd.DataFrame, requested: str,
@@ -1199,6 +1363,31 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--umap_n_neighbors", type=int, default=30, help="UMAP n_neighbours (default: 40).")
     p.add_argument("--umap_min_dist", type=float, default=0.05, help="UMAP min_dist (default: 0.25).")
     p.add_argument("--phate_knn", type=int, default=15, help="PHATE k-NN (default: 15).")
+    p.add_argument("--umap_init", choices=["spectral", "random"], default="spectral",
+               help="UMAP init (default: spectral).")
+    p.add_argument("--umap_repulsion", type=float, default=1.5,
+                help="UMAP repulsion_strength (default: 1.5).")
+    p.add_argument("--umap_negative_sample_rate", type=int, default=10,
+                help="UMAP negative_sample_rate (default: 10).")
+    p.add_argument("--umap_densmap", action="store_true",
+                help="Enable densMAP if supported by installed umap-learn.")
+    p.add_argument("--umap_labels", choices=["none", "all", "medoids", "topk"], default="medoids",
+                help="Label strategy for cpd_id (default: medoids).")
+    p.add_argument("--umap_topk", type=int, default=60,
+                help="If --umap_labels topk, approximate number of labels to place.")
+    p.add_argument("--umap_point_size", type=int, default=10,
+                help="Scatter point size (default: 10).")
+    p.add_argument("--umap_point_alpha", type=float, default=0.9,
+                help="Scatter point alpha (default: 0.9).")
+    p.add_argument("--umap_font_size", type=int, default=6,
+                help="Label font size (default: 6).")
+    p.add_argument("--pre_l2", action="store_true",
+                help="L2-normalise rows before UMAP (recommended for cosine).")
+    p.add_argument("--pre_pca_max_dims", type=int, default=20,
+                help="PCA dims before UMAP (0 disables; default: 20).")
+    p.add_argument("--pre_pca_whiten", action="store_true",
+                help="Whiten PCA components before UMAP (default off unless set).")
+
 
     return p.parse_args()
 
@@ -1259,7 +1448,20 @@ def main() -> None:
             n_neighbors=args.umap_n_neighbors,
             min_dist=args.umap_min_dist,
             logger=logger,
+            preprocess_l2=args.pre_l2,
+            pca_max_dims=(None if (args.pre_pca_max_dims or 0) <= 0 else args.pre_pca_max_dims),
+            pca_whiten=args.pre_pca_whiten,
+            umap_init=args.umap_init,
+            umap_repulsion=args.umap_repulsion,
+            umap_neg_samples=args.umap_negative_sample_rate,
+            densmap=args.umap_densmap,
+            label_mode=args.umap_labels,
+            label_topk=args.umap_topk,
+            point_size=args.umap_point_size,
+            point_alpha=args.umap_point_alpha,
+            font_size=args.umap_font_size,
         )
+
 
     # PHATE
     if args.embedding in ("phate", "all"):
