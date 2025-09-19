@@ -1379,8 +1379,8 @@ def parse_args() -> argparse.Namespace:
                 help="Scatter point size (default: 7).")
     p.add_argument("--umap_point_alpha", type=float, default=0.9,
                 help="Scatter point alpha (default: 0.9).")
-    p.add_argument("--umap_font_size", type=int, default=4,
-                help="Label font size (default: 4).")
+    p.add_argument("--umap_font_size", type=int, default=2,
+                help="Label font size (default: 2).")
     p.add_argument("--pre_l2", action="store_true",
                 help="L2-normalise rows before UMAP (recommended for cosine).")
     p.add_argument("--pre_pca_max_dims", type=int, default=20,
@@ -1414,7 +1414,7 @@ def main() -> None:
     X, latent_cols = select_latent(df=df, prefix=args.latent_prefix, logger=logger)
 
     # Metadata view for colouring
-    meta_cols = [c for c in ["cpd_id", "cpd_type", "Library", "Dataset", "Sample"] if c in df.columns]
+    meta_cols = [c for c in ["cpd_id", "cpd_type", "Library", "Plate_Metadata", "Dataset", "Sample"] if c in df.columns]
     df_meta = df[meta_cols].copy()
 
     # Topological graph (default)
