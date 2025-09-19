@@ -382,6 +382,11 @@ def parse_args():
     parser.add_argument('--no_compress_output',
                         action='store_true',
                         help='If set, do NOT compress the output file. Default: output will be compressed (.gz if filename ends with .gz).')
+    parser.add_argument(
+                        '--force_library_tag',
+                        action='store_true',
+                        help='If set with --library, overwrite any existing Library values with the given tag.'
+                    )
 
     parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Set logging level.')
     return parser.parse_args()
@@ -1623,6 +1628,107 @@ def impute_missing(
     return df    
 
 
+def set_library_and_treatment(
+    df: pd.DataFrame,
+    library_tag: str | None = None,
+    force_library_tag: bool = False,
+    logger=None,
+) -> pd.DataFrame:
+    """
+    Set dataset-level `Library` tags with CLI precedence and derive `Treatment`.
+
+    Precedence:
+    1) If `library_tag` is provided, apply it *before* any auto-filling:
+       - If `force_library_tag` is True: set all rows' `Library = library_tag`.
+       - Else: only fill rows where `Library` is missing/blank.
+    2) Derive `Treatment` from metadata ('control' for DMSO, else 'compound').
+    3) For any rows where `Library` is still missing, fill from `Treatment`.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table containing Cell Painting features and metadata.
+    library_tag : str | None, optional
+        Dataset tag from CLI (e.g., 'STB_V1'). If None, step (1) is skipped.
+    force_library_tag : bool, optional
+        If True, overwrite any existing `Library` values with `library_tag`.
+        If False (default), only fill missing/blank `Library`.
+    logger : logging.Logger | None, optional
+        Logger for progress messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with preserved/filled `Library` and a new `Treatment` column.
+
+    Notes
+    -----
+    - This function does not modify `cpd_type` logic elsewhere; it just uses it.
+    - It treats empty strings and 'na'/'NA' as missing for `Library`.
+    """
+    # Normalise presence of columns
+    if "Library" not in df.columns:
+        df["Library"] = pd.NA
+    else:
+        # Treat empty/blank as missing
+        lib = df["Library"].astype("string")
+        lib = lib.replace({"": pd.NA, " ": pd.NA, "na": pd.NA, "NA": pd.NA})
+        df["Library"] = lib
+
+    # 1) CLI precedence
+    if library_tag is not None:
+        if force_library_tag:
+            df["Library"] = str(library_tag)
+            if logger:
+                logger.info("Forced Library tag to '%s' for all rows.", library_tag)
+        else:
+            n_before = df["Library"].isna().sum()
+            df.loc[df["Library"].isna(), "Library"] = str(library_tag)
+            n_after = df["Library"].isna().sum()
+            if logger:
+                logger.info(
+                    "Filled %d missing Library values with CLI tag '%s' (remaining missing: %d).",
+                    n_before - n_after, library_tag, n_after
+                )
+
+    # 2) Derive Treatment from cpd_id/cpd_type
+    #    control = DMSO; compound = everything with a non-DMSO cpd_id
+    mask_dmso = pd.Series(False, index=df.index)
+    if "cpd_type" in df.columns:
+        mask_dmso = mask_dmso | (df["cpd_type"] == "DMSO")
+    if "cpd_id" in df.columns:
+        mask_dmso = mask_dmso | (df["cpd_id"] == "DMSO")
+
+    mask_has_cpd = df["cpd_id"].notna() if "cpd_id" in df.columns else pd.Series(False, index=df.index)
+    mask_has_cpd = mask_has_cpd & ~mask_dmso
+
+    df["Treatment"] = pd.NA
+    df.loc[mask_dmso, "Treatment"] = "control"
+    df.loc[mask_has_cpd, "Treatment"] = "compound"
+
+    # 3) Final backfill: if Library still missing, use Treatment
+    missing_after_cli = df["Library"].isna().sum()
+    if missing_after_cli > 0:
+        df.loc[df["Library"].isna() & (df["Treatment"].notna()), "Library"] = df.loc[
+            df["Library"].isna() & (df["Treatment"].notna()), "Treatment"
+        ]
+        if logger:
+            left = df["Library"].isna().sum()
+            logger.info(
+                "Backfilled %d remaining Library values from Treatment (still missing: %d).",
+                missing_after_cli - left, left
+            )
+
+    # Optional: sanity counts
+    if logger:
+        n_ctrl = (df["Treatment"] == "control").sum()
+        n_comp = (df["Treatment"] == "compound").sum()
+        logger.info("Treatment counts — control: %d, compound: %d.", n_ctrl, n_comp)
+
+    return df
+
+
+
 def clean_metadata_columns(df, logger=None):
     """
     Standardise Cell Painting metadata columns (cpd_id, cpd_type, Library).
@@ -1659,16 +1765,18 @@ def clean_metadata_columns(df, logger=None):
         if logger:
             logger.info("Standardised cpd_type values.")
 
-    # Set Library column
+    # Set Library column (fill-only; do not overwrite existing values)
     if "Library" in df.columns and "cpd_id" in df.columns:
-        mask_dmso = (df["cpd_id"] == "DMSO") | (df["cpd_type"] == "DMSO")
+        mask_dmso = (df["cpd_id"] == "DMSO") | (df.get("cpd_type", pd.Series(False, index=df.index)) == "DMSO")
         mask_has_cpd_id = df["cpd_id"].notna() & (df["cpd_id"] != "DMSO")
-        df.loc[mask_dmso, "Library"] = "control"
-        df.loc[mask_has_cpd_id & ~mask_dmso, "Library"] = "compound"
+        # Only fill missing Library values
+        missing_lib = df["Library"].isna()
+        df.loc[missing_lib & mask_dmso, "Library"] = "control"
+        df.loc[missing_lib & mask_has_cpd_id & ~mask_dmso, "Library"] = "compound"
         if logger:
-            n_dmso = mask_dmso.sum()
-            n_compound = (mask_has_cpd_id & ~mask_dmso).sum()
-            logger.info(f"Set Library='control' for {n_dmso} rows and 'compound' for {n_compound} rows.")
+            n_dmso = (missing_lib & mask_dmso).sum()
+            n_compound = (missing_lib & mask_has_cpd_id & ~mask_dmso).sum()
+            logger.info(f"Filled Library (missing only): control={n_dmso}, compound={n_compound}.")
 
     return df
 
@@ -2452,6 +2560,15 @@ def main():
         suffixes=('', '_meta'),
         validate="many_to_one"
     )
+
+    # Preserve dataset tag and derive Treatment right after merge
+    merged_df = set_library_and_treatment(
+        df=merged_df,
+        library_tag=args.library,
+        force_library_tag=getattr(args, "force_library_tag", False),
+        logger=logger,
+    )
+
     logger.info(f"Shape after metadata merge: {merged_df.shape}")
 
 
