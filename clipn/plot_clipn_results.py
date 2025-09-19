@@ -1371,16 +1371,16 @@ def parse_args() -> argparse.Namespace:
                 help="UMAP negative_sample_rate (default: 10).")
     p.add_argument("--umap_densmap", action="store_true",
                 help="Enable densMAP if supported by installed umap-learn.")
-    p.add_argument("--umap_labels", choices=["none", "all", "medoids", "topk"], default="medoids",
+    p.add_argument("--umap_labels", choices=["none", "all", "medoids", "topk"], default="all",
                 help="Label strategy for cpd_id (default: medoids).")
-    p.add_argument("--umap_topk", type=int, default=60,
+    p.add_argument("--umap_topk", type=int, default=80,
                 help="If --umap_labels topk, approximate number of labels to place.")
-    p.add_argument("--umap_point_size", type=int, default=10,
-                help="Scatter point size (default: 10).")
+    p.add_argument("--umap_point_size", type=int, default=7,
+                help="Scatter point size (default: 7).")
     p.add_argument("--umap_point_alpha", type=float, default=0.9,
                 help="Scatter point alpha (default: 0.9).")
-    p.add_argument("--umap_font_size", type=int, default=6,
-                help="Label font size (default: 6).")
+    p.add_argument("--umap_font_size", type=int, default=4,
+                help="Label font size (default: 4).")
     p.add_argument("--pre_l2", action="store_true",
                 help="L2-normalise rows before UMAP (recommended for cosine).")
     p.add_argument("--pre_pca_max_dims", type=int, default=20,
