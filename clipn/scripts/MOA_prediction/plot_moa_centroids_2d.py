@@ -542,6 +542,11 @@ def plot_static(
         ax.scatter([x], [y], s=180, c=[colour_map.get(lab, "k")],
                 edgecolors="black", linewidths=1.2, marker="o", zorder=5)
         # show text only if mode allows and MOA is in selected set
+        labelled_moas = pick_labelled_moas(
+                moa_names=list(set(comp_labels)),
+                moa_sizes=moa_sizes,
+                topk=label_topk,
+            )
         show_text = (label_mode == "centroid") and (lab in labelled_moas)
         text_disp = truncate_label(str(lab), label_truncate) if show_text else ""
         if text_disp:
