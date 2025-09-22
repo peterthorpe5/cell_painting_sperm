@@ -810,7 +810,7 @@ def main() -> None:
     parser.add_argument(
         "--label_fontsize",
         type=float,
-        default=9.0,
+        default=6.0,
         help="Font size for centroid text labels on the static PDF (default: 9).",
     )
     parser.add_argument(
