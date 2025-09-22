@@ -33,7 +33,8 @@ python centroid_moa_scoring.py \
   --adaptive_shrinkage_c 0.5 \
   --adaptive_shrinkage_max 0.3 \
   --annotate_anchors \
-  --random_seed 0
+  --random_seed 0 \
+  --n_permutations 200
 
   # c) plot for visualization 
   python plot_moa_centroids_2d.py \

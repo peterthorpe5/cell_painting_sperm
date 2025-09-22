@@ -699,7 +699,7 @@ def main() -> None:
     parser.add_argument("--out_dir", type=str, required=True, help="Directory to write outputs (TSV).")
 
     parser.add_argument("--id_col", type=str, default="cpd_id", help="Identifier column name (default: cpd_id).")
-    parser.add_argument("--moa_col", type=str, default="moa", help="MOA label column in anchors (default: moa).")
+    parser.add_argument("--moa_col", type=str, default="moa_final", help="MOA label column in anchors (default: moa_final).")
 
     parser.add_argument("--aggregate_method", type=str, default="median",
                         choices=["median", "mean", "trimmed_mean", "geometric_median"],
