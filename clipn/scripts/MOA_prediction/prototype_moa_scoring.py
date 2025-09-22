@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-centroid (Prototype-Centroid) MOA Scoring for CLIPn or Feature-Space Embeddings
------------------------------------------------------------------------
+Centroid-based MOA Scoring for CLIPn or Feature-Space Embeddings
+----------------------------------------------------------------
 
 This script infers mode-of-action (MOA) by matching compound embeddings to
-MOA *Prototype* (centroids). It is robust to replicate wells and does not rely
-on single nearest neighbours.
+MOA *centroids* (class representatives). It is robust to replicate wells and
+does not rely on single nearest neighbours.
 
 Workflow
 --------
@@ -16,34 +16,29 @@ Workflow
 2) Aggregate replicate rows per compound using a robust estimator
    (median / trimmed-mean / geometric-median).
 3) Load an anchors TSV mapping a subset of compounds to MOA labels.
-4) Build one or more centroids per MOA (median/mean or k-means subclusters).
+4) Build one or more centroids per MOA (median/mean or k-means subclusters),
+   optionally with a minimum-members gate and size-aware shrinkage.
 5) Score *all* compounds against centroids with cosine (and optionally CSLS).
 6) Aggregate centroid scores per MOA (max or mean), compute top prediction,
-   margins, and optional permutation-based FDR.
-
-Inputs (TSV)
-------------
-- embeddings_tsv:
-    Columns:
-      - 'cpd_id' (default; configurable via --id_col) or similar identifier.
-      - optional replicate metadata (e.g., 'well_id', 'plate', ...).
-      - numeric columns for embedding dimensions (auto-detected).
-- anchors_tsv:
-    Columns:
-      - id column (same as embeddings, e.g., 'cpd_id')
-      - 'moa' column (configurable via --moa_col)
+   margins, and optional permutation-based FDR (Benjamini–Hochberg across compounds).
 
 Outputs (TSV; never comma-separated)
 ------------------------------------
 - <out_dir>/compound_embeddings.tsv
     One row per compound after aggregation (id + numeric dims).
 - <out_dir>/centroids_summary.tsv
-    One row per centroid: MOA, centroid_index, n_members, method, params.
+    One row per centroid: MOA, centroid_index, n_members, method, shrinkage_effective.
 - <out_dir>/compound_moa_scores.tsv
-    Long-form scores: compound × MOA (cosine; CSLS if requested).
+    Long-form scores: compound × MOA (cosine; CSLS if requested). Includes anchor flags.
 - <out_dir>/compound_predictions.tsv
-    One row per compound: top MOA, chosen score, margin, with diagnostics
-    (cosine/CSLS tops) and optional p-value and q-value (BH) from permutations.
+    One row per compound: top MOA, chosen score, margin; diagnostics
+    (cosine/CSLS tops); optional p-value and q-value (BH) from permutations.
+    Includes anchor flags to indicate potential self-inflation.
+
+Notes
+-----
+- “Neighbourhood” and “normalise” follow UK English.
+- CSLS is computed by default; the decision rule defaults to 'auto'.
 """
 
 from __future__ import annotations
@@ -95,7 +90,7 @@ def geometric_median(*, X: np.ndarray, max_iter: int = 256, tol: float = 1e-6) -
     Returns
     -------
     np.ndarray
-        1D array of length n_features representing the geometric median.
+        1D array representing the geometric median.
     """
     if X.shape[0] == 1:
         return X[0].copy()
@@ -171,26 +166,7 @@ def detect_id_column(*, df: pd.DataFrame, id_col: Optional[str]) -> str:
     raise ValueError("Could not detect an identifier column (tried common candidates).")
 
 
-def numeric_matrix_from_df(*, df: pd.DataFrame, exclude_cols: Sequence[str]) -> np.ndarray:
-    """
-    Extract numeric embedding matrix, excluding given columns.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame.
-    exclude_cols : Sequence[str]
-        Column names to exclude from the numeric selection.
-
-    Returns
-    -------
-    np.ndarray
-        2D numeric matrix.
-    """
-    return df.drop(columns=list(exclude_cols), errors="ignore").select_dtypes(include=[np.number]).to_numpy()
-
-
-# ------------------------ aggregation & centroids --------------------------- #
+# ------------------------ aggregation & centroid build ----------------------- #
 
 def aggregate_compounds(
     *,
@@ -295,17 +271,16 @@ def build_moa_centroids(
     Returns
     -------
     Tuple[pd.DataFrame, np.ndarray, List[str]]
-        (centroids_summary_df, P_matrix, proto_moas)
+        (centroids_summary_df, P_matrix, centroid_moas)
         - centroids_summary_df: columns [moa, centroid_index, n_members,
           method, shrinkage_effective]
         - P_matrix: centroid matrix (n_centroids x d), L2-normalised
-        - proto_moas: per-centroid MOA labels (length n_centroids)
+        - centroid_moas: per-centroid MOA labels (length n_centroids)
     """
     rng = np.random.RandomState(random_seed)
     id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
     num_cols = embeddings.select_dtypes(include=[np.number]).columns.tolist()
-    X_all = embeddings[num_cols].to_numpy()
-    X_all = l2_normalise(X=X_all)
+    X_all = l2_normalise(X=embeddings[num_cols].to_numpy())
 
     # Global mean direction for optional shrinkage
     gmean = X_all.mean(axis=0)
@@ -324,7 +299,7 @@ def build_moa_centroids(
         return float(min(1.0, max(0.0, alpha)))
 
     P_list: List[np.ndarray] = []
-    proto_moas: List[str] = []
+    centroid_moas: List[str] = []
     summary_rows: List[Dict[str, object]] = []
 
     for moa, sub in moa_groups:
@@ -354,7 +329,7 @@ def build_moa_centroids(
             proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
 
             P_list.append(proto)
-            proto_moas.append(str(moa))
+            centroid_moas.append(str(moa))
             summary_rows.append(
                 {"moa": moa, "centroid_index": 0, "n_members": n_members_moa,
                  "method": f"{centroid_method}", "shrinkage_effective": float(alpha)}
@@ -371,7 +346,6 @@ def build_moa_centroids(
                     n_sub = int(sel.shape[0])
                     if n_sub == 0:
                         continue
-                    # Tiny subcluster gate mirrors the MOA-level gate
                     if n_sub < int(min_members_per_moa) and bool(skip_tiny_moas):
                         summary_rows.append(
                             {"moa": moa, "centroid_index": j, "n_members": n_sub,
@@ -380,14 +354,13 @@ def build_moa_centroids(
                         continue
 
                     proto = np.median(sel, axis=0) if centroid_method == "median" else np.mean(sel, axis=0)
-
                     alpha = effective_alpha(n_members=n_sub)
                     if alpha > 0:
                         proto = (1 - alpha) * proto + alpha * gmean
                     proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
 
                     P_list.append(proto)
-                    proto_moas.append(str(moa))
+                    centroid_moas.append(str(moa))
                     summary_rows.append(
                         {"moa": moa, "centroid_index": j, "n_members": n_sub,
                          "method": f"kmeans/{centroid_method}", "shrinkage_effective": float(alpha)}
@@ -401,7 +374,7 @@ def build_moa_centroids(
                 proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
 
                 P_list.append(proto)
-                proto_moas.append(str(moa))
+                centroid_moas.append(str(moa))
                 summary_rows.append(
                     {"moa": moa, "centroid_index": 0, "n_members": n_members_moa,
                      "method": f"{centroid_method}(fallback_no_kmeans)", "shrinkage_effective": float(alpha)}
@@ -409,8 +382,7 @@ def build_moa_centroids(
 
     P = np.vstack(P_list) if P_list else np.zeros((0, X_all.shape[1]), dtype=float)
     summary_df = pd.DataFrame(summary_rows)
-    return summary_df, P, proto_moas
-
+    return summary_df, P, centroid_moas
 
 
 # -------------------------- scoring: cosine / CSLS --------------------------- #
@@ -424,7 +396,7 @@ def cosine_scores(*, Q: np.ndarray, P: np.ndarray, batch_size: int = 4096) -> np
     Q : np.ndarray
         Query matrix (n_queries x d), rows must be L2-normalised.
     P : np.ndarray
-        centroid matrix (n_centroids x d), rows must be L2-normalised.
+        Centroid matrix (n_centroids x d), rows must be L2-normalised.
     batch_size : int, optional
         Batch size for matrix multiplication, by default 4096.
 
@@ -455,7 +427,7 @@ def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
     Q : np.ndarray
         Query matrix (n_queries x d), L2-normalised.
     P : np.ndarray
-        centroid matrix (n_centroids x d), L2-normalised.
+        Centroid matrix (n_centroids x d), L2-normalised.
     k : int, optional
         Neighbourhood size for local scaling, by default 10.
 
@@ -482,26 +454,26 @@ def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
 
 # -------------------------- aggregation / decisions -------------------------- #
 
-def build_moa_indexers(*, proto_moas: List[str]) -> Tuple[List[str], Dict[str, List[int]]]:
+def build_moa_indexers(*, centroid_moas: List[str]) -> Tuple[List[str], Dict[str, List[int]]]:
     """
     Build MOA list and per-MOA centroid index mapping.
 
     Parameters
     ----------
-    proto_moas : List[str]
+    centroid_moas : List[str]
         Per-centroid MOA labels.
 
     Returns
     -------
     Tuple[List[str], Dict[str, List[int]]]
-        (moa_list, moa_to_proto_indices)
+        (moa_list, moa_to_centroid_indices)
     """
-    moa_list = sorted(set(proto_moas))
-    moa_to_idx = {m: [i for i, mm in enumerate(proto_moas) if mm == m] for m in moa_list}
+    moa_list = sorted(set(centroid_moas))
+    moa_to_idx = {m: [i for i, mm in enumerate(centroid_moas) if mm == m] for m in moa_list}
     return moa_list, moa_to_idx
 
 
-def agg_over_protos(
+def agg_over_centroids(
     *,
     mat: Optional[np.ndarray],
     moa_list: List[str],
@@ -611,11 +583,9 @@ def benjamini_hochberg_q(*, pvals: np.ndarray) -> np.ndarray:
     order = np.argsort(p, kind="mergesort")
     p_sorted = p[order]
     ranks = np.arange(1, n + 1, dtype=float)
-
     q_sorted = p_sorted * n / ranks
     q_sorted = np.minimum.accumulate(q_sorted[::-1])[::-1]
     q_sorted = np.clip(q_sorted, 0.0, 1.0)
-
     q = np.empty_like(q_sorted)
     q[order] = q_sorted
     return q
@@ -626,6 +596,7 @@ def estimate_fdr_by_permutation(
     M_primary: np.ndarray,
     proto_to_moa: Sequence[int],
     n_permutations: int = 200,
+    agg_mode: str = "max",
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -639,12 +610,15 @@ def estimate_fdr_by_permutation(
     Parameters
     ----------
     M_primary : np.ndarray
-        CompoundxMOA score matrix used for decisions (chosen rule), shape
+        Compound×MOA score matrix used for decisions (chosen rule), shape
         (n_compounds, n_moas).
     proto_to_moa : Sequence[int]
         Mapping from centroid index to MOA index (length n_centroids).
     n_permutations : int
         Number of label permutations for the null (default 200).
+    agg_mode : str, optional
+        Aggregation used to collapse centroids to MOA ('max' or 'mean').
+        The permutation null mirrors this choice.
     rng : Optional[np.random.Generator]
         Random generator.
 
@@ -658,7 +632,7 @@ def estimate_fdr_by_permutation(
 
     n_compounds, n_moas = M_primary.shape
 
-    # Observed margins
+    # Observed margins from the primary matrix
     best_idx = np.argmax(M_primary, axis=1)
     best_val = M_primary[np.arange(n_compounds), best_idx]
     tmp = M_primary.copy()
@@ -666,10 +640,10 @@ def estimate_fdr_by_permutation(
     runner = np.max(tmp, axis=1)
     observed_margin = best_val - runner
 
-    # centroid counts per MOA
+    # Centroid counts per MOA
     counts = np.bincount(np.asarray(proto_to_moa, dtype=int), minlength=n_moas)
 
-    # Expand M_primary to a 'compound×centroid' surrogate by splitting MOA columns
+    # Expand M_primary into a 'compound×centroid' surrogate by repeating MOA columns
     proto_cols = []
     for moa_i, c in enumerate(counts):
         if c > 0:
@@ -687,7 +661,10 @@ def estimate_fdr_by_permutation(
         for c in counts:
             if c > 0:
                 block = M_proto_like[:, alloc[start:start + c]]
-                cols.append(np.max(block, axis=1, keepdims=True))
+                if agg_mode == "mean":
+                    cols.append(np.mean(block, axis=1, keepdims=True))
+                else:
+                    cols.append(np.max(block, axis=1, keepdims=True))
                 start += c
             else:
                 cols.append(np.full((n_compounds, 1), -np.inf, dtype=float))
@@ -713,10 +690,10 @@ def main() -> None:
 
     Notes
     -----
-    - Outputs are always TSV (tab-separated) to comply with “never comma-separated”.
+    - Outputs are TSV (tab-separated) to comply with “never comma-separated”.
     - CSLS is computed by default; the decision rule defaults to 'auto'.
     """
-    parser = argparse.ArgumentParser(description="centroid (centroid) MOA scoring (TSV I/O, UK English).")
+    parser = argparse.ArgumentParser(description="Centroid-based MOA scoring (TSV I/O, UK English).")
     parser.add_argument("--embeddings_tsv", type=str, required=True, help="TSV with embeddings (well- or compound-level).")
     parser.add_argument("--anchors_tsv", type=str, required=True, help="TSV with anchors: id + MOA.")
     parser.add_argument("--out_dir", type=str, required=True, help="Directory to write outputs (TSV).")
@@ -724,93 +701,57 @@ def main() -> None:
     parser.add_argument("--id_col", type=str, default="cpd_id", help="Identifier column name (default: cpd_id).")
     parser.add_argument("--moa_col", type=str, default="moa", help="MOA label column in anchors (default: moa).")
 
-    parser.add_argument(
-        "--aggregate_method",
-        type=str,
-        default="median",
-        choices=["median", "mean", "trimmed_mean", "geometric_median"],
-        help="Replicate aggregation method (default: median).",
-    )
-    parser.add_argument("--trimmed_frac", type=float, 
-                        default=0.1, help="Trim fraction for trimmed_mean (default: 0.1).")
+    parser.add_argument("--aggregate_method", type=str, default="median",
+                        choices=["median", "mean", "trimmed_mean", "geometric_median"],
+                        help="Replicate aggregation method (default: median).")
+    parser.add_argument("--trimmed_frac", type=float, default=0.1,
+                        help="Trim fraction for trimmed_mean (default: 0.1).")
 
-    parser.add_argument("--n_centroids_per_moa", type=int, 
-                        default=1, help="Sub-centroids per MOA (k-means if >1).")
-    parser.add_argument("--centroid_method", type=str, 
-                        default="median", choices=["median", "mean"], help="centroid estimator when n_centroids_per_moa<=1 (default: median).")
-    parser.add_argument("--centroid_shrinkage", type=float, 
-                        default=0.0, help="Shrink centroids towards global mean (0..1).")
+    parser.add_argument("--n_centroids_per_moa", type=int, default=1,
+                        help="Sub-centroids per MOA (k-means if >1).")
+    parser.add_argument("--centroid_method", type=str, default="median",
+                        choices=["median", "mean"], help="Centroid estimator when n_centroids_per_moa<=1 (default: median).")
+    parser.add_argument("--centroid_shrinkage", type=float, default=0.0,
+                        help="Shrink centroids towards global mean (0..1).")
+    parser.add_argument("--min_members_per_moa", type=int, default=1,
+                        help="Minimum labelled members needed to form a centroid (default: 1 keeps all).")
+    parser.add_argument("--skip_tiny_moas", action="store_true",
+                        help="If set, MOAs with < min_members_per_moa are skipped (no centroid built).")
+    parser.add_argument("--adaptive_shrinkage", action="store_true",
+                        help=("If set, adds size-aware shrinkage for small centroids: "
+                              "alpha_eff = centroid_shrinkage + min(adaptive_shrinkage_max, "
+                              "adaptive_shrinkage_c / n_members)."))
+    parser.add_argument("--adaptive_shrinkage_c", type=float, default=0.5,
+                        help="C constant for size-aware shrinkage term (default: 0.5).")
+    parser.add_argument("--adaptive_shrinkage_max", type=float, default=0.3,
+                        help="Maximum extra shrinkage due to size-aware term (default: 0.3).")
 
-    parser.add_argument("--moa_score_agg", type=str, 
-                        default="max", choices=["max", "mean"], 
-                        help="Aggregate centroid→MOA score (default: max).")
+    parser.add_argument("--moa_score_agg", type=str, default="max",
+                        choices=["max", "mean"], help="Aggregate centroid→MOA score (default: max).")
 
-    parser.add_argument(
-        "--use_csls",
-        action="store_true",
-        help="Also compute CSLS scores (in addition to cosine).",
-    )
-    # CSLS ON by default
-    parser.set_defaults(use_csls=True)
+    parser.add_argument("--use_csls", action="store_true",
+                        help="Also compute CSLS scores (in addition to cosine).")
+    parser.set_defaults(use_csls=True)  # CSLS ON by default
 
-    parser.add_argument(
-        "--csls_k",
-        type=int,
-        default=-1,
-        help="Neighbourhood size for CSLS. Use -1 to auto-select k≈sqrt(#centroids), clipped to [5, 50].",
-    )
+    parser.add_argument("--csls_k", type=int, default=-1,
+                        help="Neighbourhood size for CSLS. Use -1 to auto-select k≈sqrt(#centroids), clipped to [5, 50].")
 
-    parser.add_argument(
-        "--primary_score",
-        type=str,
-        default="auto",
-        choices=["cosine", "csls", "auto"],
-        help="Which score decides the top MOA. 'auto' uses cosine unless the cosine margin < threshold.",
-    )
-    parser.add_argument(
-        "--auto_margin_threshold",
-        type=float,
-        default=0.02,
-        help="When --primary_score auto: if cosine margin < this, switch to CSLS for the decision.",
-    )
+    parser.add_argument("--primary_score", type=str, default="auto",
+                        choices=["cosine", "csls", "auto"],
+                        help="Which score decides the top MOA. 'auto' uses cosine unless the cosine margin < threshold.")
+    parser.add_argument("--auto_margin_threshold", type=float, default=0.02,
+                        help="When --primary_score auto: if cosine margin < this, switch to CSLS for the decision.")
 
-    parser.add_argument("--exclude_anchors_from_queries", 
-                        action="store_true", help="Do not produce predictions for anchor compounds.")
+    parser.add_argument("--exclude_anchors_from_queries", action="store_true",
+                        help="Do not produce predictions for anchor compounds.")
+    parser.add_argument("--annotate_anchors", action="store_true",
+                        help="Annotate outputs with is_anchor/anchor_moa and potential_inflation flags.")
+    parser.set_defaults(annotate_anchors=True)
 
-    parser.add_argument("--n_permutations", type=int, 
-                        default=200, help="Permutations for FDR (0 to disable). Default: 200.")
-    parser.add_argument("--random_seed", type=int, 
-                        default=0, help="Random seed for reproducibility (default: 0).")
-    parser.add_argument("--min_members_per_moa",
-            type=int,
-            default=1,
-            help="Minimum labelled members needed to form a centroid (default: 1 keeps all).",
-        )
-    parser.add_argument(
-            "--skip_tiny_moas",
-            action="store_true",
-            help="If set, MOAs with < min_members_per_moa are skipped (no centroid built).",
-        )
-    parser.add_argument(
-        "--adaptive_shrinkage",
-        action="store_true",
-        help=("If set, adds size-aware shrinkage for small centroids: "
-              "alpha_eff = centroid_shrinkage + min(adaptive_shrinkage_max, "
-              "adaptive_shrinkage_c / n_members)."),
-    )
-    parser.add_argument(
-        "--adaptive_shrinkage_c",
-        type=float,
-        default=0.5,
-        help="C constant for size-aware shrinkage term (default: 0.5).",
-    )
-    parser.add_argument(
-        "--adaptive_shrinkage_max",
-        type=float,
-        default=0.3,
-        help="Maximum extra shrinkage due to size-aware term (default: 0.3).",
-    )
-
+    parser.add_argument("--n_permutations", type=int, default=200,
+                        help="Permutations for FDR (0 to disable). Default: 200.")
+    parser.add_argument("--random_seed", type=int, default=0,
+                        help="Random seed for reproducibility (default: 0).")
 
     args = parser.parse_args()
 
@@ -821,21 +762,18 @@ def main() -> None:
     df = pd.read_csv(args.embeddings_tsv, sep="\t")
     id_col = detect_id_column(df=df, id_col=args.id_col)
 
-    # Aggregate replicates if needed
     agg = aggregate_compounds(
         df=df,
         id_col=id_col,
         method=args.aggregate_method,
         trimmed_frac=args.trimmed_frac,
     )
-    # L2-normalise embeddings
     num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
     X = l2_normalise(X=agg[num_cols].to_numpy())
     ids = agg[id_col].astype(str).tolist()
 
     # Save aggregated compound embeddings
-    agg_out = agg.copy()
-    agg_out.to_csv(out_dir / "compound_embeddings.tsv", sep="\t", index=False)
+    agg.to_csv(out_dir / "compound_embeddings.tsv", sep="\t", index=False)
 
     # Load anchors
     anchors = pd.read_csv(args.anchors_tsv, sep="\t")
@@ -844,41 +782,48 @@ def main() -> None:
     if args.moa_col not in anchors.columns:
         raise ValueError(f"Anchors file must contain MOA column '{args.moa_col}'.")
 
+    # Anchor lookup for annotation
+    anchor_map: Dict[str, str] = dict(
+        anchors[[id_col, args.moa_col]]
+        .dropna()
+        .astype({id_col: str, args.moa_col: str})
+        .itertuples(index=False, name=None)
+    )
+
     # Build centroids
-    protos_df, P, proto_moas = build_moa_centroids(embeddings=agg_out,
-                                                    anchors=anchors,
-                                                    id_col=id_col,
-                                                    moa_col=args.moa_col,
-                                                    n_centroids_per_moa=args.n_centroids_per_moa,
-                                                    centroid_method=args.centroid_method,
-                                                    centroid_shrinkage=args.centroid_shrinkage,
-                                                    min_members_per_moa=args.min_members_per_moa,
-                                                    skip_tiny_moas=args.skip_tiny_moas,
-                                                    adaptive_shrinkage=args.adaptive_shrinkage,
-                                                    adaptive_shrinkage_c=args.adaptive_shrinkage_c,
-                                                    adaptive_shrinkage_max=args.adaptive_shrinkage_max,
-                                                    random_seed=args.random_seed,
-                                                )
+    centroids_df, P, centroid_moas = build_moa_centroids(
+        embeddings=agg,
+        anchors=anchors,
+        id_col=id_col,
+        moa_col=args.moa_col,
+        n_centroids_per_moa=args.n_centroids_per_moa,
+        centroid_method=args.centroid_method,
+        centroid_shrinkage=args.centroid_shrinkage,
+        min_members_per_moa=args.min_members_per_moa,
+        skip_tiny_moas=args.skip_tiny_moas,
+        adaptive_shrinkage=args.adaptive_shrinkage,
+        adaptive_shrinkage_c=args.adaptive_shrinkage_c,
+        adaptive_shrinkage_max=args.adaptive_shrinkage_max,
+        random_seed=args.random_seed,
+    )
+    centroids_df.to_csv(out_dir / "centroids_summary.tsv", sep="\t", index=False)
 
-
-    protos_df.to_csv(out_dir / "centroids_summary.tsv", sep="\t", index=False)
-
-    # If no centroids, bail gracefully with empty, schema-matching outputs
+    # If no centroids, write empty schemas and exit
     if P.shape[0] == 0:
-        scores_cols = [id_col, "moa", "cosine", "csls"]
+        scores_cols = [id_col, "moa", "cosine", "csls", "is_anchor", "anchor_moa"]
         pd.DataFrame(columns=scores_cols).to_csv(out_dir / "compound_moa_scores.tsv", sep="\t", index=False)
         pred_cols = [
             id_col, "decision_rule", "top_moa", "top_score", "margin",
             "top_moa_cosine", "top_cosine", "top_moa_csls", "top_csls",
-            "p_value", "q_value",
+            "p_value", "q_value", "is_anchor", "anchor_moa", "anchor_same_as_top", "potential_inflation"
         ]
         pd.DataFrame(columns=pred_cols).to_csv(out_dir / "compound_predictions.tsv", sep="\t", index=False)
         return
 
     # Map centroids→MOA and define aggregation
-    moa_list, moa_to_idx = build_moa_indexers(proto_moas=proto_moas)
+    moa_list, moa_to_idx = build_moa_indexers(centroid_moas=centroid_moas)
 
-    # Compute similarities once
+    # Compute similarities
     S_cos = cosine_scores(Q=X, P=P, batch_size=4096)
 
     S_csls = None
@@ -891,9 +836,8 @@ def main() -> None:
         S_csls = csls_scores(Q=X, P=P, k=k_eff)
 
     # Aggregate to MOA and choose primary matrix
-    M_cos = agg_over_protos(mat=S_cos, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg)
-    M_csls = agg_over_protos(mat=S_csls, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg) if S_csls is not None else None
-
+    M_cos = agg_over_centroids(mat=S_cos, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg)
+    M_csls = agg_over_centroids(mat=S_csls, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg) if S_csls is not None else None
     M_primary, decision_rule_vec = choose_primary_matrix(
         M_cos=M_cos,
         M_csls=M_csls,
@@ -901,17 +845,27 @@ def main() -> None:
         margin_threshold=args.auto_margin_threshold,
     )
 
-    # Long-form scores per compound×MOA
+    # Long-form scores per compound×MOA (with anchor annotations)
     long_rows: List[Dict[str, object]] = []
     for i, cid in enumerate(ids):
+        is_anchor = cid in anchor_map
+        anchor_moa = anchor_map.get(cid, "")
         for j, moa in enumerate(moa_list):
-            row = {id_col: cid, "moa": moa, "cosine": float(M_cos[i, j])}
+            row = {
+                id_col: cid,
+                "moa": moa,
+                "cosine": float(M_cos[i, j]),
+                "is_anchor": int(is_anchor) if args.annotate_anchors else 0,
+                "anchor_moa": anchor_moa if args.annotate_anchors else "",
+            }
             if M_csls is not None:
                 row["csls"] = float(M_csls[i, j])
+            else:
+                row["csls"] = np.nan
             long_rows.append(row)
     scores_df = pd.DataFrame(long_rows)
 
-    # Predictions (primary rule + diagnostics)
+    # Predictions (primary rule + diagnostics) with anchor annotations
     pred_rows: List[Dict[str, object]] = []
     exclude_set = set(anchors[id_col].astype(str)) if args.exclude_anchors_from_queries else set()
 
@@ -923,10 +877,9 @@ def main() -> None:
         best_idx = int(np.argmax(M_primary[i, :]))
         best_moa = moa_list[best_idx]
         best = float(M_primary[i, best_idx])
-
-        tmp = M_primary[i, :].copy()
-        tmp[best_idx] = -np.inf
-        runner = float(np.max(tmp))
+        temp = M_primary[i, :].copy()
+        temp[best_idx] = -np.inf
+        runner = float(np.max(temp))
         margin = best - runner if np.isfinite(runner) else best
 
         row = {
@@ -942,27 +895,40 @@ def main() -> None:
         row["top_moa_cosine"] = moa_list[c_idx]
         row["top_cosine"] = float(M_cos[i, c_idx])
 
-        # Diagnostics: CSLS (if present)
+        # Diagnostics: CSLS (present or NaN)
         if M_csls is not None:
             s_idx = int(np.argmax(M_csls[i, :]))
             row["top_moa_csls"] = moa_list[s_idx]
             row["top_csls"] = float(M_csls[i, s_idx])
+        else:
+            row["top_moa_csls"] = ""
+            row["top_csls"] = np.nan
+
+        # Anchor annotations
+        if args.annotate_anchors:
+            is_anchor = cid in anchor_map
+            anchor_moa = anchor_map.get(cid, "")
+            potential_inflation = bool(is_anchor and (anchor_moa == best_moa))
+            row["is_anchor"] = int(is_anchor)
+            row["anchor_moa"] = anchor_moa
+            row["anchor_same_as_top"] = (anchor_moa == best_moa) if is_anchor else ""
+            row["potential_inflation"] = int(potential_inflation)
 
         pred_rows.append(row)
 
     preds_df = pd.DataFrame(pred_rows)
 
-    # Optional permutation FDR (use same matrix as the decision)
+    # Optional permutation FDR (mirror the aggregator used for decisions)
     if args.n_permutations > 0:
-        # Build centroid→MOA index vector from proto_moas and moa_list order
+        # Build centroid→MOA index vector consistent with P / centroid_moas
         moa_index_map = {m: i for i, m in enumerate(moa_list)}
-        # proto_moas is parallel to centroid rows in P, so map each to its index
-        proto_to_moa_idx = np.array([moa_index_map[m] for m in proto_moas], dtype=int)
+        proto_to_moa_idx = np.array([moa_index_map[m] for m in centroid_moas], dtype=int)
 
         pvals, qvals = estimate_fdr_by_permutation(
             M_primary=M_primary,
             proto_to_moa=proto_to_moa_idx,
             n_permutations=args.n_permutations,
+            agg_mode=args.moa_score_agg,
             rng=np.random.default_rng(args.random_seed),
         )
         preds_df["p_value"] = pvals
