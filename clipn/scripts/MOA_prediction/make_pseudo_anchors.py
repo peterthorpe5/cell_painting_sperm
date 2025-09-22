@@ -338,80 +338,112 @@ def handle_noise(
     return lbls, None
 
 
-def _overlay_given_labels(
+
+def overlay_given_labels(
     *,
-    clusters_df: pd.DataFrame,
+    clusters_df: Optional[pd.DataFrame] = None,
+    anchors: Optional[pd.DataFrame] = None,
     labels_tsv: str,
     id_col: str,
-    label_col: str = "label",
+    labels_id_col: Optional[str] = None,
+    labels_label_col: str = "label",
 ) -> pd.DataFrame:
     """
-    Merge optional, user-provided labels onto cluster assignments and derive a final MOA.
+    Merge user-provided labels onto cluster assignments and derive a final MOA.
 
-    The input `clusters_df` is expected to have one row per compound with columns:
-    [id_col, "moa", "cluster_id"].
+    This function is backwards compatible with previous usage:
+    `overlay_given_labels(anchors=..., labels_tsv=..., id_col=..., labels_id_col=..., labels_label_col=...)`
+    or the newer `clusters_df=...`.
 
-    The labels TSV should have at least: [id_col, label_col] where `label_col`
-    contains the human-provided annotation (e.g., phenotype).
-
-    Multiple label rows per compound are allowed; they are collapsed into a
-    semicolon-separated string.
+    Parameters
+    ----------
+    clusters_df : Optional[pd.DataFrame]
+        DataFrame with per-compound cluster assignment. Must contain at least
+        [id_col, "moa"]. If available, "cluster_id" will also be preserved.
+    anchors : Optional[pd.DataFrame]
+        Alias for `clusters_df` (for backwards compatibility).
+    labels_tsv : str
+        Path to a TSV with at least [id_col (or labels_id_col), labels_label_col].
+        May contain multiple rows per compound; these will be collapsed.
+    id_col : str
+        Identifier column name used in `clusters_df` / embeddings (e.g., 'cpd_id').
+    labels_id_col : Optional[str]
+        Column name in labels_tsv that corresponds to the identifier. If None,
+        defaults to `id_col`.
+    labels_label_col : str
+        Column in labels_tsv containing the human-provided label (default 'label').
 
     Returns
     -------
     pd.DataFrame
         Columns: [id_col, "moa", "cluster_id", "given_label",
-                  "is_labelled", "moa_final"] where:
-        - given_label: semicolon-joined labels if provided, else NaN
-        - is_labelled: boolean flag for presence of a given_label
-        - moa_final: given_label if present, else the original cluster MOA
+                  "is_labelled", "moa_final"].
     """
-    # Load labels robustly
-    lab = pd.read_csv(labels_tsv, sep="\t", dtype=str, keep_default_na=False, na_values=[""])
-    # Normalise column names and content
-    if id_col not in lab.columns:
-        raise ValueError(f"Labels file '{labels_tsv}' must contain id column '{id_col}'. "
-                         f"Found columns: {list(lab.columns)}")
-    if label_col not in lab.columns:
-        raise ValueError(f"Labels file '{labels_tsv}' must contain label column '{label_col}'. "
-                         f"Found columns: {list(lab.columns)}")
+    # Accept both parameter names for the clustered table
+    if clusters_df is None and anchors is None:
+        raise ValueError("Provide either clusters_df or anchors.")
+    df = clusters_df if clusters_df is not None else anchors
+    df = df.copy()
 
-    lab[id_col] = lab[id_col].astype(str).str.strip()
-    lab[label_col] = lab[label_col].astype(str).str.strip()
-
-    # Collapse multiple labels per compound into a single string (unique + stable order)
-    lab_agg = (
-        lab.groupby(id_col, sort=False)[label_col]
-           .apply(lambda s: "; ".join(pd.unique([x for x in s.values if x != ""])))
-           .reset_index()
-           .rename(columns={label_col: "given_label"})
-    )
-
-    # Ensure id is a column in clusters_df (never only an index)
-    df = clusters_df.copy()
-    missing = set(lab_agg[id_col]) - set(df[id_col])
-    if missing:
-        print(f"NOTE: {len(missing)} labelled compounds not in embeddings; ignoring.", flush=True)
-
+    # Ensure id is a proper column (not only an index)
     if df.index.name == id_col:
         df = df.reset_index()
     if id_col not in df.columns:
-        # If someone set a generic index without name, try to recover
         if df.index.name is None:
             df = df.reset_index().rename(columns={"index": id_col})
         else:
-            raise KeyError(f"'{id_col}' is neither a column nor the index in clusters_df.")
+            raise KeyError(f"'{id_col}' is neither a column nor the index in the cluster table.")
 
+    # Normalise id column
     df[id_col] = df[id_col].astype(str).str.strip()
 
-    # Left-join (keep all clustered compounds; attach given labels if present)
+    # Guarantee cluster_id exists (older pipelines sometimes omitted it)
+    if "cluster_id" not in df.columns:
+        df["cluster_id"] = pd.NA
+
+    # Load labels and normalise column names/content
+    lab = pd.read_csv(labels_tsv, sep="\t", dtype=str, keep_default_na=False, na_values=[""])
+    src_id = labels_id_col if labels_id_col is not None else id_col
+    if src_id not in lab.columns:
+        raise ValueError(
+            f"Labels file '{labels_tsv}' must contain an id column "
+            f"('{src_id}' or '{id_col}'). Found columns: {list(lab.columns)}"
+        )
+    if labels_label_col not in lab.columns:
+        raise ValueError(
+            f"Labels file '{labels_tsv}' must contain label column '{labels_label_col}'. "
+            f"Found columns: {list(lab.columns)}"
+        )
+
+    # Align names: rename id column in labels to match df
+    if src_id != id_col:
+        lab = lab.rename(columns={src_id: id_col})
+
+    lab[id_col] = lab[id_col].astype(str).str.strip()
+    lab[labels_label_col] = lab[labels_label_col].astype(str).str.strip()
+
+    # Collapse multiple labels per compound (unique, stable order)
+    lab_agg = (
+        lab.groupby(id_col, sort=False)[labels_label_col]
+           .apply(lambda s: "; ".join(pd.unique([x for x in s.values if x != ""])))
+           .reset_index()
+           .rename(columns={labels_label_col: "given_label"})
+    )
+
+    # Optional: warn about labels that don't appear in the clustered set
+    missing = set(lab_agg[id_col]) - set(df[id_col])
+    if missing:
+        print(f"NOTE: {len(missing)} labelled compounds not in clustered set; ignoring.", flush=True)
+
+    # Left-join labels (keep all clustered compounds)
     out = df.merge(lab_agg, on=id_col, how="left", validate="one_to_one")
 
+    # Derive flags and final MOA
     out["given_label"] = out["given_label"].replace("", np.nan)
     out["is_labelled"] = out["given_label"].notna()
     out["moa_final"] = np.where(out["is_labelled"], out["given_label"], out["moa"])
 
-    # Return exactly the expected columns
+    # Return canonical columns
     return out[[id_col, "moa", "cluster_id", "given_label", "is_labelled", "moa_final"]]
 
 
@@ -695,13 +727,13 @@ def main() -> None:
     # Anchors table
     anchors_df = pd.DataFrame({id_col: ids, "moa": moa, "cluster_id": cl_ids})
     anchors_df = anchors_df[[id_col, "moa", "cluster_id"]]
-    anchors_df = _overlay_given_labels(
-    anchors=anchors_df,
-    labels_tsv=args.labels_tsv,
-    id_col=id_col,
-    labels_id_col=args.labels_id_col,
-    labels_label_col=args.labels_label_col,
-)
+    anchors_df = overlay_given_labels(
+                                anchors=anchors_df,
+                                labels_tsv=args.labels_tsv,
+                                id_col=id_col,
+                                labels_id_col=args.labels_id_col,
+                                labels_label_col=args.labels_label_col,
+                            )
 
 
     # Summary row
