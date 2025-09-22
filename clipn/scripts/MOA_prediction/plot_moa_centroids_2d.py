@@ -514,6 +514,13 @@ def plot_static(
     -------
     None
     """
+    moa_sizes = Counter(comp_labels)
+    labelled_moas = pick_labelled_moas(
+    moa_names=list(np.unique(comp_labels)),
+    moa_sizes=moa_sizes,
+    topk=label_topk
+)
+    
     comp_labels = np.asarray(comp_labels)
     highlight_set = set(highlight_ids or [])
 
@@ -539,9 +546,12 @@ def plot_static(
         ax.fill(verts[:, 0], verts[:, 1], alpha=0.08, color=colour_map.get(lab, (0.8, 0.8, 0.8)))
 
     for (x, y), lab in zip(xy_centroids, centroid_labels):
+        label_text = truncate_label(lab, label_truncate) if (label_mode == "centroid" and lab in labelled_moas) else ""
         ax.scatter([x], [y], s=180, c=[colour_map.get(lab, "k")],
                 edgecolors="black", linewidths=1.2, marker="o", zorder=5)
-        # show text only if mode allows and MOA is in selected set
+        if label_text:
+            ax.text(x, y, f"  {label_text}", fontsize=label_fontsize, weight="bold", va="center", zorder=6)
+            # show text only if mode allows and MOA is in selected set
         labelled_moas = pick_labelled_moas(
                 moa_names=list(set(comp_labels)),
                 moa_sizes=moa_sizes,
@@ -627,6 +637,7 @@ def pick_labelled_moas(
 
 
 
+
 def try_plot_interactive(
     *,
     xy_comp: np.ndarray,
@@ -636,12 +647,10 @@ def try_plot_interactive(
     ids: Sequence[str],
     out_html: Union[str, Path],
     title: str,
-    label_truncate: int = 17,
-    label_topk: int = 0,
-    label_mode: str = "centroid",
+    label_truncate: int,
+    label_topk: int,
+    label_mode: str,
 ) -> bool:
-
-
     """Write an interactive Plotly HTML (best effort).
 
     Parameters
@@ -673,6 +682,14 @@ def try_plot_interactive(
         print("[WARN] Plotly not installed; skipping interactive HTML.")
         return False
 
+    moa_sizes = Counter(comp_labels)
+    labelled_moas = pick_labelled_moas(
+        moa_names=list(np.unique(comp_labels)),
+        moa_sizes=moa_sizes,
+        topk=label_topk
+    )
+
+
     comp_labels = np.asarray(comp_labels)
     uniq = np.unique(comp_labels)
     colour_map = {lab: px.colors.qualitative.Dark24[i % 24] for i, lab in enumerate(uniq)}
@@ -688,7 +705,7 @@ def try_plot_interactive(
     centroid_custom = []
     for lab in centroid_labels:
         centroid_custom.append(str(lab))  # full label for hover
-        if label_mode == "centroid" and (lab in label_keep):
+        if label_mode == "centroid" and (lab in labelled_moas):
             centroid_text.append(truncate_label(str(lab), label_truncate))
         else:
             centroid_text.append("")  # hide text
@@ -707,7 +724,7 @@ def try_plot_interactive(
                 mode="markers",
                 marker=dict(size=5, color=colour_map[lab], opacity=0.7),
                 name=short,                      # truncated name in legend
-                showlegend=(lab in label_keep),  # only top-K in legend
+                showlegend=(lab in labelled_moas),  # only top-K in legend
                 text=[f"{i}" for i in np.asarray(ids)[idx]],
                 hovertemplate="cpd_id=%{text}<br>x=%{x:.3f}<br>y=%{y:.3f}"
                             f"<extra>{lab}</extra>",  # full label in hover

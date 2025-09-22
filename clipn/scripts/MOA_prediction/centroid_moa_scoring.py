@@ -825,6 +825,20 @@ def main() -> None:
 
     # Compute similarities
     S_cos = cosine_scores(Q=X, P=P, batch_size=4096)
+    print("[dbg] S_cos shape:", S_cos.shape,
+      "min:", float(S_cos.min()),
+      "median:", float(np.median(S_cos)),
+      "max:", float(S_cos.max()))
+    print("[dbg] ||Q|| mean±sd:", float(np.linalg.norm(X, axis=1).mean()),
+        float(np.linalg.norm(X, axis=1).std()))
+    print("[dbg] ||P|| mean±sd:", float(np.linalg.norm(P, axis=1).mean()),
+        float(np.linalg.norm(P, axis=1).std()))
+
+    # Defensive clamp; should be almost never needed
+    if (S_cos > 1.0 + 1e-6).any() or (S_cos < -1.0 - 1e-6).any():
+        print("[warn] cosine out of bounds; clamping to [-1, 1]")
+        S_cos = np.clip(S_cos, -1.0, 1.0)
+
 
     S_csls = None
     if args.use_csls:
