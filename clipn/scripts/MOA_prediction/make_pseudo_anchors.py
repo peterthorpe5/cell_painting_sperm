@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -337,6 +337,80 @@ def handle_noise(
     lbls[noise_mask] = uniq[assign]
     return lbls, None
 
+def _overlay_given_labels(
+    *,
+    anchors: pd.DataFrame,
+    labels_tsv: Optional[str],
+    id_col: str,
+    labels_id_col: str,
+    labels_label_col: str,
+) -> pd.DataFrame:
+    """
+    Overlay optional curated labels onto the anchors table.
+
+    Behaviour
+    ---------
+    - Clustering remains fully unsupervised.
+    - If an ID is not present in the labels TSV, 'given_label' is left empty
+      (NaN in pandas / blank in TSV), 'is_labelled' is False, and 'moa_final'
+      equals the pseudo-cluster 'moa'.
+    - If an ID is present, 'given_label' is set, 'is_labelled' is True, and
+      'moa_final' equals 'given_label'.
+
+    Parameters
+    ----------
+    anchors : pd.DataFrame
+        Table with columns [id_col, 'moa', 'cluster_id'] from pseudo-anchors.
+    labels_tsv : Optional[str]
+        Path to TSV mapping ID to label (two columns are sufficient:
+        <labels_id_col> and <labels_label_col>). If None, returns anchors with
+        empty 'given_label', False 'is_labelled', and 'moa_final' = 'moa'.
+    id_col : str
+        Identifier column name in 'anchors' (e.g., 'cpd_id').
+    labels_id_col : str
+        Identifier column name in the labels TSV.
+    labels_label_col : str
+        Label column name in the labels TSV.
+
+    Returns
+    -------
+    pd.DataFrame
+        Anchors with added columns:
+        - 'given_label' : label from file where available, else NaN
+        - 'is_labelled' : boolean indicator
+        - 'moa_final'   : given_label if available, else pseudo-cluster 'moa'
+    """
+    out = anchors.copy()
+
+    if labels_tsv is None:
+        out["given_label"] = pd.Series(index=out.index, dtype="object")
+        out["is_labelled"] = False
+        out["moa_final"] = out["moa"]
+        return out
+
+    lbl = pd.read_csv(labels_tsv, sep="\t", dtype=str)
+    if labels_id_col not in lbl.columns:
+        raise ValueError(f"Labels TSV missing id column '{labels_id_col}'.")
+    if labels_label_col not in lbl.columns:
+        raise ValueError(f"Labels TSV missing label column '{labels_label_col}'.")
+
+    lbl = lbl[[labels_id_col, labels_label_col]].copy()
+    lbl[labels_id_col] = lbl[labels_id_col].astype(str)
+    lbl = lbl.drop_duplicates(subset=[labels_id_col], keep="first")
+
+    out = out.merge(
+        right=lbl,
+        how="left",
+        left_on=id_col,
+        right_on=labels_id_col,
+        sort=False
+    ).drop(columns=[labels_id_col]).rename(columns={labels_label_col: "given_label"})
+
+    out["is_labelled"] = out["given_label"].notna()
+    out["moa_final"] = np.where(out["is_labelled"], out["given_label"], out["moa"])
+
+    return out[[id_col, "moa", "cluster_id", "given_label", "is_labelled", "moa_final"]]
+
 
 def auto_kmeans(
     *,
@@ -426,6 +500,13 @@ def main() -> None:
     parser.add_argument("--out_summary_tsv", type=str, required=True, help="Output TSV path for run summary.")
     parser.add_argument("--out_clusters_tsv", type=str, required=True, help="Output TSV path for per-cluster stats.")
     parser.add_argument("--id_col", type=str, default="cpd_id", help="Identifier column name (default: cpd_id).")
+
+    parser.add_argument("--labels_tsv", type=str, default=None,
+                        help="Optional TSV mapping IDs to labels for overlay (e.g., cpd_id\\tlabel).")
+    parser.add_argument("--labels_id_col", type=str, default="cpd_id",
+                        help="ID column name in labels TSV (default: cpd_id).")
+    parser.add_argument("--labels_label_col", type=str, default="label",
+                        help="Label column name in labels TSV (default: label).")
 
     parser.add_argument("--aggregate_method", type=str, default="median",
                         choices=["median", "mean", "trimmed_mean", "geometric_median"],
@@ -610,6 +691,14 @@ def main() -> None:
     # Anchors table
     anchors_df = pd.DataFrame({id_col: ids, "moa": moa, "cluster_id": cl_ids})
     anchors_df = anchors_df[[id_col, "moa", "cluster_id"]]
+    anchors_df = _overlay_given_labels(
+    anchors=anchors_df,
+    labels_tsv=args.labels_tsv,
+    id_col=id_col,
+    labels_id_col=args.labels_id_col,
+    labels_label_col=args.labels_label_col,
+)
+
 
     # Summary row
     summary = pd.DataFrame([{

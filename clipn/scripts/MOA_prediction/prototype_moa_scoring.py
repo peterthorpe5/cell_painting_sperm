@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-Prototype (Centroid) MOA Scoring for CLIPn or Feature-Space Embeddings
+centroid (Prototype-Centroid) MOA Scoring for CLIPn or Feature-Space Embeddings
 -----------------------------------------------------------------------
 
 This script infers mode-of-action (MOA) by matching compound embeddings to
-MOA *prototypes* (centroids). It is robust to replicate wells and does not rely
+MOA *Prototype* (centroids). It is robust to replicate wells and does not rely
 on single nearest neighbours.
 
 Workflow
@@ -16,9 +16,9 @@ Workflow
 2) Aggregate replicate rows per compound using a robust estimator
    (median / trimmed-mean / geometric-median).
 3) Load an anchors TSV mapping a subset of compounds to MOA labels.
-4) Build one or more prototypes per MOA (median/mean or k-means subclusters).
-5) Score *all* compounds against prototypes with cosine (and optionally CSLS).
-6) Aggregate prototype scores per MOA (max or mean), compute top prediction,
+4) Build one or more centroids per MOA (median/mean or k-means subclusters).
+5) Score *all* compounds against centroids with cosine (and optionally CSLS).
+6) Aggregate centroid scores per MOA (max or mean), compute top prediction,
    margins, and optional permutation-based FDR.
 
 Inputs (TSV)
@@ -37,8 +37,8 @@ Outputs (TSV; never comma-separated)
 ------------------------------------
 - <out_dir>/compound_embeddings.tsv
     One row per compound after aggregation (id + numeric dims).
-- <out_dir>/prototypes_summary.tsv
-    One row per prototype: MOA, prototype_index, n_members, method, params.
+- <out_dir>/centroids_summary.tsv
+    One row per centroid: MOA, centroid_index, n_members, method, params.
 - <out_dir>/compound_moa_scores.tsv
     Long-form scores: compound × MOA (cosine; CSLS if requested).
 - <out_dir>/compound_predictions.tsv
@@ -190,7 +190,7 @@ def numeric_matrix_from_df(*, df: pd.DataFrame, exclude_cols: Sequence[str]) -> 
     return df.drop(columns=list(exclude_cols), errors="ignore").select_dtypes(include=[np.number]).to_numpy()
 
 
-# ------------------------ aggregation & prototypes --------------------------- #
+# ------------------------ aggregation & centroids --------------------------- #
 
 def aggregate_compounds(
     *,
@@ -240,15 +240,15 @@ def aggregate_compounds(
     return out[[id_col] + num_cols]
 
 
-def build_moa_prototypes(
+def build_moa_centroids(
     *,
     embeddings: pd.DataFrame,
     anchors: pd.DataFrame,
     id_col: str,
     moa_col: str,
-    n_prototypes_per_moa: int = 1,
-    prototype_method: str = "median",
-    prototype_shrinkage: float = 0.0,
+    n_centroids_per_moa: int = 1,
+    centroid_method: str = "median",
+    centroid_shrinkage: float = 0.0,
     min_members_per_moa: int = 1,
     skip_tiny_moas: bool = False,
     adaptive_shrinkage: bool = False,
@@ -257,8 +257,8 @@ def build_moa_prototypes(
     random_seed: int = 0,
 ) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
     """
-    Build one or more prototypes per MOA, with optional minimum-members gate
-    and size-aware (adaptive) shrinkage for small-n prototypes.
+    Build one or more centroids per MOA, with optional minimum-members gate
+    and size-aware (adaptive) shrinkage for small-n centroids.
 
     Parameters
     ----------
@@ -270,15 +270,15 @@ def build_moa_prototypes(
         Identifier column name.
     moa_col : str
         MOA label column name.
-    n_prototypes_per_moa : int, optional
-        Number of sub-prototypes per MOA (k-means within each MOA if >1),
+    n_centroids_per_moa : int, optional
+        Number of sub-centroids per MOA (k-means within each MOA if >1),
         by default 1.
-    prototype_method : str, optional
-        'median' or 'mean' when n_prototypes_per_moa == 1, by default 'median'.
-    prototype_shrinkage : float, optional
+    centroid_method : str, optional
+        'median' or 'mean' when n_centroids_per_moa == 1, by default 'median'.
+    centroid_shrinkage : float, optional
         Baseline shrinkage towards the global mean (0..1), by default 0.0.
     min_members_per_moa : int, optional
-        Minimum labelled members to form a prototype, by default 1.
+        Minimum labelled members to form a centroid, by default 1.
     skip_tiny_moas : bool, optional
         If True, MOAs with < min_members_per_moa are skipped; otherwise they
         are kept, but may be stabilised via adaptive shrinkage if enabled.
@@ -295,11 +295,11 @@ def build_moa_prototypes(
     Returns
     -------
     Tuple[pd.DataFrame, np.ndarray, List[str]]
-        (prototypes_summary_df, P_matrix, proto_moas)
-        - prototypes_summary_df: columns [moa, proto_index, n_members,
+        (centroids_summary_df, P_matrix, proto_moas)
+        - centroids_summary_df: columns [moa, centroid_index, n_members,
           method, shrinkage_effective]
-        - P_matrix: prototype matrix (n_prototypes x d), L2-normalised
-        - proto_moas: per-prototype MOA labels (length n_prototypes)
+        - P_matrix: centroid matrix (n_centroids x d), L2-normalised
+        - proto_moas: per-centroid MOA labels (length n_centroids)
     """
     rng = np.random.RandomState(random_seed)
     id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
@@ -318,7 +318,7 @@ def build_moa_prototypes(
 
     def effective_alpha(n_members: int) -> float:
         """Combine baseline and optional size-aware shrinkage; clamp to [0, 1]."""
-        alpha = float(prototype_shrinkage)
+        alpha = float(centroid_shrinkage)
         if adaptive_shrinkage and n_members > 0:
             alpha += min(float(adaptive_shrinkage_max), float(adaptive_shrinkage_c) / float(n_members))
         return float(min(1.0, max(0.0, alpha)))
@@ -335,18 +335,18 @@ def build_moa_prototypes(
         # Tiny MOA gate
         if n_members_moa < int(min_members_per_moa) and bool(skip_tiny_moas):
             summary_rows.append(
-                {"moa": moa, "proto_index": -1, "n_members": n_members_moa,
+                {"moa": moa, "centroid_index": -1, "n_members": n_members_moa,
                  "method": "skipped_tiny", "shrinkage_effective": 0.0}
             )
             continue
 
-        if n_prototypes_per_moa <= 1 or X_m.shape[0] <= 2:
-            if prototype_method == "median":
+        if n_centroids_per_moa <= 1 or X_m.shape[0] <= 2:
+            if centroid_method == "median":
                 proto = np.median(X_m, axis=0)
-            elif prototype_method == "mean":
+            elif centroid_method == "mean":
                 proto = np.mean(X_m, axis=0)
             else:
-                raise ValueError(f"Unknown prototype_method '{prototype_method}'")
+                raise ValueError(f"Unknown centroid_method '{centroid_method}'")
 
             alpha = effective_alpha(n_members=n_members_moa)
             if alpha > 0:
@@ -356,14 +356,14 @@ def build_moa_prototypes(
             P_list.append(proto)
             proto_moas.append(str(moa))
             summary_rows.append(
-                {"moa": moa, "proto_index": 0, "n_members": n_members_moa,
-                 "method": f"{prototype_method}", "shrinkage_effective": float(alpha)}
+                {"moa": moa, "centroid_index": 0, "n_members": n_members_moa,
+                 "method": f"{centroid_method}", "shrinkage_effective": float(alpha)}
             )
         else:
-            # k-means within this MOA to create sub-prototypes
+            # k-means within this MOA to create sub-centroids
             try:
                 from sklearn.cluster import KMeans
-                n_k = min(n_prototypes_per_moa, X_m.shape[0])
+                n_k = min(n_centroids_per_moa, X_m.shape[0])
                 km = KMeans(n_clusters=n_k, random_state=rng.randint(0, 10**6), n_init="auto")
                 labels = km.fit_predict(X_m)
                 for j in range(n_k):
@@ -374,12 +374,12 @@ def build_moa_prototypes(
                     # Tiny subcluster gate mirrors the MOA-level gate
                     if n_sub < int(min_members_per_moa) and bool(skip_tiny_moas):
                         summary_rows.append(
-                            {"moa": moa, "proto_index": j, "n_members": n_sub,
+                            {"moa": moa, "centroid_index": j, "n_members": n_sub,
                              "method": "skipped_tiny_subcluster", "shrinkage_effective": 0.0}
                         )
                         continue
 
-                    proto = np.median(sel, axis=0) if prototype_method == "median" else np.mean(sel, axis=0)
+                    proto = np.median(sel, axis=0) if centroid_method == "median" else np.mean(sel, axis=0)
 
                     alpha = effective_alpha(n_members=n_sub)
                     if alpha > 0:
@@ -389,12 +389,12 @@ def build_moa_prototypes(
                     P_list.append(proto)
                     proto_moas.append(str(moa))
                     summary_rows.append(
-                        {"moa": moa, "proto_index": j, "n_members": n_sub,
-                         "method": f"kmeans/{prototype_method}", "shrinkage_effective": float(alpha)}
+                        {"moa": moa, "centroid_index": j, "n_members": n_sub,
+                         "method": f"kmeans/{centroid_method}", "shrinkage_effective": float(alpha)}
                     )
             except Exception:
-                # Fallback: single prototype if k-means unavailable
-                proto = np.median(X_m, axis=0) if prototype_method == "median" else np.mean(X_m, axis=0)
+                # Fallback: single centroid if k-means unavailable
+                proto = np.median(X_m, axis=0) if centroid_method == "median" else np.mean(X_m, axis=0)
                 alpha = effective_alpha(n_members=n_members_moa)
                 if alpha > 0:
                     proto = (1 - alpha) * proto + alpha * gmean
@@ -403,8 +403,8 @@ def build_moa_prototypes(
                 P_list.append(proto)
                 proto_moas.append(str(moa))
                 summary_rows.append(
-                    {"moa": moa, "proto_index": 0, "n_members": n_members_moa,
-                     "method": f"{prototype_method}(fallback_no_kmeans)", "shrinkage_effective": float(alpha)}
+                    {"moa": moa, "centroid_index": 0, "n_members": n_members_moa,
+                     "method": f"{centroid_method}(fallback_no_kmeans)", "shrinkage_effective": float(alpha)}
                 )
 
     P = np.vstack(P_list) if P_list else np.zeros((0, X_all.shape[1]), dtype=float)
@@ -417,21 +417,21 @@ def build_moa_prototypes(
 
 def cosine_scores(*, Q: np.ndarray, P: np.ndarray, batch_size: int = 4096) -> np.ndarray:
     """
-    Compute cosine similarity matrix between query and prototype matrices.
+    Compute cosine similarity matrix between query and centroid matrices.
 
     Parameters
     ----------
     Q : np.ndarray
         Query matrix (n_queries x d), rows must be L2-normalised.
     P : np.ndarray
-        Prototype matrix (n_prototypes x d), rows must be L2-normalised.
+        centroid matrix (n_centroids x d), rows must be L2-normalised.
     batch_size : int, optional
         Batch size for matrix multiplication, by default 4096.
 
     Returns
     -------
     np.ndarray
-        Similarity matrix of shape (n_queries, n_prototypes).
+        Similarity matrix of shape (n_queries, n_centroids).
     """
     if Q.size == 0 or P.size == 0:
         return np.zeros((Q.shape[0], P.shape[0]), dtype=float)
@@ -444,10 +444,10 @@ def cosine_scores(*, Q: np.ndarray, P: np.ndarray, batch_size: int = 4096) -> np
 
 def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
     """
-    Compute CSLS scores between query and prototype matrices.
+    Compute CSLS scores between query and centroid matrices.
 
     CSLS(q, p) = 2 * cos(q, p) - r_q - r_p
-    where r_q is the average cosine of q to its top-k prototypes,
+    where r_q is the average cosine of q to its top-k centroids,
           r_p is the average cosine of p to its top-k queries.
 
     Parameters
@@ -455,14 +455,14 @@ def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
     Q : np.ndarray
         Query matrix (n_queries x d), L2-normalised.
     P : np.ndarray
-        Prototype matrix (n_prototypes x d), L2-normalised.
+        centroid matrix (n_centroids x d), L2-normalised.
     k : int, optional
         Neighbourhood size for local scaling, by default 10.
 
     Returns
     -------
     np.ndarray
-        CSLS score matrix (n_queries x n_prototypes).
+        CSLS score matrix (n_queries x n_centroids).
     """
     if Q.size == 0 or P.size == 0:
         return np.zeros((Q.shape[0], P.shape[0]), dtype=float)
@@ -474,7 +474,7 @@ def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
     # top-k per row (queries)
     part_q = np.partition(S, kth=S.shape[1] - kq, axis=1)[:, -kq:]
     r_q = part_q.mean(axis=1, keepdims=True)
-    # top-k per column (prototypes)
+    # top-k per column (centroids)
     part_p = np.partition(S, kth=S.shape[0] - rp, axis=0)[-rp:, :]
     r_p = part_p.mean(axis=0, keepdims=True)
     return 2.0 * S - r_q - r_p
@@ -484,12 +484,12 @@ def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
 
 def build_moa_indexers(*, proto_moas: List[str]) -> Tuple[List[str], Dict[str, List[int]]]:
     """
-    Build MOA list and per-MOA prototype index mapping.
+    Build MOA list and per-MOA centroid index mapping.
 
     Parameters
     ----------
     proto_moas : List[str]
-        Per-prototype MOA labels.
+        Per-centroid MOA labels.
 
     Returns
     -------
@@ -509,16 +509,16 @@ def agg_over_protos(
     mode: str = "max",
 ) -> Optional[np.ndarray]:
     """
-    Aggregate prototype scores to MOA scores.
+    Aggregate centroid scores to MOA scores.
 
     Parameters
     ----------
     mat : Optional[np.ndarray]
-        Compound×prototype score matrix, or None.
+        Compound×centroid score matrix, or None.
     moa_list : List[str]
         Ordered list of MOA names.
     moa_to_idx : Dict[str, List[int]]
-        Mapping MOA -> list of prototype column indices in 'mat'.
+        Mapping MOA -> list of centroid column indices in 'mat'.
     mode : str, optional
         'max' or 'mean', by default 'max'.
 
@@ -631,18 +631,18 @@ def estimate_fdr_by_permutation(
     """
     Estimate per-compound FDR for the top-MOA 'margin' using label permutations.
 
-    Keeps the geometry fixed (compound and prototype scores already aggregated
+    Keeps the geometry fixed (compound and centroid scores already aggregated
     to MOA in M_primary) and destroys MOA structure by randomly reallocating
-    prototypes to MOAs while preserving the number of prototypes per MOA.
+    centroids to MOAs while preserving the number of centroids per MOA.
     The null is built on the distribution of top-minus-runner-up margins.
 
     Parameters
     ----------
     M_primary : np.ndarray
-        Compound×MOA score matrix used for decisions (chosen rule), shape
+        CompoundxMOA score matrix used for decisions (chosen rule), shape
         (n_compounds, n_moas).
     proto_to_moa : Sequence[int]
-        Mapping from prototype index to MOA index (length n_prototypes).
+        Mapping from centroid index to MOA index (length n_centroids).
     n_permutations : int
         Number of label permutations for the null (default 200).
     rng : Optional[np.random.Generator]
@@ -666,21 +666,21 @@ def estimate_fdr_by_permutation(
     runner = np.max(tmp, axis=1)
     observed_margin = best_val - runner
 
-    # Prototype counts per MOA
+    # centroid counts per MOA
     counts = np.bincount(np.asarray(proto_to_moa, dtype=int), minlength=n_moas)
 
-    # Expand M_primary to a 'compound×prototype' surrogate by splitting MOA columns
+    # Expand M_primary to a 'compound×centroid' surrogate by splitting MOA columns
     proto_cols = []
     for moa_i, c in enumerate(counts):
         if c > 0:
             proto_cols.append(np.repeat(M_primary[:, [moa_i]], repeats=c, axis=1))
     M_proto_like = np.concatenate(proto_cols, axis=1) if proto_cols else M_primary[:, :0]
-    n_prototypes = M_proto_like.shape[1]
+    n_centroids = M_proto_like.shape[1]
 
     perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
 
     for b in range(n_permutations):
-        alloc = np.arange(n_prototypes)
+        alloc = np.arange(n_centroids)
         rng.shuffle(alloc)
         cols = []
         start = 0
@@ -709,14 +709,14 @@ def estimate_fdr_by_permutation(
 
 def main() -> None:
     """
-    Parse arguments and run prototype MOA scoring with cosine/CSLS and optional FDR.
+    Parse arguments and run centroid MOA scoring with cosine/CSLS and optional FDR.
 
     Notes
     -----
     - Outputs are always TSV (tab-separated) to comply with “never comma-separated”.
     - CSLS is computed by default; the decision rule defaults to 'auto'.
     """
-    parser = argparse.ArgumentParser(description="Prototype (centroid) MOA scoring (TSV I/O, UK English).")
+    parser = argparse.ArgumentParser(description="centroid (centroid) MOA scoring (TSV I/O, UK English).")
     parser.add_argument("--embeddings_tsv", type=str, required=True, help="TSV with embeddings (well- or compound-level).")
     parser.add_argument("--anchors_tsv", type=str, required=True, help="TSV with anchors: id + MOA.")
     parser.add_argument("--out_dir", type=str, required=True, help="Directory to write outputs (TSV).")
@@ -734,16 +734,16 @@ def main() -> None:
     parser.add_argument("--trimmed_frac", type=float, 
                         default=0.1, help="Trim fraction for trimmed_mean (default: 0.1).")
 
-    parser.add_argument("--n_prototypes_per_moa", type=int, 
-                        default=1, help="Sub-prototypes per MOA (k-means if >1).")
-    parser.add_argument("--prototype_method", type=str, 
-                        default="median", choices=["median", "mean"], help="Prototype estimator when n_prototypes_per_moa<=1 (default: median).")
-    parser.add_argument("--prototype_shrinkage", type=float, 
-                        default=0.0, help="Shrink prototypes towards global mean (0..1).")
+    parser.add_argument("--n_centroids_per_moa", type=int, 
+                        default=1, help="Sub-centroids per MOA (k-means if >1).")
+    parser.add_argument("--centroid_method", type=str, 
+                        default="median", choices=["median", "mean"], help="centroid estimator when n_centroids_per_moa<=1 (default: median).")
+    parser.add_argument("--centroid_shrinkage", type=float, 
+                        default=0.0, help="Shrink centroids towards global mean (0..1).")
 
     parser.add_argument("--moa_score_agg", type=str, 
                         default="max", choices=["max", "mean"], 
-                        help="Aggregate prototype→MOA score (default: max).")
+                        help="Aggregate centroid→MOA score (default: max).")
 
     parser.add_argument(
         "--use_csls",
@@ -757,7 +757,7 @@ def main() -> None:
         "--csls_k",
         type=int,
         default=-1,
-        help="Neighbourhood size for CSLS. Use -1 to auto-select k≈sqrt(#prototypes), clipped to [5, 50].",
+        help="Neighbourhood size for CSLS. Use -1 to auto-select k≈sqrt(#centroids), clipped to [5, 50].",
     )
 
     parser.add_argument(
@@ -781,22 +781,21 @@ def main() -> None:
                         default=200, help="Permutations for FDR (0 to disable). Default: 200.")
     parser.add_argument("--random_seed", type=int, 
                         default=0, help="Random seed for reproducibility (default: 0).")
-        parser.add_argument(
-        "--min_members_per_moa",
-        type=int,
-        default=1,
-        help="Minimum labelled members needed to form a prototype (default: 1 keeps all).",
-    )
+    parser.add_argument("--min_members_per_moa",
+            type=int,
+            default=1,
+            help="Minimum labelled members needed to form a centroid (default: 1 keeps all).",
+        )
     parser.add_argument(
-        "--skip_tiny_moas",
-        action="store_true",
-        help="If set, MOAs with < min_members_per_moa are skipped (no prototype built).",
-    )
+            "--skip_tiny_moas",
+            action="store_true",
+            help="If set, MOAs with < min_members_per_moa are skipped (no centroid built).",
+        )
     parser.add_argument(
         "--adaptive_shrinkage",
         action="store_true",
-        help=("If set, adds size-aware shrinkage for small prototypes: "
-              "alpha_eff = prototype_shrinkage + min(adaptive_shrinkage_max, "
+        help=("If set, adds size-aware shrinkage for small centroids: "
+              "alpha_eff = centroid_shrinkage + min(adaptive_shrinkage_max, "
               "adaptive_shrinkage_c / n_members)."),
     )
     parser.add_argument(
@@ -845,14 +844,14 @@ def main() -> None:
     if args.moa_col not in anchors.columns:
         raise ValueError(f"Anchors file must contain MOA column '{args.moa_col}'.")
 
-    # Build prototypes
-    protos_df, P, proto_moas = build_moa_prototypes(embeddings=agg_out,
+    # Build centroids
+    protos_df, P, proto_moas = build_moa_centroids(embeddings=agg_out,
                                                     anchors=anchors,
                                                     id_col=id_col,
                                                     moa_col=args.moa_col,
-                                                    n_prototypes_per_moa=args.n_prototypes_per_moa,
-                                                    prototype_method=args.prototype_method,
-                                                    prototype_shrinkage=args.prototype_shrinkage,
+                                                    n_centroids_per_moa=args.n_centroids_per_moa,
+                                                    centroid_method=args.centroid_method,
+                                                    centroid_shrinkage=args.centroid_shrinkage,
                                                     min_members_per_moa=args.min_members_per_moa,
                                                     skip_tiny_moas=args.skip_tiny_moas,
                                                     adaptive_shrinkage=args.adaptive_shrinkage,
@@ -862,9 +861,9 @@ def main() -> None:
                                                 )
 
 
-    protos_df.to_csv(out_dir / "prototypes_summary.tsv", sep="\t", index=False)
+    protos_df.to_csv(out_dir / "centroids_summary.tsv", sep="\t", index=False)
 
-    # If no prototypes, bail gracefully with empty, schema-matching outputs
+    # If no centroids, bail gracefully with empty, schema-matching outputs
     if P.shape[0] == 0:
         scores_cols = [id_col, "moa", "cosine", "csls"]
         pd.DataFrame(columns=scores_cols).to_csv(out_dir / "compound_moa_scores.tsv", sep="\t", index=False)
@@ -876,7 +875,7 @@ def main() -> None:
         pd.DataFrame(columns=pred_cols).to_csv(out_dir / "compound_predictions.tsv", sep="\t", index=False)
         return
 
-    # Map prototypes→MOA and define aggregation
+    # Map centroids→MOA and define aggregation
     moa_list, moa_to_idx = build_moa_indexers(proto_moas=proto_moas)
 
     # Compute similarities once
@@ -955,9 +954,9 @@ def main() -> None:
 
     # Optional permutation FDR (use same matrix as the decision)
     if args.n_permutations > 0:
-        # Build prototype→MOA index vector from proto_moas and moa_list order
+        # Build centroid→MOA index vector from proto_moas and moa_list order
         moa_index_map = {m: i for i, m in enumerate(moa_list)}
-        # proto_moas is parallel to prototype rows in P, so map each to its index
+        # proto_moas is parallel to centroid rows in P, so map each to its index
         proto_to_moa_idx = np.array([moa_index_map[m] for m in proto_moas], dtype=int)
 
         pvals, qvals = estimate_fdr_by_permutation(
