@@ -338,7 +338,6 @@ def handle_noise(
     return lbls, None
 
 
-
 def overlay_given_labels(
     *,
     clusters_df: Optional[pd.DataFrame] = None,
@@ -351,8 +350,8 @@ def overlay_given_labels(
     """
     Merge user-provided labels onto cluster assignments and derive a final MOA.
 
-    This function is backwards compatible with previous usage:
-    `overlay_given_labels(anchors=..., labels_tsv=..., id_col=..., labels_id_col=..., labels_label_col=...)`
+    Backwards compatible with previous usage:
+    `_overlay_given_labels(anchors=..., labels_tsv=..., id_col=..., labels_id_col=..., labels_label_col=...)`
     or the newer `clusters_df=...`.
 
     Parameters
@@ -376,8 +375,7 @@ def overlay_given_labels(
     Returns
     -------
     pd.DataFrame
-        Columns: [id_col, "moa", "cluster_id", "given_label",
-                  "is_labelled", "moa_final"].
+        Columns: [id_col, "moa", "cluster_id", "given_label", "is_labelled", "moa_final"].
     """
     # Accept both parameter names for the clustered table
     if clusters_df is None and anchors is None:
@@ -394,14 +392,12 @@ def overlay_given_labels(
         else:
             raise KeyError(f"'{id_col}' is neither a column nor the index in the cluster table.")
 
-    # Normalise id column
+    # Normalise id and guarantee 'cluster_id'
     df[id_col] = df[id_col].astype(str).str.strip()
-
-    # Guarantee cluster_id exists (older pipelines sometimes omitted it)
     if "cluster_id" not in df.columns:
         df["cluster_id"] = pd.NA
 
-    # Load labels and normalise column names/content
+    # Load labels
     lab = pd.read_csv(labels_tsv, sep="\t", dtype=str, keep_default_na=False, na_values=[""])
     src_id = labels_id_col if labels_id_col is not None else id_col
     if src_id not in lab.columns:
@@ -415,14 +411,12 @@ def overlay_given_labels(
             f"Found columns: {list(lab.columns)}"
         )
 
-    # Align names: rename id column in labels to match df
     if src_id != id_col:
         lab = lab.rename(columns={src_id: id_col})
-
     lab[id_col] = lab[id_col].astype(str).str.strip()
     lab[labels_label_col] = lab[labels_label_col].astype(str).str.strip()
 
-    # Collapse multiple labels per compound (unique, stable order)
+    # Collapse multiple labels per compound (keep unique; stable order)
     lab_agg = (
         lab.groupby(id_col, sort=False)[labels_label_col]
            .apply(lambda s: "; ".join(pd.unique([x for x in s.values if x != ""])))
@@ -430,21 +424,30 @@ def overlay_given_labels(
            .rename(columns={labels_label_col: "given_label"})
     )
 
-    # Optional: warn about labels that don't appear in the clustered set
+    # Note any labels that do not appear in clustered set
     missing = set(lab_agg[id_col]) - set(df[id_col])
     if missing:
         print(f"NOTE: {len(missing)} labelled compounds not in clustered set; ignoring.", flush=True)
 
-    # Left-join labels (keep all clustered compounds)
+    # Join
     out = df.merge(lab_agg, on=id_col, how="left", validate="one_to_one")
 
-    # Derive flags and final MOA
+    # Flags
     out["given_label"] = out["given_label"].replace("", np.nan)
     out["is_labelled"] = out["given_label"].notna()
-    out["moa_final"] = np.where(out["is_labelled"], out["given_label"], out["moa"])
 
-    # Return canonical columns
+    # Final MOA: keep cluster MOA and append label(s) if present and different.
+    base = out["moa"].astype(str).str.strip().fillna("")
+    labv = out["given_label"].astype(str).str.strip().fillna("")
+    same = base.str.lower() == labv.str.lower()
+    out["moa_final"] = np.where(
+        (labv.eq("")) | same,
+        base,
+        base + " | " + labv,
+    )
+
     return out[[id_col, "moa", "cluster_id", "given_label", "is_labelled", "moa_final"]]
+
 
 
 
@@ -573,7 +576,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load embeddings and aggregate to compounds
-    df = pd.read_csv(args.embeddings_tsv, sep="\t")
+    df = pd.read_csv(args.embeddings_tsv, sep="\t", low_memory=False)
     id_col = detect_id_column(df=df, id_col=args.id_col)
 
     agg = aggregate_compounds(
