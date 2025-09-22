@@ -801,25 +801,25 @@ def main() -> None:
     p.add_argument("--random_seed", type=int, default=0, help="Random seed.")
 
     # plots: make the labels less ... invasive
-    parser.add_argument(
+    p.add_argument(
                     "--label_truncate",
                     type=int,
                     default=17,
                     help="Maximum characters to display for MOA labels on the plot (default: 17).",
                 )
-    parser.add_argument(
+    p.add_argument(
         "--label_fontsize",
         type=float,
         default=6.0,
         help="Font size for centroid text labels on the static PDF (default: 9).",
     )
-    parser.add_argument(
+    p.add_argument(
         "--label_topk",
         type=int,
         default=0,
         help="Only label the top-K MOAs by membership size. 0 means label all (default: 0).",
     )
-    parser.add_argument(
+    p.add_argument(
         "--label_mode",
         type=str,
         default="centroid",
