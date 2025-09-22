@@ -1,41 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-2D MOA map: compounds, centroids, and regions (UMAP/PCA).
-----------------------------------------------------------
+"""2D MOA map (PCA/UMAP) with compounds, centroids, and regions.
 
-- Reads directly from your MoA scoring output directory (--moa_dir), using
-  <moa_dir>/compound_embeddings.tsv so the points match your scoring step
-  exactly. (You can also pass --embeddings_tsv instead.)
-- Rebuilds centroids from your anchors with the *same options* as scoring.
-- Colours compounds by MOA (predictions TSV if provided, else nearest centroid).
-- Always tries to write an interactive Plotly HTML **in addition** to a static figure.
-  If Plotly is missing, it warns and continues.
-- Convex hull regions are drawn if SciPy is available; otherwise skipped silently.
+This script projects compound embeddings and MOA centroids to 2D and renders:
+1) A static PNG (always).
+2) A best-effort interactive Plotly HTML (attempted every run; skipped gracefully
+   if Plotly or file writing is unavailable).
+
+Data sources (in order of preference):
+- --moa_dir: reads `<moa_dir>/compound_embeddings.tsv` to ensure parity with
+  the embeddings used in your MoA scoring step.
+- --embeddings_tsv: if --moa_dir is not provided, aggregates the raw embeddings.
+
+Centroids are rebuilt from `--anchors_tsv` using the same options you used in
+scoring (median/mean, optional sub-centroids via k-means, optional shrinkage).
+Compounds are coloured either by provided predictions (`--predictions_tsv`) or
+by nearest centroid (cosine/CSLS).
 
 Outputs
 -------
-<out_prefix>.png  (static)
-<out_prefix>.html (interactive; best effort)
+<out_prefix>.png   Static figure (always).
+<out_prefix>.html  Interactive Plotly figure (best effort).
 
-Typical usage
--------------
-# From your MoA output folder (ensures perfect parity w/ scoring inputs):
+Example
+-------
 python plot_moa_centroids_2d.py \
-  --moa_dir path/to/moa_out_dir \
+  --moa_dir path/to/moa_out \
   --anchors_tsv path/to/pseudo_anchors.tsv \
   --assignment predictions \
-  --predictions_tsv path/to/moa_out_dir/compound_predictions.tsv \
+  --predictions_tsv path/to/moa_out/compound_predictions.tsv \
   --projection umap \
-  --out_prefix path/to/moa_out_dir/moa_map
-
-# If you don’t have --moa_dir:
-python plot_moa_centroids_2d.py \
-  --embeddings_tsv path/to/decoded.tsv \
-  --anchors_tsv path/to/pseudo_anchors.tsv \
-  --projection pca \
-  --out_prefix moa_map
+  --n_centroids_per_moa 1 \
+  --centroid_method median \
+  --adaptive_shrinkage --adaptive_shrinkage_c 0.5 --adaptive_shrinkage_max 0.3 \
+  --out_prefix path/to/moa_out/moa_map \
+  --random_seed 0
 """
 
 from __future__ import annotations
@@ -49,17 +49,45 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 
-# ----------------------------- maths utilities ----------------------------- #
+# --------------------------------------------------------------------------- #
+# Math utilities
+# --------------------------------------------------------------------------- #
 
 def l2_normalise(*, X: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """Row-wise L2 normalisation."""
+    """Row-wise L2 normalisation.
+
+    Parameters
+    ----------
+    X
+        Array of shape (n_samples, n_features).
+    eps
+        Small stabiliser to avoid division by zero.
+
+    Returns
+    -------
+    np.ndarray
+        L2-normalised array with the same shape as `X`.
+    """
     n = np.linalg.norm(X, axis=1, keepdims=True)
     n = np.maximum(n, eps)
     return X / n
 
 
 def trimmed_mean(*, X: np.ndarray, trim_frac: float = 0.1) -> np.ndarray:
-    """Per-feature trimmed mean."""
+    """Per-feature trimmed mean.
+
+    Parameters
+    ----------
+    X
+        Array of shape (n_rows, n_features).
+    trim_frac
+        Fraction to trim from each tail per feature (0..0.5).
+
+    Returns
+    -------
+    np.ndarray
+        Vector of length n_features containing the trimmed mean.
+    """
     if X.shape[0] == 1 or trim_frac <= 0:
         return X.mean(axis=0)
     lo = int(np.floor(trim_frac * X.shape[0]))
@@ -69,7 +97,22 @@ def trimmed_mean(*, X: np.ndarray, trim_frac: float = 0.1) -> np.ndarray:
 
 
 def geometric_median(*, X: np.ndarray, max_iter: int = 256, tol: float = 1e-6) -> np.ndarray:
-    """Geometric median via Weiszfeld's algorithm."""
+    """Geometric median via Weiszfeld's algorithm.
+
+    Parameters
+    ----------
+    X
+        Array of shape (n_rows, n_features).
+    max_iter
+        Maximum number of iterations.
+    tol
+        Convergence tolerance on the update step.
+
+    Returns
+    -------
+    np.ndarray
+        Vector of length n_features representing the geometric median.
+    """
     if X.shape[0] == 1:
         return X[0].copy()
     y = X.mean(axis=0)
@@ -85,10 +128,30 @@ def geometric_median(*, X: np.ndarray, max_iter: int = 256, tol: float = 1e-6) -
     return y
 
 
-# -------------------------- embeddings / centroids -------------------------- #
+# --------------------------------------------------------------------------- #
+# Embeddings / centroids
+# --------------------------------------------------------------------------- #
 
 def detect_id_column(*, df: pd.DataFrame, id_col: Optional[str]) -> str:
-    """Validate or detect the identifier column."""
+    """Validate or detect the identifier column.
+
+    Parameters
+    ----------
+    df
+        Input DataFrame.
+    id_col
+        Explicit identifier column name; if None, try common candidates.
+
+    Returns
+    -------
+    str
+        Resolved identifier column name.
+
+    Raises
+    ------
+    ValueError
+        If no suitable identifier column is found.
+    """
     if id_col is not None:
         if id_col in df.columns:
             return id_col
@@ -106,7 +169,24 @@ def aggregate_compounds(
     method: str = "median",
     trimmed_frac: float = 0.1,
 ) -> pd.DataFrame:
-    """Aggregate replicate rows per compound into one embedding."""
+    """Aggregate replicate rows per compound into one embedding.
+
+    Parameters
+    ----------
+    df
+        DataFrame containing `id_col` and numeric feature columns.
+    id_col
+        Identifier column for grouping.
+    method
+        One of {"median", "mean", "trimmed_mean", "geometric_median"}.
+    trimmed_frac
+        Tail fraction for `trimmed_mean`.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per compound with the aggregated numeric columns.
+    """
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     rows: List[Dict[str, float]] = []
     for cid, sub in df.groupby(id_col, sort=False):
@@ -142,9 +222,45 @@ def build_moa_centroids(
     adaptive_shrinkage_max: float = 0.3,
     random_seed: int = 0,
 ) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
-    """
-    Build one or more centroids per MOA (same logic as the scoring script).
-    Returns (summary_df, P, centroid_moas).
+    """Build one or more centroids per MOA.
+
+    Parameters
+    ----------
+    embeddings
+        Aggregated compound embeddings (one row per id).
+    anchors
+        Table with columns [id_col, moa_col] for labelled anchor compounds.
+    id_col
+        Identifier column name.
+    moa_col
+        MOA label column in `anchors`.
+    n_centroids_per_moa
+        If >1, run k-means within each MOA to create sub-centroids.
+    centroid_method
+        "median" or "mean" (used when n_centroids_per_moa <= 1).
+    centroid_shrinkage
+        Baseline shrinkage towards the global mean (0..1).
+    min_members_per_moa
+        Minimum labelled members to form a centroid.
+    skip_tiny_moas
+        If True, MOAs with < min_members_per_moa are skipped entirely.
+    adaptive_shrinkage
+        If True, add `min(adaptive_shrinkage_max, adaptive_shrinkage_c / n_members)`
+        to the baseline shrinkage.
+    adaptive_shrinkage_c
+        Constant `C` for the size-aware shrinkage term.
+    adaptive_shrinkage_max
+        Maximum extra shrinkage due to the size-aware term.
+    random_seed
+        Random seed for sub-clustering.
+
+    Returns
+    -------
+    tuple
+        (summary_df, P, centroid_moas):
+        - summary_df: per-centroid metadata (MOA, size, method, shrinkage).
+        - P: centroid matrix (n_centroids, d), L2-normalised.
+        - centroid_moas: MOA label per centroid.
     """
     id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
     num_cols = embeddings.select_dtypes(include=[np.number]).columns.tolist()
@@ -159,10 +275,10 @@ def build_moa_centroids(
     moa_groups = labelled.groupby(moa_col)
 
     def eff_alpha(n_members: int) -> float:
-        a = float(centroid_shrinkage)
+        alpha = float(centroid_shrinkage)
         if adaptive_shrinkage and n_members > 0:
-            a += min(float(adaptive_shrinkage_max), float(adaptive_shrinkage_c) / float(n_members))
-        return float(min(1.0, max(0.0, a)))
+            alpha += min(float(adaptive_shrinkage_max), float(adaptive_shrinkage_c) / float(n_members))
+        return float(min(1.0, max(0.0, alpha)))
 
     rng = np.random.RandomState(random_seed)
     P_list: List[np.ndarray] = []
@@ -185,7 +301,8 @@ def build_moa_centroids(
             if a > 0:
                 proto = (1 - a) * proto + a * gmean
             proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
-            P_list.append(proto); centroid_moas.append(str(moa))
+            P_list.append(proto)
+            centroid_moas.append(str(moa))
             summary_rows.append({"moa": moa, "centroid_index": 0, "n_members": n_m,
                                  "method": centroid_method, "shrinkage_effective": float(a)})
         else:
@@ -208,7 +325,8 @@ def build_moa_centroids(
                     if a > 0:
                         proto = (1 - a) * proto + a * gmean
                     proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
-                    P_list.append(proto); centroid_moas.append(str(moa))
+                    P_list.append(proto)
+                    centroid_moas.append(str(moa))
                     summary_rows.append({"moa": moa, "centroid_index": j, "n_members": n_sub,
                                          "method": f"kmeans/{centroid_method}", "shrinkage_effective": float(a)})
             except Exception:
@@ -217,7 +335,8 @@ def build_moa_centroids(
                 if a > 0:
                     proto = (1 - a) * proto + a * gmean
                 proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
-                P_list.append(proto); centroid_moas.append(str(moa))
+                P_list.append(proto)
+                centroid_moas.append(str(moa))
                 summary_rows.append({"moa": moa, "centroid_index": 0, "n_members": n_m,
                                      "method": f"{centroid_method}(fallback_no_kmeans)",
                                      "shrinkage_effective": float(a)})
@@ -227,18 +346,50 @@ def build_moa_centroids(
 
 
 def cosine_scores(*, Q: np.ndarray, P: np.ndarray) -> np.ndarray:
-    """Cosine similarity matrix (n_q, n_p)."""
+    """Cosine similarity matrix.
+
+    Parameters
+    ----------
+    Q
+        Query matrix of shape (n_queries, d), L2-normalised.
+    P
+        Prototype/centroid matrix of shape (n_centroids, d), L2-normalised.
+
+    Returns
+    -------
+    np.ndarray
+        Similarity matrix of shape (n_queries, n_centroids).
+    """
     if Q.size == 0 or P.size == 0:
         return np.zeros((Q.shape[0], P.shape[0]), dtype=float)
     return Q @ P.T
 
 
 def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
-    """CSLS(q,p) = 2*cos(q,p) - r_q - r_p."""
+    """Cross-domain similarity local scaling (CSLS).
+
+    CSLS(q, p) = 2*cos(q, p) - r_q - r_p, where r_q and r_p are the average
+    top-k cosine similarities for each query and prototype respectively.
+
+    Parameters
+    ----------
+    Q
+        Query matrix (n_queries, d), L2-normalised.
+    P
+        Prototype/centroid matrix (n_centroids, d), L2-normalised.
+    k
+        Neighbourhood size used for local scaling.
+
+    Returns
+    -------
+    np.ndarray
+        CSLS matrix of shape (n_queries, n_centroids).
+    """
     if Q.size == 0 or P.size == 0:
         return np.zeros((Q.shape[0], P.shape[0]), dtype=float)
     S = Q @ P.T
-    kq = min(k, P.shape[0]); rp = min(k, Q.shape[0])
+    kq = min(k, P.shape[0])
+    rp = min(k, Q.shape[0])
     if kq <= 0 or rp <= 0:
         return S.copy()
     part_q = np.partition(S, kth=S.shape[1] - kq, axis=1)[:, -kq:]
@@ -248,10 +399,27 @@ def csls_scores(*, Q: np.ndarray, P: np.ndarray, k: int = 10) -> np.ndarray:
     return 2.0 * S - r_q - r_p
 
 
-# ------------------------------- projection -------------------------------- #
+# --------------------------------------------------------------------------- #
+# Projection and plotting
+# --------------------------------------------------------------------------- #
 
 def project_2d(*, X: np.ndarray, method: str = "umap", random_seed: int = 0) -> np.ndarray:
-    """Project to 2D using UMAP (if available) or PCA fallback."""
+    """Project to 2D via UMAP (preferred) or PCA fallback.
+
+    Parameters
+    ----------
+    X
+        Matrix of shape (n_samples, d).
+    method
+        "umap" or "pca".
+    random_seed
+        Random seed used by the projector.
+
+    Returns
+    -------
+    np.ndarray
+        2D coordinates of shape (n_samples, 2).
+    """
     method = method.lower().strip()
     if method == "umap":
         try:
@@ -264,10 +432,23 @@ def project_2d(*, X: np.ndarray, method: str = "umap", random_seed: int = 0) -> 
     return PCA(n_components=2, random_state=random_seed).fit_transform(X)
 
 
-# ------------------------------- plotting ---------------------------------- #
-
 def compute_convex_hulls(*, xy: np.ndarray, labels: Sequence[str], min_points: int = 3) -> Dict[str, np.ndarray]:
-    """Per-label convex hull vertices in 2D (best-effort if SciPy available)."""
+    """Compute per-label convex hull vertices in 2D (best effort).
+
+    Parameters
+    ----------
+    xy
+        2D coordinates (n_points, 2).
+    labels
+        Label for each point (length n_points).
+    min_points
+        Minimum number of points to attempt a hull.
+
+    Returns
+    -------
+    dict
+        Mapping label -> hull vertices array (m, 2). Empty dict if SciPy is not available.
+    """
     try:
         from scipy.spatial import ConvexHull  # type: ignore
     except Exception:
@@ -298,7 +479,31 @@ def plot_static(
     out_path: Union[str, Path],
     title: str,
 ) -> None:
-    """Static matplotlib plot (always written)."""
+    """Render a static matplotlib plot (saved as PNG).
+
+    Parameters
+    ----------
+    xy_comp
+        2D coordinates of compounds (n_compounds, 2).
+    xy_centroids
+        2D coordinates of centroids (n_centroids, 2).
+    comp_labels
+        Label (MOA) per compound.
+    centroid_labels
+        MOA label per centroid.
+    ids
+        cpd_id per compound (used for highlighting).
+    highlight_ids
+        Iterable of cpd_ids to annotate on the plot.
+    out_path
+        Output file path for the PNG figure.
+    title
+        Plot title.
+
+    Returns
+    -------
+    None
+    """
     comp_labels = np.asarray(comp_labels)
     highlight_set = set(highlight_ids or [])
 
@@ -350,9 +555,29 @@ def try_plot_interactive(
     out_html: Union[str, Path],
     title: str,
 ) -> bool:
-    """
-    Best-effort interactive Plotly HTML. Returns True if written, False otherwise.
-    Never raises.
+    """Write an interactive Plotly HTML (best effort).
+
+    Parameters
+    ----------
+    xy_comp
+        2D coordinates of compounds (n_compounds, 2).
+    xy_centroids
+        2D coordinates of centroids (n_centroids, 2).
+    comp_labels
+        Label (MOA) per compound.
+    centroid_labels
+        MOA label per centroid.
+    ids
+        cpd_id per compound (for hover).
+    out_html
+        Output path for the HTML file.
+    title
+        Plot title.
+
+    Returns
+    -------
+    bool
+        True if the HTML was written successfully, False otherwise.
     """
     try:
         import plotly.graph_objects as go
@@ -392,7 +617,6 @@ def try_plot_interactive(
         )
     )
 
-    # Hulls best-effort
     hulls = compute_convex_hulls(xy=xy_comp, labels=comp_labels, min_points=3)
     for lab, verts in hulls.items():
         fig.add_trace(
@@ -430,13 +654,20 @@ def try_plot_interactive(
         return False
 
 
-# --------------------------------- runner ---------------------------------- #
+# --------------------------------------------------------------------------- #
+# Runner
+# --------------------------------------------------------------------------- #
 
 def main() -> None:
-    """Parse arguments, load from MoA dir or embeddings, rebuild centroids, project, and plot."""
+    """Parse arguments, load inputs, rebuild centroids, project, and plot.
+
+    Returns
+    -------
+    None
+    """
     p = argparse.ArgumentParser(description="2D MOA centroid map (UMAP/PCA, static + best-effort interactive).")
 
-    # Primary inputs: prefer --moa_dir to reuse aggregated embeddings from scoring
+    # Prefer --moa_dir to reuse aggregated embeddings from scoring
     p.add_argument("--moa_dir", type=str, help="MoA output directory containing compound_embeddings.tsv.")
     p.add_argument("--embeddings_tsv", type=str, help="TSV with embeddings (well- or compound-level).")
     p.add_argument("--anchors_tsv", type=str, required=True, help="TSV with anchors: id + MOA (for centroids).")
@@ -474,7 +705,6 @@ def main() -> None:
     args = p.parse_args()
 
     # ---------- Load embeddings (prefer MoA dir) ----------
-    agg: pd.DataFrame
     if args.moa_dir:
         moa_dir = Path(args.moa_dir)
         emb_path = moa_dir / "compound_embeddings.tsv"
@@ -500,7 +730,7 @@ def main() -> None:
 
     # ---------- Build centroids ----------
     anchors = pd.read_csv(args.anchors_tsv, sep="\t")
-    centroids_df, P, centroid_moas = build_moa_centroids(
+    _, P, centroid_moas = build_moa_centroids(
         embeddings=agg,
         anchors=anchors,
         id_col=id_col,
@@ -516,8 +746,7 @@ def main() -> None:
         random_seed=args.random_seed,
     )
 
-    # ---------- Choose labels for compounds ----------
-    comp_labels: List[str]
+    # ---------- Colouring labels ----------
     if args.assignment == "predictions" and args.predictions_tsv:
         pred = pd.read_csv(args.predictions_tsv, sep="\t")
         moa_col_pred = args.moa_col if args.moa_col in pred.columns else ("top_moa" if "top_moa" in pred.columns else None)
@@ -538,7 +767,7 @@ def main() -> None:
             j_max = np.argmax(S, axis=1)
             comp_labels = [centroid_moas[j] for j in j_max]
 
-    # ---------- 2D projection on compounds+centroids together ----------
+    # ---------- 2D projection (compounds + centroids together) ----------
     X_all = X if P.shape[0] == 0 else np.vstack([X, P])
     xy_all = project_2d(X=X_all, method=args.projection, random_seed=args.random_seed)
     if P.shape[0] == 0:
@@ -565,7 +794,6 @@ def main() -> None:
     )
     print(f"[OK] Wrote static figure: {out_png}")
 
-    # Always *attempt* interactive; fail gracefully
     _ = try_plot_interactive(
         xy_comp=xy_comp,
         xy_centroids=xy_centroids,
