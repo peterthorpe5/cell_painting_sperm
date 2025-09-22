@@ -471,21 +471,23 @@ def compute_convex_hulls(*, xy: np.ndarray, labels: Sequence[str], min_points: i
     return hulls
 
 
+
 def plot_static(
-            *,
-            xy_comp: np.ndarray,
-            xy_centroids: np.ndarray,
-            comp_labels: Sequence[str],
-            centroid_labels: Sequence[str],
-            ids: Sequence[str],
-            highlight_ids: Optional[Iterable[str]],
-            out_path: Union[str, Path],
-            title: str,
-            label_truncate: int,
-            label_fontsize: float,
-            label_topk: int,
-            label_mode: str,
-        ) -> None:
+    *,
+    xy_comp: np.ndarray,
+    xy_centroids: np.ndarray,
+    comp_labels: Sequence[str],
+    centroid_labels: Sequence[str],
+    ids: Sequence[str],
+    highlight_ids: Optional[Iterable[str]],
+    out_path: Union[str, Path],
+    title: str,
+    label_truncate: int = 12,
+    label_fontsize: float = 5.0,
+    label_topk: int = 0,
+    label_mode: str = "centroid",
+) -> None:
+
 
     """Render a static matplotlib plot (saved as pdf).
 
@@ -519,12 +521,10 @@ def plot_static(
     cmap = plt.get_cmap("tab20")
     colour_map = {lab: cmap(i % 20) for i, lab in enumerate(uniq)}
     # Decide which MOAs to label and how they appear
-    moa_sizes = Counter(comp_labels)  # size by membership
-    labelled_moas = pick_labelled_moas(
-        moa_names=list(set(comp_labels)),
-        moa_sizes=moa_sizes,
-        topk=label_topk,
-    )
+    # decide which MOAs get text labels
+    moa_sizes = Counter(comp_labels)
+    label_keep = pick_labelled_moas(moa_names=list(uniq), 
+                                    moa_sizes=moa_sizes, topk=label_topk)
 
 
     hulls = compute_convex_hulls(xy=xy_comp, labels=comp_labels, min_points=3)
@@ -621,6 +621,7 @@ def pick_labelled_moas(
     return set(ranked[:topk])
 
 
+
 def try_plot_interactive(
     *,
     xy_comp: np.ndarray,
@@ -630,10 +631,11 @@ def try_plot_interactive(
     ids: Sequence[str],
     out_html: Union[str, Path],
     title: str,
-    label_truncate: int,
-    label_topk: int,
-    label_mode: str,
+    label_truncate: int = 17,
+    label_topk: int = 0,
+    label_mode: str = "centroid",
 ) -> bool:
+
 
     """Write an interactive Plotly HTML (best effort).
 
@@ -677,39 +679,48 @@ def try_plot_interactive(
         topk=label_topk,
     )
 
-    centroid_text = [
-        truncate_label(str(lab), label_truncate)
-        if (label_mode == "centroid" and lab in labelled_moas) else ""
-        for lab in centroid_labels
-    ]
-    centroid_full = [str(lab) for lab in centroid_labels]
+    centroid_text = []
+    centroid_custom = []
+    for lab in centroid_labels:
+        centroid_custom.append(str(lab))  # full label for hover
+        if label_mode == "centroid" and (lab in label_keep):
+            centroid_text.append(truncate_label(str(lab), label_truncate))
+        else:
+            centroid_text.append("")  # hide text
+
 
 
     fig = go.Figure()
 
+
     for lab in uniq:
         idx = comp_labels == lab
+        short = truncate_label(str(lab), label_truncate)
         fig.add_trace(
             go.Scattergl(
                 x=xy_comp[idx, 0], y=xy_comp[idx, 1],
                 mode="markers",
                 marker=dict(size=5, color=colour_map[lab], opacity=0.7),
-                name=str(lab),
+                name=short,                      # truncated name in legend
+                showlegend=(lab in label_keep),  # only top-K in legend
                 text=[f"{i}" for i in np.asarray(ids)[idx]],
-                hovertemplate="cpd_id=%{text}<br>x=%{x:.3f}<br>y=%{y:.3f}<extra>" + str(lab) + "</extra>",
+                hovertemplate="cpd_id=%{text}<br>x=%{x:.3f}<br>y=%{y:.3f}"
+                            f"<extra>{lab}</extra>",  # full label in hover
             )
         )
+
 
     fig.add_trace(
         go.Scatter(
             x=xy_centroids[:, 0], y=xy_centroids[:, 1],
-            mode="markers+text",
+            mode="markers+text" if any(centroid_text) else "markers",
             marker=dict(size=14, color="black", line=dict(width=1, color="white")),
-            text=centroid_text,               # truncated (or blank)
-            customdata=centroid_full,         # full label for hover
+            text=centroid_text,
+            customdata=centroid_custom,
             textposition="middle right",
             name="centroids",
             hovertemplate="centroid=%{customdata}<br>x=%{x:.3f}<br>y=%{y:.3f}<extra></extra>",
+            showlegend=False,
         )
     )
 
