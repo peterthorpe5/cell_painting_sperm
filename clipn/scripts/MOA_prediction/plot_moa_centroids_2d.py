@@ -4,7 +4,7 @@
 """2D MOA map (PCA/UMAP) with compounds, centroids, and regions.
 
 This script projects compound embeddings and MOA centroids to 2D and renders:
-1) A static PNG (always).
+1) A static pdf (always).
 2) A best-effort interactive Plotly HTML (attempted every run; skipped gracefully
    if Plotly or file writing is unavailable).
 
@@ -20,7 +20,7 @@ by nearest centroid (cosine/CSLS).
 
 Outputs
 -------
-<out_prefix>.png   Static figure (always).
+<out_prefix>.pdf   Static figure (always).
 <out_prefix>.html  Interactive Plotly figure (best effort).
 
 Example
@@ -479,7 +479,7 @@ def plot_static(
     out_path: Union[str, Path],
     title: str,
 ) -> None:
-    """Render a static matplotlib plot (saved as PNG).
+    """Render a static matplotlib plot (saved as pdf).
 
     Parameters
     ----------
@@ -496,7 +496,7 @@ def plot_static(
     highlight_ids
         Iterable of cpd_ids to annotate on the plot.
     out_path
-        Output file path for the PNG figure.
+        Output file path for the pdf figure.
     title
         Plot title.
 
@@ -700,7 +700,7 @@ def main() -> None:
     # Projection + outputs
     p.add_argument("--projection", type=str, default="umap", choices=["umap", "pca"], help="2D projection method.")
     p.add_argument("--highlight_ids", type=str, default="", help="Comma-separated cpd_ids to annotate.")
-    p.add_argument("--out_prefix", type=str, default="moa_map", help="Prefix for outputs (.png and .html).")
+    p.add_argument("--out_prefix", type=str, default="moa_map", help="Prefix for outputs (.pdf and .html).")
     p.add_argument("--random_seed", type=int, default=0, help="Random seed.")
     args = p.parse_args()
 
@@ -778,7 +778,7 @@ def main() -> None:
         xy_centroids = xy_all[X.shape[0]:, :]
 
     # ---------- Write outputs ----------
-    out_png = Path(f"{args.out_prefix}.png")
+    out_pdf = Path(f"{args.out_prefix}.pdf")
     out_html = Path(f"{args.out_prefix}.html")
     highlight_ids = [s for s in args.highlight_ids.split(",") if s] if args.highlight_ids else []
 
@@ -789,10 +789,10 @@ def main() -> None:
         centroid_labels=centroid_moas,
         ids=ids,
         highlight_ids=highlight_ids,
-        out_path=out_png,
+        out_path=out_pdf,
         title=f"MOA map ({args.projection.upper()})",
     )
-    print(f"[OK] Wrote static figure: {out_png}")
+    print(f"[OK] Wrote static figure: {out_pdf}")
 
     _ = try_plot_interactive(
         xy_comp=xy_comp,

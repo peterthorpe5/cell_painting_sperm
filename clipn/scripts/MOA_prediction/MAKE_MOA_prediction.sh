@@ -15,7 +15,7 @@ python make_pseudo_anchors.py \
   --random_seed 42
 
 # B) Score compounds (cosine + CSLS on; auto primary; adaptive shrinkage for small-n)
-python prototype_moa_scoring.py \
+python centroid_moa_scoring.py \
   --embeddings_tsv ./STB_vs_mitotox_integrate_all_E150_L148/post_clipn/STB_vs_mitotox_integrate_all_E150_L148_decoded.tsv \
   --anchors_tsv pseudo_anchors.tsv \
   --out_dir moa_centroid_E150_L148_unsup \
