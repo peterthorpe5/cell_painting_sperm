@@ -837,7 +837,7 @@ def main() -> None:
     p.add_argument(
                     "--label_truncate",
                     type=int,
-                    default=17,
+                    default=32,
                     help="Maximum characters to display for MOA labels on the plot (default: 17).",
                 )
     p.add_argument(
