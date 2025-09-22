@@ -47,6 +47,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
+import textwrap
+from collections import Counter
+
 
 
 # --------------------------------------------------------------------------- #
@@ -469,16 +472,21 @@ def compute_convex_hulls(*, xy: np.ndarray, labels: Sequence[str], min_points: i
 
 
 def plot_static(
-    *,
-    xy_comp: np.ndarray,
-    xy_centroids: np.ndarray,
-    comp_labels: Sequence[str],
-    centroid_labels: Sequence[str],
-    ids: Sequence[str],
-    highlight_ids: Optional[Iterable[str]],
-    out_path: Union[str, Path],
-    title: str,
-) -> None:
+            *,
+            xy_comp: np.ndarray,
+            xy_centroids: np.ndarray,
+            comp_labels: Sequence[str],
+            centroid_labels: Sequence[str],
+            ids: Sequence[str],
+            highlight_ids: Optional[Iterable[str]],
+            out_path: Union[str, Path],
+            title: str,
+            label_truncate: int,
+            label_fontsize: float,
+            label_topk: int,
+            label_mode: str,
+        ) -> None:
+
     """Render a static matplotlib plot (saved as pdf).
 
     Parameters
@@ -510,6 +518,14 @@ def plot_static(
     uniq = np.unique(comp_labels)
     cmap = plt.get_cmap("tab20")
     colour_map = {lab: cmap(i % 20) for i, lab in enumerate(uniq)}
+    # Decide which MOAs to label and how they appear
+    moa_sizes = Counter(comp_labels)  # size by membership
+    labelled_moas = pick_labelled_moas(
+        moa_names=list(set(comp_labels)),
+        moa_sizes=moa_sizes,
+        topk=label_topk,
+    )
+
 
     hulls = compute_convex_hulls(xy=xy_comp, labels=comp_labels, min_points=3)
 
@@ -524,8 +540,14 @@ def plot_static(
 
     for (x, y), lab in zip(xy_centroids, centroid_labels):
         ax.scatter([x], [y], s=180, c=[colour_map.get(lab, "k")],
-                   edgecolors="black", linewidths=1.2, marker="o", zorder=5)
-        ax.text(x, y, f"  {lab}", fontsize=10, weight="bold", va="center", zorder=6)
+                edgecolors="black", linewidths=1.2, marker="o", zorder=5)
+        # show text only if mode allows and MOA is in selected set
+        show_text = (label_mode == "centroid") and (lab in labelled_moas)
+        text_disp = truncate_label(str(lab), label_truncate) if show_text else ""
+        if text_disp:
+            ax.text(x, y, f"  {text_disp}", fontsize=label_fontsize,
+                    weight="bold", va="center", zorder=6)
+
 
     if highlight_set:
         for (x, y), cid in zip(xy_comp, ids):
@@ -545,6 +567,60 @@ def plot_static(
     plt.close(fig)
 
 
+
+
+def truncate_label(label: str, max_chars: int) -> str:
+    """
+    Return a truncated label for display, preserving full text for hover.
+
+    Parameters
+    ----------
+    label : str
+        The original MOA label.
+    max_chars : int
+        Maximum number of characters to show before ellipsis.
+
+    Returns
+    -------
+    str
+        Possibly truncated label; empty string if input is falsy.
+    """
+    if not label:
+        return ""
+    if max_chars is None or max_chars <= 0 or len(label) <= max_chars:
+        return label
+    return label[:max_chars].rstrip() + "…"
+
+
+def pick_labelled_moas(
+    *,
+    moa_names: list[str],
+    moa_sizes: dict[str, int],
+    topk: int
+) -> set[str]:
+    """
+    Decide which MOAs should receive visible text labels.
+
+    Parameters
+    ----------
+    moa_names : list[str]
+        Ordered list of MOA names used in plotting.
+    moa_sizes : dict[str, int]
+        Mapping MOA -> number of member compounds (or cluster size).
+    topk : int
+        Label only the top-k MOAs by size. If 0, label all.
+
+    Returns
+    -------
+    set[str]
+        Set of MOA names to label.
+    """
+    if topk is None or topk <= 0:
+        return set(moa_names)
+    ranked = sorted(moa_names, key=lambda m: moa_sizes.get(m, 0), reverse=True)
+    return set(ranked[:topk])
+
+
 def try_plot_interactive(
     *,
     xy_comp: np.ndarray,
@@ -554,7 +630,11 @@ def try_plot_interactive(
     ids: Sequence[str],
     out_html: Union[str, Path],
     title: str,
+    label_truncate: int,
+    label_topk: int,
+    label_mode: str,
 ) -> bool:
+
     """Write an interactive Plotly HTML (best effort).
 
     Parameters
@@ -589,6 +669,21 @@ def try_plot_interactive(
     comp_labels = np.asarray(comp_labels)
     uniq = np.unique(comp_labels)
     colour_map = {lab: px.colors.qualitative.Dark24[i % 24] for i, lab in enumerate(uniq)}
+    # Which MOAs get text labels?
+    moa_sizes = Counter(comp_labels)
+    labelled_moas = pick_labelled_moas(
+        moa_names=list(set(comp_labels)),
+        moa_sizes=moa_sizes,
+        topk=label_topk,
+    )
+
+    centroid_text = [
+        truncate_label(str(lab), label_truncate)
+        if (label_mode == "centroid" and lab in labelled_moas) else ""
+        for lab in centroid_labels
+    ]
+    centroid_full = [str(lab) for lab in centroid_labels]
+
 
     fig = go.Figure()
 
@@ -610,12 +705,14 @@ def try_plot_interactive(
             x=xy_centroids[:, 0], y=xy_centroids[:, 1],
             mode="markers+text",
             marker=dict(size=14, color="black", line=dict(width=1, color="white")),
-            text=[str(l) for l in centroid_labels],
+            text=centroid_text,               # truncated (or blank)
+            customdata=centroid_full,         # full label for hover
             textposition="middle right",
             name="centroids",
-            hovertemplate="centroid=%{text}<br>x=%{x:.3f}<br>y=%{y:.3f}<extra></extra>",
+            hovertemplate="centroid=%{customdata}<br>x=%{x:.3f}<br>y=%{y:.3f}<extra></extra>",
         )
     )
+
 
     hulls = compute_convex_hulls(xy=xy_comp, labels=comp_labels, min_points=3)
     for lab, verts in hulls.items():
@@ -702,6 +799,34 @@ def main() -> None:
     p.add_argument("--highlight_ids", type=str, default="", help="Comma-separated cpd_ids to annotate.")
     p.add_argument("--out_prefix", type=str, default="moa_map", help="Prefix for outputs (.pdf and .html).")
     p.add_argument("--random_seed", type=int, default=0, help="Random seed.")
+
+    # plots: make the labels less ... invasive
+    parser.add_argument(
+                    "--label_truncate",
+                    type=int,
+                    default=17,
+                    help="Maximum characters to display for MOA labels on the plot (default: 17).",
+                )
+    parser.add_argument(
+        "--label_fontsize",
+        type=float,
+        default=9.0,
+        help="Font size for centroid text labels on the static PDF (default: 9).",
+    )
+    parser.add_argument(
+        "--label_topk",
+        type=int,
+        default=0,
+        help="Only label the top-K MOAs by membership size. 0 means label all (default: 0).",
+    )
+    parser.add_argument(
+        "--label_mode",
+        type=str,
+        default="centroid",
+        choices=["centroid", "none"],
+        help="Label mode: 'centroid' shows text at centroids; 'none' hides text labels (hover still shows full).",
+    )
+
     args = p.parse_args()
 
     # ---------- Load embeddings (prefer MoA dir) ----------
@@ -791,6 +916,10 @@ def main() -> None:
         highlight_ids=highlight_ids,
         out_path=out_pdf,
         title=f"MOA map ({args.projection.upper()})",
+        label_truncate=args.label_truncate,
+        label_fontsize=args.label_fontsize,
+        label_topk=args.label_topk,
+        label_mode=args.label_mode,
     )
     print(f"[OK] Wrote static figure: {out_pdf}")
 
@@ -802,6 +931,9 @@ def main() -> None:
         ids=ids,
         out_html=out_html,
         title=f"MOA map ({args.projection.upper()})",
+        label_truncate=args.label_truncate,
+        label_topk=args.label_topk,
+        label_mode=args.label_mode,
     )
 
 
