@@ -642,6 +642,7 @@ def estimate_fdr_by_permutation(
     agg_mode: str = "max",
     n_permutations: int = 200,
     rng: Optional[np.random.Generator] = None,
+    logger: logging.Logger = logging.getLogger(__name__),
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Estimate per-compound FDR for the top-MOA "margin" using centroid-label
@@ -1132,6 +1133,7 @@ def main() -> None:
                             agg_mode=args.moa_score_agg,
                             n_permutations=args.n_permutations,
                             rng=np.random.default_rng(args.random_seed),
+                            logger=logger,
                         )
       
 
