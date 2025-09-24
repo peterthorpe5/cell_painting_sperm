@@ -868,15 +868,15 @@ def main() -> None:
         help="Include anchor compounds in the predictions output.",
     )
 
-    parser.set_defaults(exclude_anchors_from_queries=False)  # <— default ON
+    parser.set_defaults(exclude_anchors_from_queries=True)  # <— default ON
 
 
     parser.add_argument("--annotate_anchors", action="store_true",
                         help="Annotate outputs with is_anchor/anchor_moa and potential_inflation flags.")
     parser.set_defaults(annotate_anchors=True)
 
-    parser.add_argument("--n_permutations", type=int, default=200,
-                        help="Permutations for FDR (0 to disable). Default: 200.")
+    parser.add_argument("--n_permutations", type=int, default=1000,
+                        help="Permutations for FDR (0 to disable). Default: 1000.")
     parser.add_argument("--random_seed", type=int, default=0,
                         help="Random seed for reproducibility (default: 0).")
 
@@ -982,7 +982,7 @@ def main() -> None:
                 )
     logger.info(f"Computed cosine scores; shape {S_cos.shape}.")
 
-    logger.debug(f"||P|| mean±sd: {float(np.linalg.norm(P, axis=1).mean()):.4f} "
+    logger.info(f"||P|| mean±sd: {float(np.linalg.norm(P, axis=1).mean()):.4f} "
                 f"± {float(np.linalg.norm(P, axis=1).std()):.4f}"
                 )
 
@@ -1192,6 +1192,13 @@ def main() -> None:
             "p_value": pvals_all,
             "q_value": qvals_all,
         })
+
+        # Drop any existing p/q to avoid suffixes
+        preds_df = preds_df.drop(columns=["p_value","q_value","p_value_x","q_value_x","p_value_y","q_value_y"],
+                                errors="ignore")
+
+        # Safe merge (no suffixes now)
+        preds_df = preds_df.merge(pq_all, on=id_col, how="left")
 
         # Merge p/q into the predictions subset
         if len(preds_df) > 0:
