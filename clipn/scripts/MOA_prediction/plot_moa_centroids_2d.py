@@ -556,7 +556,7 @@ def plot_static(
 
         # Centroids: show a compact label (whatever you pass in)
         for (x, y), lab in zip(xy_centroids, centroid_labels):
-            ax.scatter([x], [y], s=100, c=[colour_map.get(lab, "k")],
+            ax.scatter([x], [y], s=70, c=[colour_map.get(lab, "k")],
                        edgecolors="black", linewidths=1.2, marker="o", zorder=5)
             ax.text(x, y, f"  {lab}", fontsize=9, weight="bold", va="center", zorder=6)
 
