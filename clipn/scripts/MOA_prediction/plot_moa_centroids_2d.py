@@ -48,6 +48,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.lines import Line2D
 import textwrap
 from collections import Counter
 
@@ -474,8 +475,6 @@ def compute_convex_hulls(*, xy: np.ndarray, labels: Sequence[str], min_points: i
     return hulls
 
 
-
-
 def plot_static(
     *,
     xy_comp: np.ndarray,
@@ -486,118 +485,125 @@ def plot_static(
     highlight_ids: Optional[Iterable[str]],
     out_path: Union[str, Path],
     title: str,
-    label_truncate: int,
-    label_fontsize: float,
-    label_topk: int,
-    label_mode: str,
+    legend_on_page_two: bool = True,
+    legend_ncol: int = 3,
+    legend_fontsize: float = 8.0,
+    legend_truncate: int = 0,
 ) -> None:
+    """
+    Render a static matplotlib plot to PDF.
 
-
-    """Render a static matplotlib plot (saved as pdf).
+    Page 1: main scatter (no legend when legend_on_page_two=True).
+    Page 2: legend-only page with MOA colour keys.
 
     Parameters
     ----------
-    xy_comp
+    xy_comp : np.ndarray
         2D coordinates of compounds (n_compounds, 2).
-    xy_centroids
+    xy_centroids : np.ndarray
         2D coordinates of centroids (n_centroids, 2).
-    comp_labels
-        Label (MOA) per compound.
-    centroid_labels
-        MOA label per centroid.
-    ids
-        cpd_id per compound (used for highlighting).
-    highlight_ids
+    comp_labels : Sequence[str]
+        MOA label per compound.
+    centroid_labels : Sequence[str]
+        MOA label per centroid (used for colouring/centroid text).
+    ids : Sequence[str]
+        cpd_id per compound (for optional highlights).
+    highlight_ids : Optional[Iterable[str]]
         Iterable of cpd_ids to annotate on the plot.
-    out_path
-        Output file path for the pdf figure.
-    title
+    out_path : Union[str, Path]
+        Output PDF file path.
+    title : str
         Plot title.
+    legend_on_page_two : bool, optional
+        If True (default) write a second page containing the legend.
+    legend_ncol : int, optional
+        Number of legend columns on page 2 (default 3).
+    legend_fontsize : float, optional
+        Legend text size on page 2 (default 8).
+    legend_truncate : int, optional
+        If > 0, truncate legend labels to this many characters with an ellipsis.
 
     Returns
     -------
     None
     """
-    moa_sizes = Counter(comp_labels)
-    labelled_moas = pick_labelled_moas(
-    moa_names=list(np.unique(comp_labels)),
-    moa_sizes=moa_sizes,
-    topk=label_topk
-)
-    counts = Counter(comp_labels)
-    label_keep = pick_labelled_moas(
-        moa_names=list(map(str, centroid_labels)),
-        moa_sizes=counts,
-        topk=label_topk,
-    )
-
     comp_labels = np.asarray(comp_labels)
     highlight_set = set(highlight_ids or [])
 
     uniq = np.unique(comp_labels)
     cmap = plt.get_cmap("tab20")
     colour_map = {lab: cmap(i % 20) for i, lab in enumerate(uniq)}
-    # Decide which MOAs to label and how they appear
-    # decide which MOAs get text labels
-    moa_sizes = Counter(comp_labels)
-    label_keep = pick_labelled_moas(moa_names=list(uniq), 
-                                    moa_sizes=moa_sizes, topk=label_topk)
-
 
     hulls = compute_convex_hulls(xy=xy_comp, labels=comp_labels, min_points=3)
 
-    fig, ax = plt.subplots(figsize=(10, 8))
-    for lab in uniq:
-        idx = comp_labels == lab
-        ax.scatter(xy_comp[idx, 0], xy_comp[idx, 1], s=10, alpha=0.6,
-                   label=str(lab), c=[colour_map[lab]], edgecolors="none")
-
-    for lab, verts in hulls.items():
-        ax.fill(verts[:, 0], verts[:, 1], alpha=0.08, color=colour_map.get(lab, (0.8, 0.8, 0.8)))
-
-    for (x, y), lab in zip(xy_centroids, centroid_labels):
-        ax.scatter([x], [y], s=100, c=[colour_map.get(lab, "k")],
-                edgecolors="black", linewidths=1.2, marker="o", zorder=5)
-        if label_mode == "centroid" and (lab in label_keep):
-            ax.text(
-                x, y,
-                "  " + truncate_label(str(lab), max_chars=label_truncate),
-                fontsize=label_fontsize, weight="bold", va="center", zorder=6
-            )
-
-
-        # show text only if mode allows and MOA is in selected set
-        labelled_moas = pick_labelled_moas(
-                moa_names=list(set(comp_labels)),
-                moa_sizes=moa_sizes,
-                topk=label_topk,
-            )
-        show_text = (label_mode == "centroid") and (lab in labelled_moas)
-        text_disp = truncate_label(str(lab), label_truncate) if show_text else ""
-        if text_disp:
-            ax.text(x, y, f"  {text_disp}", fontsize=label_fontsize,
-                    weight="bold", va="center", zorder=6)
-
-
-    if highlight_set:
-        for (x, y), cid in zip(xy_comp, ids):
-            if cid in highlight_set:
-                ax.scatter([x], [y], s=60, 
-                           facecolors="none", edgecolors="black", 
-                           linewidths=1.0, zorder=7)
-                ax.text(x, y, f" {cid}", fontsize=8, va="bottom", zorder=8)
-
-
-    ax.set_title(title)
-    ax.set_xlabel("Component 1")
-    ax.set_ylabel("Component 2")
-    # ax.legend(loc="best", fontsize=8, markerscale=1.5, frameon=False)
-    ax.grid(True, alpha=0.25)
-
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
-    plt.close(fig)
+
+    with PdfPages(out_path) as pdf:
+        # ---------------- Page 1: main scatter ----------------
+        fig, ax = plt.subplots(figsize=(10, 8))
+        for lab in uniq:
+            idx = comp_labels == lab
+            ax.scatter(
+                xy_comp[idx, 0], xy_comp[idx, 1],
+                s=10, alpha=0.6, c=[colour_map[lab]], edgecolors="none", label=str(lab)
+            )
+
+        for lab, verts in hulls.items():
+            ax.fill(verts[:, 0], verts[:, 1], alpha=0.08, color=colour_map.get(lab, (0.8, 0.8, 0.8)))
+
+        # Centroids: show a compact label (whatever you pass in)
+        for (x, y), lab in zip(xy_centroids, centroid_labels):
+            ax.scatter([x], [y], s=100, c=[colour_map.get(lab, "k")],
+                       edgecolors="black", linewidths=1.2, marker="o", zorder=5)
+            ax.text(x, y, f"  {lab}", fontsize=9, weight="bold", va="center", zorder=6)
+
+        # Optional highlights
+        if highlight_set:
+            for (x, y), cid in zip(xy_comp, ids):
+                if cid in highlight_set:
+                    ax.scatter([x], [y], s=60, facecolors="none",
+                               edgecolors="black", linewidths=1.0, zorder=7)
+                    ax.text(x, y, f" {cid}", fontsize=8, va="bottom", zorder=8)
+
+        ax.set_title(title)
+        ax.set_xlabel("Component 1")
+        ax.set_ylabel("Component 2")
+        ax.grid(True, alpha=0.25)
+
+        # No legend on the main page if we’re creating page 2
+        if not legend_on_page_two:
+            ax.legend(loc="best", fontsize=8, markerscale=1.5, frameon=False)
+
+        pdf.savefig(fig, bbox_inches="tight", dpi=200)
+        plt.close(fig)
+
+        # ---------------- Page 2: legend-only page ----------------
+        if legend_on_page_two:
+            fig2 = plt.figure(figsize=(10, 8))
+            ax2 = fig2.add_subplot(111)
+            ax2.axis("off")
+            ax2.set_title("Legend: MOA colours", fontsize=10, pad=12)
+
+            handles, labels = [], []
+            for lab in uniq:
+                label_text = str(lab)
+                if legend_truncate and legend_truncate > 0 and len(label_text) > legend_truncate:
+                    label_text = label_text[:legend_truncate].rstrip() + "…"
+                handles.append(
+                    Line2D([0], [0], marker='o', linestyle='None', markersize=8,
+                           markerfacecolor=colour_map[lab], markeredgecolor='none')
+                )
+                labels.append(label_text)
+
+            fig2.legend(
+                handles, labels,
+                loc="center", ncol=max(1, int(legend_ncol)),
+                fontsize=legend_fontsize, frameon=False
+            )
+            pdf.savefig(fig2, bbox_inches="tight", dpi=200)
+            plt.close(fig2)
+
 
 
 def numeric_feature_columns(df: pd.DataFrame) -> list[str]:
