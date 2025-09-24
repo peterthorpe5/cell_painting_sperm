@@ -717,7 +717,7 @@ def main() -> None:
     uniq = np.unique(labels)
     remap = {old: new for new, old in enumerate(sorted(uniq))}
     cl_ids = np.array([remap[int(l)] for l in labels], dtype=int)
-    cluster_names = {new: f"Cluster_{new + 1:04d}" for new in sorted(remap.values())}
+    cluster_names = {new: f"C_{new + 1:02d}" for new in sorted(remap.values())}
     moa = [cluster_names[int(c)] for c in cl_ids]
 
     # Per-sample silhouette (for per-cluster mean)
