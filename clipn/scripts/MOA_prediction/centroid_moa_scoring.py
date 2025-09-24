@@ -747,7 +747,6 @@ def estimate_fdr_by_permutation(
 
 
 
-
 def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
     """
     Configure logging with stream (stderr) and file handlers.
@@ -1066,9 +1065,25 @@ def main() -> None:
     logger.info(f"Prepared long-form scores; shape {scores_df.shape}.")
     # Predictions (primary rule + diagnostics) with anchor annotations
     pred_rows: List[Dict[str, object]] = []
-    exclude_set = set(anchors[id_col].dropna().astype(str)) if args.exclude_anchors_from_queries else set()
 
-    logger.info(f"Excluding {len(exclude_set)} anchors from predictions." if args.exclude_anchors_from_queries else "Including all compounds in predictions.")
+    # Exclusion set (drop NaNs, avoid literal "nan")
+    exclude_set = set(anchors[id_col].dropna().astype(str)) if args.exclude_anchors_from_queries else set()
+    all_ids_set = set(ids)
+    n_excl = len(all_ids_set & exclude_set)
+
+    if args.exclude_anchors_from_queries:
+        logger.info("Excluding %d/%d anchor compounds from predictions.", n_excl, len(ids))
+        # If everything would be excluded, override so we still produce predictions
+        if n_excl == len(ids):
+            logger.warning(
+                "All compounds are anchors and exclusion is ON; "
+                "overriding to include anchors so predictions are not empty. "
+                "Pass --include_anchors_in_queries to disable exclusion explicitly."
+            )
+            exclude_set = set()
+    else:
+        logger.info("Including all compounds in predictions.")
+
     for i, cid in enumerate(ids):
         if cid in exclude_set:
             continue
@@ -1090,12 +1105,12 @@ def main() -> None:
             "margin": margin,
         }
 
-        # Diagnostics: cosine
+        # Diagnostics (cosine)
         c_idx = int(np.argmax(M_cos[i, :]))
         row["top_moa_cosine"] = moa_list[c_idx]
         row["top_cosine"] = float(M_cos[i, c_idx])
 
-        # Diagnostics: CSLS (present or NaN)
+        # Diagnostics (CSLS if present)
         if M_csls is not None:
             s_idx = int(np.argmax(M_csls[i, :]))
             row["top_moa_csls"] = moa_list[s_idx]
@@ -1117,7 +1132,28 @@ def main() -> None:
         pred_rows.append(row)
 
     preds_df = pd.DataFrame(pred_rows)
-    logger.info(f"Prepared predictions; shape {preds_df.shape}.")
+
+    # Enforce predictions schema immediately so later code can safely reference columns
+    expected_pred_cols = [
+        id_col, "decision_rule", "top_moa", "top_score", "margin",
+        "top_moa_cosine", "top_cosine", "top_moa_csls", "top_csls",
+        "p_value", "q_value", "is_anchor", "anchor_moa",
+        "anchor_same_as_top", "potential_inflation",
+    ]
+    for col in expected_pred_cols:
+        if col not in preds_df.columns:
+            preds_df[col] = np.nan
+
+    # Put expected columns first, keep extras (if any) at the end for debugging
+    preds_df = preds_df[[c for c in expected_pred_cols if c in preds_df.columns] +
+                        [c for c in preds_df.columns if c not in expected_pred_cols]]
+
+    if preds_df.empty:
+        logger.warning("Predictions subset is empty after filtering.")
+    else:
+        logger.info("Prepared predictions; shape %s.", tuple(preds_df.shape))
+
+
 
     # Track which compounds ended up in predictions (may exclude anchors)
     pred_ids = preds_df[id_col].astype(str).tolist()
