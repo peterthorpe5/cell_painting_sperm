@@ -641,29 +641,30 @@ def estimate_fdr_by_permutation(
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Estimate per-compound FDR for the top-MOA 'margin' by shuffling the
-    centroid→MOA assignment (preserves the number of centroids per MOA).
+    Estimate p/q-values for the top-MOA margin by shuffling the centroid→MOA
+    assignment (preserves #centroids per MOA) and recomputing margins.
 
     Parameters
     ----------
-    S_primary : np.ndarray
+    S_primary
         Compound×centroid score matrix consistent with the decision rule
         (row-wise chosen cosine/CSLS). Shape (n_compounds, n_centroids).
-    proto_to_moa : Sequence[int]
-        Original centroid→MOA index mapping (length n_centroids).
-    n_moas : int
+    proto_to_moa
+        Original centroid→MOA index mapping (length n_centroids), where each
+        value is in [0, n_moas).
+    n_moas
         Number of MOAs (columns after aggregation).
-    agg_mode : str
-        'max' or 'mean' to aggregate centroids→MOA.
-    n_permutations : int
-        Number of permutations.
-    rng : Optional[np.random.Generator]
-        Random generator.
+    agg_mode
+        How to aggregate centroids into MOA scores: "max" or "mean".
+    n_permutations
+        Number of permutations for the null (default 200).
+    rng
+        Optional numpy random generator.
 
     Returns
     -------
     Tuple[np.ndarray, np.ndarray]
-        p-values and BH q-values per compound.
+        (p_values, q_values) per compound, Benjamini–Hochberg adjusted.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -672,8 +673,8 @@ def estimate_fdr_by_permutation(
     proto_to_moa = np.asarray(proto_to_moa, dtype=int)
     counts = np.bincount(proto_to_moa, minlength=n_moas)
 
-    # Observed MOA matrix and margins
-    cols_obs = []
+    # ----- observed MOA matrix and margin (using the true mapping) -----
+    cols_obs: List[np.ndarray] = []
     for m in range(n_moas):
         idx = np.where(proto_to_moa == m)[0]
         if idx.size == 0:
@@ -693,35 +694,42 @@ def estimate_fdr_by_permutation(
     runner = np.max(tmp, axis=1)
     observed_margin = best_val - runner
 
-    # Permutation null
+    # ----- permutation null: shuffle centroids into same-size MOA blocks -----
     perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
-    base = np.arange(n_centroids)
+    order = np.arange(n_centroids)
+
     for b in range(n_permutations):
-        rng.shuffle(base)
-        cols = []
+        rng.shuffle(order)
         start = 0
+        cols_perm: List[np.ndarray] = []
         for c in counts:
             if c > 0:
-                idx = base[start:start + c]
-                block = S_primary[:, idx]
+                block = S_primary[:, order[start:start + c]]
                 if agg_mode == "mean":
-                    cols.append(block.mean(axis=1, keepdims=True))
+                    cols_perm.append(block.mean(axis=1, keepdims=True))
                 else:
-                    cols.append(block.max(axis=1, keepdims=True))
+                    cols_perm.append(block.max(axis=1, keepdims=True))
                 start += c
             else:
-                cols.append(np.full((n_compounds, 1), -np.inf, dtype=float))
-        M_perm = np.concatenate(cols, axis=1)
+                cols_perm.append(np.full((n_compounds, 1), -np.inf, dtype=float))
 
-        bidx = np.argmax(M_perm, axis=1)
-        bval = M_perm[np.arange(n_compounds), bidx]
+        M_perm = np.concatenate(cols_perm, axis=1)
+        b_idx = np.argmax(M_perm, axis=1)
+        b_val = M_perm[np.arange(n_compounds), b_idx]
         ttmp = M_perm.copy()
-        ttmp[np.arange(n_compounds), bidx] = -np.inf
-        rval = np.max(ttmp, axis=1)
-        perm_margins[:, b] = bval - rval
+        ttmp[np.arange(n_compounds), b_idx] = -np.inf
+        r_val = np.max(ttmp, axis=1)
+        perm_margins[:, b] = b_val - r_val
 
-    pvals = (1.0 + np.sum(perm_margins >= observed_margin[:, None], axis=1)) / (n_permutations + 1.0)
+    # Smoothed one-sided p, BH q
+    pvals = (1.0 + (perm_margins >= observed_margin[:, None]).sum(axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))
+    if args.n_permutations > 0:
+    print("[dbg] p-value summary:",
+          "min", float(np.nanmin(pvals)),
+          "median", float(np.nanmedian(pvals)),
+          "max", float(np.nanmax(pvals)))
+
     return pvals, qvals
 
 
@@ -903,6 +911,19 @@ def main() -> None:
     # Aggregate to MOA and choose primary matrix
     M_cos = agg_over_centroids(mat=S_cos, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg)
     M_csls = agg_over_centroids(mat=S_csls, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg) if S_csls is not None else None
+    # --- Build centroid-level matrix consistent with the decision rule ---
+    # S_primary[i, :] = S_cos or S_csls row-for-row depending on decision_rule_vec
+    if args.primary_score == "cosine" or S_csls is None:
+        S_primary = S_cos
+    elif args.primary_score == "csls":
+        S_primary = S_csls
+    else:
+        S_primary = S_cos.copy()
+        if S_csls is not None:
+            mask = (decision_rule_vec == "csls")
+            S_primary[mask, :] = S_csls[mask, :]
+
+    
     M_primary, decision_rule_vec = choose_primary_matrix(
         M_cos=M_cos,
         M_csls=M_csls,
@@ -1003,13 +1024,14 @@ def main() -> None:
         proto_to_moa_idx = np.array([moa_index_map[m] for m in centroid_moas], dtype=int)
 
         pvals, qvals = estimate_fdr_by_permutation(
-            S_primary=S_primary,
-            proto_to_moa=proto_to_moa_idx,
-            n_moas=len(moa_list),
-            agg_mode=args.moa_score_agg,
-            n_permutations=args.n_permutations,
-            rng=np.random.default_rng(args.random_seed),
-        )
+                            S_primary=S_primary,
+                            proto_to_moa=proto_to_moa_idx,
+                            n_moas=len(moa_list),
+                            agg_mode=args.moa_score_agg,
+                            n_permutations=args.n_permutations,
+                            rng=np.random.default_rng(args.random_seed),
+                        )
+      
 
 
 
