@@ -181,7 +181,7 @@ def aggregate_compounds(
     pd.DataFrame
         One row per compound with aggregated numeric columns and the id_col.
     """
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = numeric_feature_columns(df)
     rows: List[Dict[str, float]] = []
     for cid, sub in df.groupby(by=id_col, sort=False):
         X = sub[num_cols].to_numpy()
@@ -336,6 +336,42 @@ def handle_noise(
     assign = np.argmax(sims, axis=1)
     lbls[noise_mask] = uniq[assign]
     return lbls, None
+
+def numeric_feature_columns(df: pd.DataFrame) -> list[str]:
+    """
+    Return the columns that are actual embedding features.
+
+    Priority:
+    1) Columns named as plain integers: "0","1","2",...
+    2) Else, columns starting with "feat_" followed by digits.
+    3) Else, fallback to numeric dtype but EXCLUDE common metadata names.
+
+    This prevents leaking columns like 'Sample' into the embedding.
+    """
+    cols = [str(c) for c in df.columns]
+
+    # 1) strictly-integer column names
+    int_like = [c for c in cols if c.isdigit()]
+    if int_like:
+        return sorted(int_like, key=lambda s: int(s))
+
+    # 2) feat_### pattern
+    import re
+    feat_like = [c for c in cols if re.fullmatch(r"feat_\d+", c)]
+    if feat_like:
+        # keep order as they appear
+        return feat_like
+
+    # 3) fallback: numeric dtype minus known metadata
+    meta_blocklist = {
+        "sample", "dataset", "plate", "well", "row", "col",
+        "time", "replicate", "dose", "concentration",
+        "cpd_id", "compound_id", "id"
+    }
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    keep = [c for c in num_cols if c.lower() not in meta_blocklist]
+    return keep
+
 
 
 def overlay_given_labels(
@@ -586,7 +622,9 @@ def main() -> None:
         method=args.aggregate_method,
         trimmed_frac=args.trimmed_frac,
     )
-    num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
+    # num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = numeric_feature_columns(df)
+
     X_all = l2_normalise(X=agg[num_cols].to_numpy())
     ids_all = agg[id_col].astype(str).tolist()
 

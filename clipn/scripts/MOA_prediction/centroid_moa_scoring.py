@@ -165,60 +165,43 @@ def detect_id_column(*, df: pd.DataFrame, id_col: Optional[str]) -> str:
             return c
     raise ValueError("Could not detect an identifier column (tried common candidates).")
 
-def numeric_feature_columns(
-    *,
-    df: pd.DataFrame,
-    exclude: Sequence[str],
-    min_numeric_frac: float = 0.95,
-    min_variance: float = 0.0,
-) -> List[str]:
+
+def numeric_feature_columns(df: pd.DataFrame) -> list[str]:
     """
-    Select robust numeric embedding columns by coercion and filtering.
+    Return the columns that are actual embedding features.
 
-    Columns listed in ``exclude`` are ignored. Remaining columns are coerced to
-    numeric with ``errors='coerce'``. A column is kept if at least
-    ``min_numeric_frac`` of its values are numeric (non-NaN after coercion) and
-    its variance exceeds ``min_variance`` (computed with NaNs ignored).
+    Priority:
+    1) Columns named as plain integers: "0","1","2",...
+    2) Else, columns starting with "feat_" followed by digits.
+    3) Else, fallback to numeric dtype but EXCLUDE common metadata names.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input table that includes identifier and embedding columns.
-    exclude : Sequence[str]
-        Column names to exclude from consideration (e.g., identifier columns).
-    min_numeric_frac : float, optional
-        Minimum fraction of non-NaN values (after coercion) required to keep a
-        column. Default is 0.95.
-    min_variance : float, optional
-        Minimum (nan-variance) a column must have to be kept. Use a small
-        positive value to drop near-constant columns. Default is 0.0.
-
-    Returns
-    -------
-    List[str]
-        List of column names judged to be numeric embedding features.
-
-    Notes
-    -----
-    - This function helps avoid the “all cosine ≈ 1.0” issue that arises when
-      mixed dtypes cause most embedding columns to be treated as non-numeric.
-    - Set ``min_numeric_frac=0.99`` if you want to be stricter.
+    This prevents leaking columns like 'Sample' into the embedding.
     """
-    excluded = set(exclude)
-    candidate_cols = [c for c in df.columns if c not in excluded]
+    cols = [str(c) for c in df.columns]
 
-    keep: List[str] = []
-    for c in candidate_cols:
-        s = pd.to_numeric(df[c], errors="coerce")
-        frac_numeric = float(s.notna().mean())
-        if frac_numeric < float(min_numeric_frac):
-            continue
-        var = float(np.nanvar(s.to_numpy()))
-        if var <= float(min_variance):
-            continue
-        keep.append(c)
+    # 1) strictly-integer column names
+    int_like = [c for c in cols if c.isdigit()]
+    if int_like:
+        return sorted(int_like, key=lambda s: int(s))
 
+    # 2) feat_### pattern
+    import re
+    feat_like = [c for c in cols if re.fullmatch(r"feat_\d+", c)]
+    if feat_like:
+        # keep order as they appear
+        return feat_like
+
+    # 3) fallback: numeric dtype minus known metadata
+    meta_blocklist = {
+        "sample", "dataset", "plate", "well", "row", "col",
+        "time", "replicate", "dose", "concentration",
+        "cpd_id", "compound_id", "id"
+    }
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    keep = [c for c in num_cols if c.lower() not in meta_blocklist]
     return keep
+
+
 
 
 # ------------------------ aggregation & centroid build ----------------------- #
@@ -250,7 +233,7 @@ def aggregate_compounds(
     pd.DataFrame
         One row per compound with aggregated numeric columns and the id_col.
     """
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = numeric_feature_columns(df)
     groups = df.groupby(id_col, sort=False)
     rows = []
     for cid, sub in groups:
@@ -334,7 +317,9 @@ def build_moa_centroids(
     """
     rng = np.random.RandomState(random_seed)
     id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
-    num_cols = embeddings.select_dtypes(include=[np.number]).columns.tolist()
+    # num_cols = embeddings.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = numeric_feature_columns(df)
+
     X_all = l2_normalise(X=embeddings[num_cols].to_numpy())
 
     # Global mean direction for optional shrinkage
@@ -824,7 +809,9 @@ def main() -> None:
         trimmed_frac=args.trimmed_frac,
     )
     # num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
-    num_cols = numeric_feature_columns(agg, exclude=[id_col])
+    num_cols = numeric_feature_columns(agg)
+
+
 
     X = l2_normalise(X=agg[num_cols].to_numpy())
     ids = agg[id_col].astype(str).tolist()
