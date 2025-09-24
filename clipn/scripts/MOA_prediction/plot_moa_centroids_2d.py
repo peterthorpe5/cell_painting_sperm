@@ -51,7 +51,9 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
 import textwrap
 from collections import Counter
-
+import logging
+import os 
+import sys
 
 
 # --------------------------------------------------------------------------- #
@@ -856,6 +858,50 @@ def try_plot_interactive(
         return False
 
 
+def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
+    """
+    Configure logging with stream (stderr) and file handlers.
+
+    Parameters
+    ----------
+    out_dir : str | Path
+        Output directory for logs.
+    experiment : str
+        Experiment name; used for the log filename.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance.
+    """
+    log_dir = Path(out_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_filename = log_dir / f"{experiment}.log"
+
+    logger = logging.getLogger("clipn_logger")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    stream_handler = logging.StreamHandler(stream=sys.stderr)
+    stream_formatter = logging.Formatter("%(levelname)s: %(message)s")
+    stream_handler.setFormatter(stream_formatter)
+    stream_handler.setLevel(logging.INFO)
+
+    file_handler = logging.FileHandler(filename=log_filename, mode="w")
+    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(logging.DEBUG)
+
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+
+    logger.info("Python Version: %s", sys.version_info)
+    logger.info("Command-line Arguments: %s", " ".join(sys.argv))
+
+    return logger
+
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
@@ -934,11 +980,18 @@ def main() -> None:
 
     args = p.parse_args()
 
+
+    # Setup logging
+    logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="plotting centroid_moa_scoring")
+    logger.info("Starting plotting centroid_moa_scoring.")
+
     # ---------- Load embeddings (prefer MoA dir) ----------
     if args.moa_dir:
         moa_dir = Path(args.moa_dir)
         emb_path = moa_dir / "compound_embeddings.tsv"
+        logger.info(f"Loading embeddings from {emb_path}")
         if not emb_path.exists():
+            logger.error(f"compound_embeddings.tsv not found in {moa_dir}")
             raise SystemExit(f"compound_embeddings.tsv not found in {moa_dir}")
         agg = pd.read_csv(emb_path, sep="\t")
         id_col = detect_id_column(df=agg, id_col=args.id_col)

@@ -37,6 +37,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import logging
+import os 
+import sys
 
 
 # ------------------------------- maths helpers ------------------------------- #
@@ -564,6 +567,51 @@ def auto_kmeans(
     return best_labels, int(best_k)
 
 
+def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
+    """
+    Configure logging with stream (stderr) and file handlers.
+
+    Parameters
+    ----------
+    out_dir : str | Path
+        Output directory for logs.
+    experiment : str
+        Experiment name; used for the log filename.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance.
+    """
+    log_dir = Path(out_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_filename = log_dir / f"{experiment}.log"
+
+    logger = logging.getLogger("clipn_logger")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    stream_handler = logging.StreamHandler(stream=sys.stderr)
+    stream_formatter = logging.Formatter("%(levelname)s: %(message)s")
+    stream_handler.setFormatter(stream_formatter)
+    stream_handler.setLevel(logging.INFO)
+
+    file_handler = logging.FileHandler(filename=log_filename, mode="w")
+    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(logging.DEBUG)
+
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+
+    logger.info("Python Version: %s", sys.version_info)
+    logger.info("Command-line Arguments: %s", " ".join(sys.argv))
+
+
+    return logger
+
+
+
 # ----------------------------------- main ------------------------------------ #
 
 def main() -> None:
@@ -612,8 +660,14 @@ def main() -> None:
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed.")
     args = parser.parse_args()
 
+    # Setup logging
+    logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="make_pseudo_anchors")
+    logger.info("Starting pseudo-anchor generation.")
+
+
     # Load embeddings and aggregate to compounds
     df = pd.read_csv(args.embeddings_tsv, sep="\t", low_memory=False)
+    logger.info("Loaded embeddings TSV with %d rows and %d columns.", df.shape[0], df.shape[1])
     id_col = detect_id_column(df=df, id_col=args.id_col)
 
     agg = aggregate_compounds(
@@ -622,6 +676,7 @@ def main() -> None:
         method=args.aggregate_method,
         trimmed_frac=args.trimmed_frac,
     )
+    logger.info("Aggregated to %d unique compounds using method '%s'.", agg.shape[0], args.aggregate_method)
     # num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
     num_cols = numeric_feature_columns(df)
 
@@ -640,6 +695,7 @@ def main() -> None:
     silhouette_overall = float("nan")
 
     if args.clusterer in {"auto", "hdbscan"}:
+        logger.info("Attempting HDBSCAN clustering...")
         # Try HDBSCAN
         labels_h = try_hdbscan(
             X=X_all,
@@ -675,6 +731,7 @@ def main() -> None:
         # elif: fall through to kmeans
 
     if (labels is None) and (args.clusterer in {"auto", "kmeans"}):
+        logger.info("Using KMeans clustering...")
         # KMeans path (auto-k or fixed)
         from sklearn.cluster import KMeans
         if int(args.n_clusters) == -1:
@@ -703,6 +760,7 @@ def main() -> None:
         silhouette_overall = sil_overall
 
     if labels is None:
+        logger.error("Clustering failed in all modes.")
         raise SystemExit("Clustering failed in all modes.")
 
     # If 'drop' strategy was used, subset data and ids

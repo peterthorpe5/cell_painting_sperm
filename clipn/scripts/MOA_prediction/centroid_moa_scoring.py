@@ -49,6 +49,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import logging
+import os 
+import sys
 
 
 # -------------------------- maths / array utilities -------------------------- #
@@ -733,6 +736,50 @@ def estimate_fdr_by_permutation(
     return pvals, qvals
 
 
+def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
+    """
+    Configure logging with stream (stderr) and file handlers.
+
+    Parameters
+    ----------
+    out_dir : str | Path
+        Output directory for logs.
+    experiment : str
+        Experiment name; used for the log filename.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance.
+    """
+    log_dir = Path(out_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_filename = log_dir / f"{experiment}.log"
+
+    logger = logging.getLogger("clipn_logger")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    stream_handler = logging.StreamHandler(stream=sys.stderr)
+    stream_formatter = logging.Formatter("%(levelname)s: %(message)s")
+    stream_handler.setFormatter(stream_formatter)
+    stream_handler.setLevel(logging.INFO)
+
+    file_handler = logging.FileHandler(filename=log_filename, mode="w")
+    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(logging.DEBUG)
+
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+
+    logger.info("Python Version: %s", sys.version_info)
+    logger.info("Command-line Arguments: %s", " ".join(sys.argv))
+
+
+    return logger
+
+
 
 # --------------------------------- main ------------------------------------- #
 
@@ -806,6 +853,10 @@ def main() -> None:
                         help="Random seed for reproducibility (default: 0).")
 
     args = parser.parse_args()
+
+    # Setup logging
+    logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="centroid_moa_scoring")
+    logger.info("Starting centroid_moa_scoring.")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
