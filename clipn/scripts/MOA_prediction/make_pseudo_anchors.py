@@ -661,7 +661,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Setup logging
-    logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="make_pseudo_anchors")
+    logger = setup_logging(out_dir=Path(args.out_anchors_tsv), experiment="make_pseudo_anchors")
     logger.info("Starting pseudo-anchor generation.")
 
 
@@ -795,7 +795,7 @@ def main() -> None:
         nrm = np.linalg.norm(c)
         centroids.append((c / nrm) if nrm > 0 else c)
     C = np.vstack(centroids) if centroids else np.zeros((0, X.shape[1]), dtype=float)
-
+    logger.info("Formed %d clusters.", C.shape[0])
     # Pairwise centroid cosine (avoid self)
     if C.shape[0] >= 2:
         M = C @ C.T
@@ -823,9 +823,11 @@ def main() -> None:
             "nearest_centroid_cosine": near_cos,
         })
     clusters_df = pd.DataFrame(cluster_rows)
+    logger.info("Wrote per-cluster stats for %d clusters.", clusters_df.shape[0])
 
     # Anchors table
     anchors_df = pd.DataFrame({id_col: ids, "moa": moa, "cluster_id": cl_ids})
+    logger.info("Wrote anchors table with %d rows.", anchors_df.shape[0])
     anchors_df = anchors_df[[id_col, "moa", "cluster_id"]]
     anchors_df = overlay_given_labels(
                                 anchors=anchors_df,
@@ -835,6 +837,7 @@ def main() -> None:
                                 labels_label_col=args.labels_label_col,
                             )
 
+    logger.info("Overlayed user labels; %d compounds labelled.", anchors_df["is_labelled"].sum())
 
     # Summary row
     summary = pd.DataFrame([{
@@ -858,12 +861,16 @@ def main() -> None:
         "max_singleton_frac": float(args.max_singleton_frac),
         "random_seed": int(args.random_seed),
     }])
+    logger.info("Run summary: %s", summary.iloc[0].to_dict())
 
     # Write outputs (TSV only)
     Path(args.out_anchors_tsv).parent.mkdir(parents=True, exist_ok=True)
     anchors_df.to_csv(args.out_anchors_tsv, sep="\t", index=False)
     clusters_df.to_csv(args.out_clusters_tsv, sep="\t", index=False)
     summary.to_csv(args.out_summary_tsv, sep="\t", index=False)
+    logger.info("Wrote output TSVs to '%s', '%s', and '%s'.",
+                args.out_anchors_tsv, args.out_clusters_tsv, args.out_summary_tsv)
+    logger.info("Finished pseudo-anchor generation.")
 
 
 if __name__ == "__main__":

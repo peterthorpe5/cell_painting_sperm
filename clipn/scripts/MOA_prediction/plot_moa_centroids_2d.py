@@ -982,7 +982,7 @@ def main() -> None:
 
 
     # Setup logging
-    logger = setup_logging(out_dir=Path(args.moa_dir).parent, experiment="plotting_centroid_moa_scoring")
+    logger = setup_logging(out_dir=Path(args.moa_dir), experiment="plotting_centroid_moa_scoring")
     logger.info("Starting plotting centroid_moa_scoring.")
 
     # ---------- Load embeddings (prefer MoA dir) ----------
@@ -1000,8 +1000,10 @@ def main() -> None:
 
     else:
         if not args.embeddings_tsv:
+            logger.error("Provide --moa_dir or --embeddings_tsv.")
             raise SystemExit("Provide --moa_dir OR --embeddings_tsv.")
         df = pd.read_csv(args.embeddings_tsv, sep="\t", low_memory=False)
+        logger.info(f"Loaded {df.shape[0]} rows and {df.shape[1]} columns from {args.embeddings_tsv}")
         id_col = detect_id_column(df=df, id_col=args.id_col)
         if df.groupby(id_col).size().max() > 1:
             agg = aggregate_compounds(df=df, id_col=id_col,
@@ -1010,6 +1012,7 @@ def main() -> None:
             agg = df.copy()
         # num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
         num_cols = numeric_feature_columns(agg)
+        logger.info(f"Aggregated to {agg.shape[0]} unique {id_col} rows.")
 
 
     X = l2_normalise(X=agg[num_cols].to_numpy())
@@ -1032,6 +1035,7 @@ def main() -> None:
         adaptive_shrinkage_max=args.adaptive_shrinkage_max,
         random_seed=args.random_seed,
     )
+    logger.info(f"Built {P.shape[0]} centroids for {len(centroid_moas)} unique MOAs.")
 
     # ---------- Colouring labels ----------
     if args.assignment == "predictions" and args.predictions_tsv:
@@ -1053,7 +1057,7 @@ def main() -> None:
                 S = S_cos
             j_max = np.argmax(S, axis=1)
             comp_labels = [centroid_moas[j] for j in j_max]
-
+    logger.info(f"Colouring compounds using {args.assignment} assignment.")
     # ---------- 2D projection (compounds + centroids together) ----------
     X_all = X if P.shape[0] == 0 else np.vstack([X, P])
     xy_all = project_2d(X=X_all, method=args.projection, random_seed=args.random_seed)
@@ -1108,11 +1112,8 @@ def main() -> None:
             legend_fontsize=args.label_fontsize,
             legend_truncate=60,  # set >0 to shorten long legend labels if desired
         )
+    logger.info(f"Wrote static figure: {out_pdf}")
 
-
-
-
-    print(f"[OK] Wrote static figure: {out_pdf}")
 
     _ = try_plot_interactive(
         xy_comp=xy_comp,
