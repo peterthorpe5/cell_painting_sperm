@@ -165,6 +165,61 @@ def detect_id_column(*, df: pd.DataFrame, id_col: Optional[str]) -> str:
             return c
     raise ValueError("Could not detect an identifier column (tried common candidates).")
 
+def numeric_feature_columns(
+    *,
+    df: pd.DataFrame,
+    exclude: Sequence[str],
+    min_numeric_frac: float = 0.95,
+    min_variance: float = 0.0,
+) -> List[str]:
+    """
+    Select robust numeric embedding columns by coercion and filtering.
+
+    Columns listed in ``exclude`` are ignored. Remaining columns are coerced to
+    numeric with ``errors='coerce'``. A column is kept if at least
+    ``min_numeric_frac`` of its values are numeric (non-NaN after coercion) and
+    its variance exceeds ``min_variance`` (computed with NaNs ignored).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input table that includes identifier and embedding columns.
+    exclude : Sequence[str]
+        Column names to exclude from consideration (e.g., identifier columns).
+    min_numeric_frac : float, optional
+        Minimum fraction of non-NaN values (after coercion) required to keep a
+        column. Default is 0.95.
+    min_variance : float, optional
+        Minimum (nan-variance) a column must have to be kept. Use a small
+        positive value to drop near-constant columns. Default is 0.0.
+
+    Returns
+    -------
+    List[str]
+        List of column names judged to be numeric embedding features.
+
+    Notes
+    -----
+    - This function helps avoid the “all cosine ≈ 1.0” issue that arises when
+      mixed dtypes cause most embedding columns to be treated as non-numeric.
+    - Set ``min_numeric_frac=0.99`` if you want to be stricter.
+    """
+    excluded = set(exclude)
+    candidate_cols = [c for c in df.columns if c not in excluded]
+
+    keep: List[str] = []
+    for c in candidate_cols:
+        s = pd.to_numeric(df[c], errors="coerce")
+        frac_numeric = float(s.notna().mean())
+        if frac_numeric < float(min_numeric_frac):
+            continue
+        var = float(np.nanvar(s.to_numpy()))
+        if var <= float(min_variance):
+            continue
+        keep.append(c)
+
+    return keep
+
 
 # ------------------------ aggregation & centroid build ----------------------- #
 
@@ -759,7 +814,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Load and prepare embeddings
-    df = pd.read_csv(args.embeddings_tsv, sep="\t")
+    df = pd.read_csv(args.embeddings_tsv, sep="\t", low_memory=False)
     id_col = detect_id_column(df=df, id_col=args.id_col)
 
     agg = aggregate_compounds(
@@ -768,15 +823,20 @@ def main() -> None:
         method=args.aggregate_method,
         trimmed_frac=args.trimmed_frac,
     )
-    num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
+    # num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = numeric_feature_columns(agg, exclude=[id_col])
+
     X = l2_normalise(X=agg[num_cols].to_numpy())
     ids = agg[id_col].astype(str).tolist()
+
+    print(f"[dbg] using {len(num_cols)} numeric features; first 5: {num_cols[:5]}")
+
 
     # Save aggregated compound embeddings
     agg.to_csv(out_dir / "compound_embeddings.tsv", sep="\t", index=False)
 
     # Load anchors
-    anchors = pd.read_csv(args.anchors_tsv, sep="\t")
+    anchors = pd.read_csv(args.anchors_tsv, sep="\t", low_memory=False)
     if id_col not in anchors.columns:
         raise ValueError(f"Anchors file must contain id column '{id_col}'.")
     if args.moa_col not in anchors.columns:

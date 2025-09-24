@@ -398,7 +398,8 @@ def overlay_given_labels(
         df["cluster_id"] = pd.NA
 
     # Load labels
-    lab = pd.read_csv(labels_tsv, sep="\t", dtype=str, keep_default_na=False, na_values=[""])
+    lab = pd.read_csv(labels_tsv, sep="\t", dtype=str, keep_default_na=False, na_values=[""], 
+                        low_memory=False)
     src_id = labels_id_col if labels_id_col is not None else id_col
     if src_id not in lab.columns:
         raise ValueError(

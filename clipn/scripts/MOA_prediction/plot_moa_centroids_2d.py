@@ -472,6 +472,7 @@ def compute_convex_hulls(*, xy: np.ndarray, labels: Sequence[str], min_points: i
 
 
 
+
 def plot_static(
     *,
     xy_comp: np.ndarray,
@@ -482,10 +483,10 @@ def plot_static(
     highlight_ids: Optional[Iterable[str]],
     out_path: Union[str, Path],
     title: str,
-    label_truncate: int = 12,
-    label_fontsize: float = 5.0,
-    label_topk: int = 0,
-    label_mode: str = "centroid",
+    label_truncate: int,
+    label_fontsize: float,
+    label_topk: int,
+    label_mode: str,
 ) -> None:
 
 
@@ -520,7 +521,13 @@ def plot_static(
     moa_sizes=moa_sizes,
     topk=label_topk
 )
-    
+    counts = Counter(comp_labels)
+    label_keep = pick_labelled_moas(
+        moa_names=list(map(str, centroid_labels)),
+        moa_sizes=counts,
+        topk=label_topk,
+    )
+
     comp_labels = np.asarray(comp_labels)
     highlight_set = set(highlight_ids or [])
 
@@ -546,12 +553,17 @@ def plot_static(
         ax.fill(verts[:, 0], verts[:, 1], alpha=0.08, color=colour_map.get(lab, (0.8, 0.8, 0.8)))
 
     for (x, y), lab in zip(xy_centroids, centroid_labels):
-        label_text = truncate_label(lab, label_truncate) if (label_mode == "centroid" and lab in labelled_moas) else ""
         ax.scatter([x], [y], s=180, c=[colour_map.get(lab, "k")],
                 edgecolors="black", linewidths=1.2, marker="o", zorder=5)
-        if label_text:
-            ax.text(x, y, f"  {label_text}", fontsize=label_fontsize, weight="bold", va="center", zorder=6)
-            # show text only if mode allows and MOA is in selected set
+        if label_mode == "centroid" and (lab in label_keep):
+            ax.text(
+                x, y,
+                "  " + truncate_label(str(lab), max_chars=label_truncate),
+                fontsize=label_fontsize, weight="bold", va="center", zorder=6
+            )
+
+
+        # show text only if mode allows and MOA is in selected set
         labelled_moas = pick_labelled_moas(
                 moa_names=list(set(comp_labels)),
                 moa_sizes=moa_sizes,
@@ -569,11 +581,20 @@ def plot_static(
             if cid in highlight_set:
                 ax.scatter([x], [y], s=60, facecolors="none", edgecolors="black", linewidths=1.0, zorder=7)
                 ax.text(x, y, f" {cid}", fontsize=8, va="bottom", zorder=8)
+    for lab in uniq:
+        idx = comp_labels == lab
+        ax.scatter(
+            xy_comp[idx, 0], xy_comp[idx, 1],
+            s=10, alpha=0.6,
+            c=[colour_map[lab]],
+            edgecolors="none",
+        )
+
 
     ax.set_title(title)
     ax.set_xlabel("Component 1")
     ax.set_ylabel("Component 2")
-    ax.legend(loc="best", fontsize=8, markerscale=1.5, frameon=False)
+    # ax.legend(loc="best", fontsize=8, markerscale=1.5, frameon=False)
     ax.grid(True, alpha=0.25)
 
     out_path = Path(out_path)
@@ -637,7 +658,6 @@ def pick_labelled_moas(
 
 
 
-
 def try_plot_interactive(
     *,
     xy_comp: np.ndarray,
@@ -651,6 +671,8 @@ def try_plot_interactive(
     label_topk: int,
     label_mode: str,
 ) -> bool:
+
+
     """Write an interactive Plotly HTML (best effort).
 
     Parameters
@@ -682,17 +704,19 @@ def try_plot_interactive(
         print("[WARN] Plotly not installed; skipping interactive HTML.")
         return False
 
-    moa_sizes = Counter(comp_labels)
-    labelled_moas = pick_labelled_moas(
-        moa_names=list(np.unique(comp_labels)),
-        moa_sizes=moa_sizes,
-        topk=label_topk
-    )
 
+    counts = Counter(comp_labels)
+    label_keep = pick_labelled_moas(
+        moa_names=list(map(str, centroid_labels)),
+        moa_sizes=counts,
+        topk=label_topk,
+    )
 
     comp_labels = np.asarray(comp_labels)
     uniq = np.unique(comp_labels)
     colour_map = {lab: px.colors.qualitative.Dark24[i % 24] for i, lab in enumerate(uniq)}
+
+
     # Which MOAs get text labels?
     moa_sizes = Counter(comp_labels)
     labelled_moas = pick_labelled_moas(
@@ -711,6 +735,9 @@ def try_plot_interactive(
             centroid_text.append("")  # hide text
 
 
+    centroid_texts = [
+    truncate_label(lab, max_chars=label_truncate) if (label_mode == "centroid" and lab in label_keep) else ""
+    for lab in centroid_labels]
 
     fig = go.Figure()
 
@@ -733,18 +760,18 @@ def try_plot_interactive(
 
 
     fig.add_trace(
-        go.Scatter(
-            x=xy_centroids[:, 0], y=xy_centroids[:, 1],
-            mode="markers+text" if any(centroid_text) else "markers",
-            marker=dict(size=14, color="black", line=dict(width=1, color="white")),
-            text=centroid_text,
-            customdata=centroid_custom,
-            textposition="middle right",
-            name="centroids",
-            hovertemplate="centroid=%{customdata}<br>x=%{x:.3f}<br>y=%{y:.3f}<extra></extra>",
-            showlegend=False,
+    fig.add_trace(
+            go.Scatter(
+                x=xy_centroids[:, 0], y=xy_centroids[:, 1],
+                mode="markers+text" if label_mode == "centroid" else "markers",
+                marker=dict(size=14, color="black", line=dict(width=1, color="white")),
+                text=centroid_texts,
+                textposition="middle right",
+                name="centroids",
+                hovertemplate="centroid=%{text}<br>x=%{x:.3f}<br>y=%{y:.3f}<extra></extra>",
+            )
         )
-    )
+
 
 
     hulls = compute_convex_hulls(xy=xy_comp, labels=comp_labels, min_points=3)
@@ -874,7 +901,7 @@ def main() -> None:
     else:
         if not args.embeddings_tsv:
             raise SystemExit("Provide --moa_dir OR --embeddings_tsv.")
-        df = pd.read_csv(args.embeddings_tsv, sep="\t")
+        df = pd.read_csv(args.embeddings_tsv, sep="\t", low_memory=False)
         id_col = detect_id_column(df=df, id_col=args.id_col)
         if df.groupby(id_col).size().max() > 1:
             agg = aggregate_compounds(df=df, id_col=id_col,
@@ -887,7 +914,7 @@ def main() -> None:
     ids = agg[id_col].astype(str).tolist()
 
     # ---------- Build centroids ----------
-    anchors = pd.read_csv(args.anchors_tsv, sep="\t")
+    anchors = pd.read_csv(args.anchors_tsv, sep="\t", low_memory=False)
     _, P, centroid_moas = build_moa_centroids(
         embeddings=agg,
         anchors=anchors,
@@ -906,7 +933,7 @@ def main() -> None:
 
     # ---------- Colouring labels ----------
     if args.assignment == "predictions" and args.predictions_tsv:
-        pred = pd.read_csv(args.predictions_tsv, sep="\t")
+        pred = pd.read_csv(args.predictions_tsv, sep="\t", low_memory=False)
         moa_col_pred = args.moa_col if args.moa_col in pred.columns else ("top_moa" if "top_moa" in pred.columns else None)
         if moa_col_pred is None:
             raise SystemExit("Predictions TSV must contain --moa_col or 'top_moa'.")
@@ -940,6 +967,7 @@ def main() -> None:
     out_html = Path(f"{args.out_prefix}.html")
     highlight_ids = [s for s in args.highlight_ids.split(",") if s] if args.highlight_ids else []
 
+
     plot_static(
         xy_comp=xy_comp,
         xy_centroids=xy_centroids,
@@ -949,11 +977,13 @@ def main() -> None:
         highlight_ids=highlight_ids,
         out_path=out_pdf,
         title=f"MOA map ({args.projection.upper()})",
-        label_truncate=args.label_truncate,
-        label_fontsize=args.label_fontsize,
-        label_topk=args.label_topk,
-        label_mode=args.label_mode,
+        label_truncate=int(args.label_truncate),
+        label_fontsize=float(args.label_fontsize),
+        label_topk=int(args.label_topk),
+        label_mode=str(args.label_mode),
     )
+
+
     print(f"[OK] Wrote static figure: {out_pdf}")
 
     _ = try_plot_interactive(
@@ -964,10 +994,11 @@ def main() -> None:
         ids=ids,
         out_html=out_html,
         title=f"MOA map ({args.projection.upper()})",
-        label_truncate=args.label_truncate,
-        label_topk=args.label_topk,
-        label_mode=args.label_mode,
+        label_truncate=int(args.label_truncate),
+        label_topk=int(args.label_topk),
+        label_mode=str(args.label_mode),
     )
+
 
 
 if __name__ == "__main__":
