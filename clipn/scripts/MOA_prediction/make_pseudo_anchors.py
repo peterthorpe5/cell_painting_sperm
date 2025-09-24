@@ -40,6 +40,7 @@ import pandas as pd
 import logging
 import os 
 import sys
+from pathlib import Path
 
 
 # ------------------------------- maths helpers ------------------------------- #
@@ -661,6 +662,12 @@ def main() -> None:
     args = parser.parse_args()
 
     # Setup logging
+    for path in [args.out_anchors_tsv, args.out_summary_tsv, args.out_clusters_tsv]:
+        p = Path(path)
+        if p.exists() and p.is_dir():
+            raise SystemExit(f"Output path is a directory (expected file): {p}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+
     logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="make_pseudo_anchors")
     logger.info("Starting pseudo-anchor generation.")
 

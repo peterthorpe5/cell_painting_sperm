@@ -1117,35 +1117,87 @@ def main() -> None:
     preds_df = pd.DataFrame(pred_rows)
     logger.info(f"Prepared predictions; shape {preds_df.shape}.")
 
+    # Track which compounds ended up in predictions (may exclude anchors)
+    pred_ids = preds_df[id_col].astype(str).tolist()
+    if len(pred_ids) == 0:
+        logger.warning(
+            "Predictions subset is empty. "
+            "If you excluded anchors and all compounds are anchors, nothing will be written."
+        )
+
+
     # Optional permutation FDR (mirror the aggregator used for decisions)
     if args.n_permutations > 0:
-        logger.info("FDR: %d permutations, agg=%s, centroids=%d, moas=%d",
-                    args.n_permutations, args.moa_score_agg, P.shape[0], len(moa_list)
-                    )
+        logger.info(
+            "FDR: %d permutations, agg=%s, centroids=%d, moas=%d",
+            args.n_permutations, args.moa_score_agg, P.shape[0], len(moa_list)
+        )
+
         # Build centroid→MOA index vector consistent with P / centroid_moas
         moa_index_map = {m: i for i, m in enumerate(moa_list)}
         proto_to_moa_idx = np.array([moa_index_map[m] for m in centroid_moas], dtype=int)
 
-        pvals, qvals = estimate_fdr_by_permutation(
-                            S_primary=S_primary,
-                            proto_to_moa=proto_to_moa_idx,
-                            n_moas=len(moa_list),
-                            agg_mode=args.moa_score_agg,
-                            n_permutations=args.n_permutations,
-                            rng=np.random.default_rng(args.random_seed),
-                            logger=logger,
-                        )
-      
+        # p/q for ALL compounds (in 'ids' order)
+        pvals_all, qvals_all = estimate_fdr_by_permutation(
+            S_primary=S_primary,
+            proto_to_moa=proto_to_moa_idx,
+            n_moas=len(moa_list),
+            agg_mode=args.moa_score_agg,
+            n_permutations=args.n_permutations,
+            rng=np.random.default_rng(args.random_seed),
+            logger=logger,
+        )
 
+        # Attach p/q by id, then LEFT-merge onto predictions subset
+        pq_all = pd.DataFrame({
+            id_col: pd.Series(ids, dtype=str),
+            "p_value": pvals_all,
+            "q_value": qvals_all,
+        })
 
-
-        preds_df["p_value"] = pvals
-        preds_df["q_value"] = qvals
+        # Merge p/q into the predictions subset
+        if len(preds_df) > 0:
+            preds_df = preds_df.merge(pq_all, on=id_col, how="left")
+        else:
+            # Keep schema even if empty
+            preds_df["p_value"] = np.nan
+            preds_df["q_value"] = np.nan
     else:
         preds_df["p_value"] = np.nan
         preds_df["q_value"] = np.nan
+        logger.info("FDR estimation skipped (0 permutations).")
+    
+    logger.info("Final predictions summary:")
+    if len(preds_df) > 0:
+        top_scores = preds_df["top_score"]
+        top_moas = preds_df["top_moa"]
+        top_score_qs = np.quantile(top_scores, [0.1, 0.5, 0.9])
+        top_moa_counts = preds_df["top_moa"].value_counts()
+        logger.info(f"  Top scores q10/q50/q90: {top_score_qs[0]:.4f}/{top_score_qs[1]:.4f}/{top_score_qs[2]:.4f}")
+        logger.info(f"  Top MOA counts (top 5):")
+        for moa, cnt in top_moa_counts.head(5).items():
+            logger.info(f"    {moa}: {cnt}")
+    else:
+        logger.info("  (predictions subset is empty)")
+
 
     # Write outputs (TSV only)
+    # ---------- Enforce predictions schema and column order ----------
+    expected_pred_cols = [
+        id_col, "decision_rule", "top_moa", "top_score", "margin",
+        "top_moa_cosine", "top_cosine", "top_moa_csls", "top_csls",
+        "p_value", "q_value", "is_anchor", "anchor_moa",
+        "anchor_same_as_top", "potential_inflation",
+    ]
+    for col in expected_pred_cols:
+        if col not in preds_df.columns:
+            preds_df[col] = np.nan
+
+    # Put expected columns first, keep any extras for debugging at the end
+    preds_df = preds_df[[c for c in expected_pred_cols if c in preds_df.columns] +
+                        [c for c in preds_df.columns if c not in expected_pred_cols]]
+    logger.info("Predictions columns about to write: %s", list(preds_df.columns))
+
     scores_df.to_csv(out_dir / "compound_moa_scores.tsv", sep="\t", index=False)
     preds_df.to_csv(out_dir / "compound_predictions.tsv", sep="\t", index=False)
     logger.info(f"Wrote scores to {out_dir / 'compound_moa_scores.tsv'}")
