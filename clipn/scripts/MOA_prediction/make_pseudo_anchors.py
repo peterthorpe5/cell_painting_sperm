@@ -661,7 +661,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Setup logging
-    logger = setup_logging(out_dir=Path(args.out_anchors_tsv), experiment="make_pseudo_anchors")
+    logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="make_pseudo_anchors")
     logger.info("Starting pseudo-anchor generation.")
 
 
