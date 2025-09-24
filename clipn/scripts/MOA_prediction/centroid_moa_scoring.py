@@ -739,7 +739,7 @@ def estimate_fdr_by_permutation(
         ttmp[np.arange(n_compounds), b_idx] = -np.inf
         r_val = np.max(ttmp, axis=1)
         perm_margins[:, b] = b_val - r_val
-
+    ref_q = np.quantile(perm_margins, [0.1, 0.5, 0.9])
     logger.info(f"[fdr] perm margins pool q10/q50/q90: {ref_q[0]:.4f}/{ref_q[1]:.4f}/{ref_q[2]:.4f}")
     pvals = (1.0 + np.sum(perm_margins >= observed_margin[:, None], axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))

@@ -488,7 +488,7 @@ def plot_static(
     out_path: Union[str, Path],
     title: str,
     legend_on_page_two: bool = True,
-    legend_ncol: int = 3,
+    legend_ncol: int = 2,
     legend_fontsize: float = 8.0,
     legend_truncate: int = 0,
 ) -> None:
@@ -1108,9 +1108,9 @@ def main() -> None:
             title=f"MOA map ({args.projection.upper()})",
             # legend on a second page:
             legend_on_page_two=True,
-            legend_ncol=4,
+            legend_ncol=2,
             legend_fontsize=args.label_fontsize,
-            legend_truncate=60,  # set >0 to shorten long legend labels if desired
+            legend_truncate=0,  # set >0 to shorten long legend labels if desired
         )
     logger.info(f"Wrote static figure: {out_pdf}")
 
