@@ -633,93 +633,97 @@ def benjamini_hochberg_q(*, pvals: np.ndarray) -> np.ndarray:
 
 def estimate_fdr_by_permutation(
     *,
-    M_primary: np.ndarray,
+    S_primary: np.ndarray,
     proto_to_moa: Sequence[int],
-    n_permutations: int = 200,
+    n_moas: int,
     agg_mode: str = "max",
+    n_permutations: int = 200,
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Estimate per-compound FDR for the top-MOA 'margin' using label permutations.
-
-    Keeps the geometry fixed (compound and centroid scores already aggregated
-    to MOA in M_primary) and destroys MOA structure by randomly reallocating
-    centroids to MOAs while preserving the number of centroids per MOA.
-    The null is built on the distribution of top-minus-runner-up margins.
+    Estimate per-compound FDR for the top-MOA 'margin' by shuffling the
+    centroid→MOA assignment (preserves the number of centroids per MOA).
 
     Parameters
     ----------
-    M_primary : np.ndarray
-        Compound×MOA score matrix used for decisions (chosen rule), shape
-        (n_compounds, n_moas).
+    S_primary : np.ndarray
+        Compound×centroid score matrix consistent with the decision rule
+        (row-wise chosen cosine/CSLS). Shape (n_compounds, n_centroids).
     proto_to_moa : Sequence[int]
-        Mapping from centroid index to MOA index (length n_centroids).
+        Original centroid→MOA index mapping (length n_centroids).
+    n_moas : int
+        Number of MOAs (columns after aggregation).
+    agg_mode : str
+        'max' or 'mean' to aggregate centroids→MOA.
     n_permutations : int
-        Number of label permutations for the null (default 200).
-    agg_mode : str, optional
-        Aggregation used to collapse centroids to MOA ('max' or 'mean').
-        The permutation null mirrors this choice.
+        Number of permutations.
     rng : Optional[np.random.Generator]
         Random generator.
 
     Returns
     -------
     Tuple[np.ndarray, np.ndarray]
-        (p_values, q_values) per compound, q_values are BH-adjusted.
+        p-values and BH q-values per compound.
     """
     if rng is None:
         rng = np.random.default_rng()
 
-    n_compounds, n_moas = M_primary.shape
+    n_compounds, n_centroids = S_primary.shape
+    proto_to_moa = np.asarray(proto_to_moa, dtype=int)
+    counts = np.bincount(proto_to_moa, minlength=n_moas)
 
-    # Observed margins from the primary matrix
-    best_idx = np.argmax(M_primary, axis=1)
-    best_val = M_primary[np.arange(n_compounds), best_idx]
-    tmp = M_primary.copy()
+    # Observed MOA matrix and margins
+    cols_obs = []
+    for m in range(n_moas):
+        idx = np.where(proto_to_moa == m)[0]
+        if idx.size == 0:
+            cols_obs.append(np.full((n_compounds, 1), -np.inf, dtype=float))
+            continue
+        block = S_primary[:, idx]
+        if agg_mode == "mean":
+            cols_obs.append(block.mean(axis=1, keepdims=True))
+        else:
+            cols_obs.append(block.max(axis=1, keepdims=True))
+    M_obs = np.concatenate(cols_obs, axis=1)
+
+    best_idx = np.argmax(M_obs, axis=1)
+    best_val = M_obs[np.arange(n_compounds), best_idx]
+    tmp = M_obs.copy()
     tmp[np.arange(n_compounds), best_idx] = -np.inf
     runner = np.max(tmp, axis=1)
     observed_margin = best_val - runner
 
-    # Centroid counts per MOA
-    counts = np.bincount(np.asarray(proto_to_moa, dtype=int), minlength=n_moas)
-
-    # Expand M_primary into a 'compound×centroid' surrogate by repeating MOA columns
-    proto_cols = []
-    for moa_i, c in enumerate(counts):
-        if c > 0:
-            proto_cols.append(np.repeat(M_primary[:, [moa_i]], repeats=c, axis=1))
-    M_proto_like = np.concatenate(proto_cols, axis=1) if proto_cols else M_primary[:, :0]
-    n_centroids = M_proto_like.shape[1]
-
+    # Permutation null
     perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
-
+    base = np.arange(n_centroids)
     for b in range(n_permutations):
-        alloc = np.arange(n_centroids)
-        rng.shuffle(alloc)
+        rng.shuffle(base)
         cols = []
         start = 0
         for c in counts:
             if c > 0:
-                block = M_proto_like[:, alloc[start:start + c]]
+                idx = base[start:start + c]
+                block = S_primary[:, idx]
                 if agg_mode == "mean":
-                    cols.append(np.mean(block, axis=1, keepdims=True))
+                    cols.append(block.mean(axis=1, keepdims=True))
                 else:
-                    cols.append(np.max(block, axis=1, keepdims=True))
+                    cols.append(block.max(axis=1, keepdims=True))
                 start += c
             else:
                 cols.append(np.full((n_compounds, 1), -np.inf, dtype=float))
         M_perm = np.concatenate(cols, axis=1)
 
-        b_idx = np.argmax(M_perm, axis=1)
-        b_val = M_perm[np.arange(n_compounds), b_idx]
+        bidx = np.argmax(M_perm, axis=1)
+        bval = M_perm[np.arange(n_compounds), bidx]
         ttmp = M_perm.copy()
-        ttmp[np.arange(n_compounds), b_idx] = -np.inf
-        r_val = np.max(ttmp, axis=1)
-        perm_margins[:, b] = b_val - r_val
+        ttmp[np.arange(n_compounds), bidx] = -np.inf
+        rval = np.max(ttmp, axis=1)
+        perm_margins[:, b] = bval - rval
 
     pvals = (1.0 + np.sum(perm_margins >= observed_margin[:, None], axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))
     return pvals, qvals
+
 
 
 # --------------------------------- main ------------------------------------- #
@@ -906,6 +910,19 @@ def main() -> None:
         margin_threshold=args.auto_margin_threshold,
     )
 
+    # --- Build centroid-level matrix consistent with the decision rule ---
+    # S_primary[i, :] = S_cos or S_csls row-for-row depending on decision_rule_vec
+    if args.primary_score == "cosine" or S_csls is None:
+        S_primary = S_cos
+    elif args.primary_score == "csls":
+        S_primary = S_csls
+    else:
+        S_primary = S_cos.copy()
+        if S_csls is not None:
+            mask = (decision_rule_vec == "csls")
+            S_primary[mask, :] = S_csls[mask, :]
+
+
     # Long-form scores per compound×MOA (with anchor annotations)
     long_rows: List[Dict[str, object]] = []
     for i, cid in enumerate(ids):
@@ -986,12 +1003,16 @@ def main() -> None:
         proto_to_moa_idx = np.array([moa_index_map[m] for m in centroid_moas], dtype=int)
 
         pvals, qvals = estimate_fdr_by_permutation(
-            M_primary=M_primary,
+            S_primary=S_primary,
             proto_to_moa=proto_to_moa_idx,
-            n_permutations=args.n_permutations,
+            n_moas=len(moa_list),
             agg_mode=args.moa_score_agg,
+            n_permutations=args.n_permutations,
             rng=np.random.default_rng(args.random_seed),
         )
+
+
+
         preds_df["p_value"] = pvals
         preds_df["q_value"] = qvals
     else:

@@ -47,6 +47,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import textwrap
 from collections import Counter
 
@@ -555,7 +556,7 @@ def plot_static(
         ax.fill(verts[:, 0], verts[:, 1], alpha=0.08, color=colour_map.get(lab, (0.8, 0.8, 0.8)))
 
     for (x, y), lab in zip(xy_centroids, centroid_labels):
-        ax.scatter([x], [y], s=180, c=[colour_map.get(lab, "k")],
+        ax.scatter([x], [y], s=100, c=[colour_map.get(lab, "k")],
                 edgecolors="black", linewidths=1.2, marker="o", zorder=5)
         if label_mode == "centroid" and (lab in label_keep):
             ax.text(
@@ -581,7 +582,9 @@ def plot_static(
     if highlight_set:
         for (x, y), cid in zip(xy_comp, ids):
             if cid in highlight_set:
-                ax.scatter([x], [y], s=60, facecolors="none", edgecolors="black", linewidths=1.0, zorder=7)
+                ax.scatter([x], [y], s=60, 
+                           facecolors="none", edgecolors="black", 
+                           linewidths=1.0, zorder=7)
                 ax.text(x, y, f" {cid}", fontsize=8, va="bottom", zorder=8)
 
 
@@ -593,7 +596,7 @@ def plot_static(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -743,6 +746,8 @@ def try_plot_interactive(
 
     comp_labels = np.asarray(comp_labels)
     uniq = np.unique(comp_labels)
+    label_keep = set(centroid_labels)
+
     moa_sizes = Counter(comp_labels)
     label_keep = pick_labelled_moas(
         moa_names=list(uniq),
