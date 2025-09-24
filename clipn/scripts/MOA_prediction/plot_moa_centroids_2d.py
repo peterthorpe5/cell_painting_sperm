@@ -795,7 +795,6 @@ def try_plot_interactive(
 
 
     fig.add_trace(
-    fig.add_trace(
             go.Scatter(
                 x=xy_centroids[:, 0], y=xy_centroids[:, 1],
                 mode="markers+text" if label_mode == "centroid" else "markers",
