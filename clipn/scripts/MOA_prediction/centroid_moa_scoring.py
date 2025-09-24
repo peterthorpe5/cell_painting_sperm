@@ -725,10 +725,10 @@ def estimate_fdr_by_permutation(
     pvals = (1.0 + (perm_margins >= observed_margin[:, None]).sum(axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))
     if args.n_permutations > 0:
-    print("[dbg] p-value summary:",
-          "min", float(np.nanmin(pvals)),
-          "median", float(np.nanmedian(pvals)),
-          "max", float(np.nanmax(pvals)))
+        print("[dbg] p-value summary:",
+            "min", float(np.nanmin(pvals)),
+            "median", float(np.nanmedian(pvals)),
+            "max", float(np.nanmax(pvals)))
 
     return pvals, qvals
 
