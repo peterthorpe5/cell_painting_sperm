@@ -909,7 +909,7 @@ def main() -> None:
     p.add_argument(
                     "--label_truncate",
                     type=int,
-                    default=32,
+                    default=36,
                     help="Maximum characters to display for MOA labels on the plot (default: 17).",
                 )
     p.add_argument(
@@ -1016,21 +1016,47 @@ def main() -> None:
     out_html = Path(f"{args.out_prefix}.html")
     highlight_ids = [s for s in args.highlight_ids.split(",") if s] if args.highlight_ids else []
 
+    # --- Prepare centroid labels for the STATIC PDF page ---
+    # Top-K gating by membership size (based on compound assignments)
+    moa_sizes = Counter(comp_labels)
+    if args.label_topk and args.label_topk > 0:
+        label_keep = {m for m, _ in moa_sizes.most_common(args.label_topk)}
+    else:
+        label_keep = set(moa_sizes.keys())
+
+    def _truncate(s: str, n: int) -> str:
+        if not s or n is None or n <= 0 or len(s) <= n:
+            return s
+        return s[:n].rstrip() + "…"
+
+    # Static labels: either truncated, or hidden if not in top-K or mode == none
+    if args.label_mode == "centroid":
+        centroid_labels_static = [
+            _truncate(m, args.label_truncate) if (m in label_keep) else ""
+            for m in centroid_moas
+        ]
+    else:
+        centroid_labels_static = [""] * len(centroid_moas)
+
+
 
     plot_static(
-        xy_comp=xy_comp,
-        xy_centroids=xy_centroids,
-        comp_labels=comp_labels,
-        centroid_labels=centroid_moas,
-        ids=ids,
-        highlight_ids=highlight_ids,
-        out_path=out_pdf,
-        title=f"MOA map ({args.projection.upper()})",
-        label_truncate=int(args.label_truncate),
-        label_fontsize=float(args.label_fontsize),
-        label_topk=int(args.label_topk),
-        label_mode=str(args.label_mode),
-    )
+            xy_comp=xy_comp,
+            xy_centroids=xy_centroids,
+            comp_labels=comp_labels,
+            centroid_labels=centroid_labels_static, 
+            ids=ids,
+            highlight_ids=highlight_ids,
+            out_path=out_pdf,
+            title=f"MOA map ({args.projection.upper()})",
+            # legend on a second page:
+            legend_on_page_two=True,
+            legend_ncol=4,
+            legend_fontsize=args.label_fontsize,
+            legend_truncate=60,  # set >0 to shorten long legend labels if desired
+        )
+
+
 
 
     print(f"[OK] Wrote static figure: {out_pdf}")
