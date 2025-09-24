@@ -682,7 +682,7 @@ def estimate_fdr_by_permutation(
     n_compounds, n_centroids = S_primary.shape
     proto_to_moa = np.asarray(proto_to_moa, dtype=int)
 
-    # Observed (aggregate once using the original mapping)
+    # Aggregator from centroid-level to MOA-level under a mapping
     def _aggregate(mat: np.ndarray, mapping: np.ndarray) -> np.ndarray:
         out = np.full((n_compounds, n_moas), -np.inf, dtype=float)
         for m in range(n_moas):
@@ -696,6 +696,7 @@ def estimate_fdr_by_permutation(
                 out[:, m] = sub.max(axis=1)
         return out
 
+    # Observed margins
     M_obs = _aggregate(S_primary, proto_to_moa)
     best_idx = np.argmax(M_obs, axis=1)
     best_val = M_obs[np.arange(n_compounds), best_idx]
@@ -703,44 +704,49 @@ def estimate_fdr_by_permutation(
     tmp[np.arange(n_compounds), best_idx] = -np.inf
     runner = np.max(tmp, axis=1)
     observed_margin = best_val - runner
-    # Debug: quick margin sanity (not noisy)
     if n_compounds > 0:
-        obs_q = np.quantile(observed_margin, [0.1, 0.5, 0.9])
-        logger.info(f"[fdr] observed margins q10/q50/q90: {obs_q[0]:.4f}/{obs_q[1]:.4f}/{obs_q[2]:.4f}")
+        q = np.quantile(observed_margin, [0.1, 0.5, 0.9])
+        logger.info("[fdr] observed margins q10/q50/q90: %.4f/%.4f/%.4f", q[0], q[1], q[2])
 
-
-    # Preserve counts per MOA
+    # Determine degeneracy: all MOAs have exactly one centroid
     counts = np.bincount(proto_to_moa, minlength=n_moas)
-    perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
-    try:
-        pm = perm_margins  # (n_compounds, B)
-        ref = pm.reshape(-1)
-        ref_q = np.quantile(ref, [0.1, 0.5, 0.9])
-    except Exception:
-        pass
+    all_ones = counts.min() == 1 and counts.max() == 1 and counts.size == n_centroids
 
+    perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
 
     for b in range(n_permutations):
-        # Randomly reassign centroids to MOAs with the same counts
-        perm_map = np.empty_like(proto_to_moa)
-        order = rng.permutation(n_centroids)
-        start = 0
-        for m, c in enumerate(counts):
-            if c == 0:
-                continue
-            sel = order[start:start + c]
-            perm_map[sel] = m
-            start += c
+        if all_ones:
+            # Degenerate case: also disrupt row alignment (column-wise row shuffles)
+            S_shuf = np.empty_like(S_primary)
+            for c in range(n_centroids):
+                S_shuf[:, c] = S_primary[rng.permutation(n_compounds), c]
+            # Mapping can be left as-is or randomly permuted; both equivalent when counts are all ones
+            M_perm = _aggregate(S_shuf, proto_to_moa)
+        else:
+            # Non-degenerate: shuffle centroid→MOA labels preserving counts
+            perm_map = np.empty_like(proto_to_moa)
+            order = rng.permutation(n_centroids)
+            start = 0
+            for m, c in enumerate(counts):
+                if c == 0:
+                    continue
+                sel = order[start:start + c]
+                perm_map[sel] = m
+                start += c
+            M_perm = _aggregate(S_primary, perm_map)
 
-        M_perm = _aggregate(S_primary, perm_map)
         b_idx = np.argmax(M_perm, axis=1)
         b_val = M_perm[np.arange(n_compounds), b_idx]
         ttmp = M_perm.copy()
         ttmp[np.arange(n_compounds), b_idx] = -np.inf
         r_val = np.max(ttmp, axis=1)
         perm_margins[:, b] = b_val - r_val
-    ref_q = np.quantile(perm_margins, [0.1, 0.5, 0.9])
-    logger.info(f"[fdr] perm margins pool q10/q50/q90: {ref_q[0]:.4f}/{ref_q[1]:.4f}/{ref_q[2]:.4f}")
+
+    # Log pool quantiles after we actually filled the permutations
+    pool_q = np.quantile(perm_margins.ravel(), [0.1, 0.5, 0.9])
+    logger.info("[fdr] perm margins pool q10/q50/q90: %.4f/%.4f/%.4f", pool_q[0], pool_q[1], pool_q[2])
+
+    # p (right-tailed) and BH q
     pvals = (1.0 + np.sum(perm_margins >= observed_margin[:, None], axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))
     return pvals, qvals
@@ -1134,25 +1140,23 @@ def main() -> None:
     preds_df = pd.DataFrame(pred_rows)
 
     # Enforce predictions schema immediately so later code can safely reference columns
-    expected_pred_cols = [
+    early_pred_cols = [
         id_col, "decision_rule", "top_moa", "top_score", "margin",
         "top_moa_cosine", "top_cosine", "top_moa_csls", "top_csls",
-        "p_value", "q_value", "is_anchor", "anchor_moa",
-        "anchor_same_as_top", "potential_inflation",
+        "is_anchor", "anchor_moa", "anchor_same_as_top", "potential_inflation",
     ]
-    for col in expected_pred_cols:
+    for col in early_pred_cols:
         if col not in preds_df.columns:
             preds_df[col] = np.nan
 
     # Put expected columns first, keep extras (if any) at the end for debugging
-    preds_df = preds_df[[c for c in expected_pred_cols if c in preds_df.columns] +
-                        [c for c in preds_df.columns if c not in expected_pred_cols]]
+    preds_df = preds_df[[c for c in early_pred_cols if c in preds_df.columns] +
+                        [c for c in preds_df.columns if c not in early_pred_cols]]
 
     if preds_df.empty:
         logger.warning("Predictions subset is empty after filtering.")
     else:
         logger.info("Prepared predictions; shape %s.", tuple(preds_df.shape))
-
 
 
     # Track which compounds ended up in predictions (may exclude anchors)
@@ -1194,24 +1198,18 @@ def main() -> None:
         })
 
         # Drop any existing p/q to avoid suffixes
+        # Drop any existing p/q to avoid suffixes (belt-and-braces), then single safe merge
         preds_df = preds_df.drop(columns=["p_value","q_value","p_value_x","q_value_x","p_value_y","q_value_y"],
                                 errors="ignore")
 
-        # Safe merge (no suffixes now)
-        preds_df = preds_df.merge(pq_all, on=id_col, how="left")
+        # Single merge; if preds_df is empty this is a no-op that keeps it empty
+        preds_df = preds_df.merge(pq_all, on=id_col, how="left", validate="one_to_one")
 
-        # Merge p/q into the predictions subset
-        if len(preds_df) > 0:
-            preds_df = preds_df.merge(pq_all, on=id_col, how="left")
-        else:
-            # Keep schema even if empty
-            preds_df["p_value"] = np.nan
-            preds_df["q_value"] = np.nan
-    else:
-        preds_df["p_value"] = np.nan
-        preds_df["q_value"] = np.nan
-        logger.info("FDR estimation skipped (0 permutations).")
-    
+        # (Optional) Don’t report p/q for anchors if they appear in predictions
+        if args.annotate_anchors and "is_anchor" in preds_df.columns:
+            preds_df.loc[preds_df["is_anchor"] == 1, ["p_value", "q_value"]] = np.nan
+
+            
     logger.info("Final predictions summary:")
     if not preds_df.empty and {"top_score","top_moa"}.issubset(preds_df.columns):
         top_scores = preds_df["top_score"]
@@ -1239,9 +1237,29 @@ def main() -> None:
             preds_df[col] = np.nan
 
     # Put expected columns first, keep any extras for debugging at the end
-    preds_df = preds_df[[c for c in expected_pred_cols if c in preds_df.columns] +
-                        [c for c in preds_df.columns if c not in expected_pred_cols]]
+    final_pred_cols = [
+        id_col, "decision_rule", "top_moa", "top_score", "margin",
+        "top_moa_cosine", "top_cosine", "top_moa_csls", "top_csls",
+        "p_value", "q_value", "is_anchor", "anchor_moa",
+        "anchor_same_as_top", "potential_inflation",
+    ]
+    for col in final_pred_cols:
+        if col not in preds_df.columns:
+            preds_df[col] = np.nan
+    
+    if "p_value" in preds_df.columns:
+        mask = (preds_df.get("is_anchor", 0) != 1)
+        pv = preds_df.loc[mask, "p_value"].dropna()
+        if len(pv) > 0:
+            logger.info("p-value summary (non-anchors): min=%.4g, median=%.4g, 90th=%.4g, n<0.05=%d",
+                        float(pv.min()), float(pv.median()), float(pv.quantile(0.9)),
+                        int((pv < 0.05).sum()))
+
+
+    preds_df = preds_df[[c for c in final_pred_cols if c in preds_df.columns] +
+                        [c for c in preds_df.columns if c not in final_pred_cols]]
     logger.info("Predictions columns about to write: %s", list(preds_df.columns))
+
 
     scores_df.to_csv(out_dir / "compound_moa_scores.tsv", sep="\t", index=False)
     preds_df.to_csv(out_dir / "compound_predictions.tsv", sep="\t", index=False)
