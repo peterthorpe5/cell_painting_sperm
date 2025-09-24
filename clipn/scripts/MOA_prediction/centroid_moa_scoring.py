@@ -881,6 +881,15 @@ def main() -> None:
                         help="Annotate outputs with is_anchor/anchor_moa and potential_inflation flags.")
     parser.set_defaults(annotate_anchors=True)
 
+    parser.add_argument(
+        "--suppress_pq_for_anchors",
+        action="store_true",
+        help="If set, suppress p/q for anchors (default is to report).",
+    )
+
+
+
+
     parser.add_argument("--n_permutations", type=int, default=1000,
                         help="Permutations for FDR (0 to disable). Default: 1000.")
     parser.add_argument("--random_seed", type=int, default=0,
@@ -1082,10 +1091,12 @@ def main() -> None:
         # If everything would be excluded, override so we still produce predictions
         if n_excl == len(ids):
             logger.warning(
-                "All compounds are anchors and exclusion is ON; "
-                "overriding to include anchors so predictions are not empty. "
-                "Pass --include_anchors_in_queries to disable exclusion explicitly."
-            )
+                "All compounds are anchors; overriding exclusion so predictions are not empty. "
+                "Note: p/q for anchors are suppressed by default to avoid self-inflation. "
+                "Use --report_pq_for_anchors if you want p/q reported for anchors."
+                    )
+
+
             exclude_set = set()
     else:
         logger.info("Including all compounds in predictions.")
@@ -1206,10 +1217,15 @@ def main() -> None:
         preds_df = preds_df.merge(pq_all, on=id_col, how="left", validate="one_to_one")
 
         # (Optional) Don’t report p/q for anchors if they appear in predictions
-        if args.annotate_anchors and "is_anchor" in preds_df.columns:
+        # Suppress p/q for anchors unless explicitly requested
+        if (
+            args.annotate_anchors
+            and "is_anchor" in preds_df.columns
+            and args.suppress_pq_for_anchors
+        ):
             preds_df.loc[preds_df["is_anchor"] == 1, ["p_value", "q_value"]] = np.nan
 
-            
+                            
     logger.info("Final predictions summary:")
     if not preds_df.empty and {"top_score","top_moa"}.issubset(preds_df.columns):
         top_scores = preds_df["top_score"]
