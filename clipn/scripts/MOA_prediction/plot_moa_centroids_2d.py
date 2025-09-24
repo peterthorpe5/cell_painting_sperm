@@ -982,7 +982,7 @@ def main() -> None:
 
 
     # Setup logging
-    logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="plotting centroid_moa_scoring")
+    logger = setup_logging(out_dir=Path(args.moa_dir).parent, experiment="plotting_centroid_moa_scoring")
     logger.info("Starting plotting centroid_moa_scoring.")
 
     # ---------- Load embeddings (prefer MoA dir) ----------

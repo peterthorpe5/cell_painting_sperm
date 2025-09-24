@@ -855,7 +855,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Setup logging
-    logger = setup_logging(out_dir=Path(args.out_anchors_tsv).parent, experiment="centroid_moa_scoring")
+    logger = setup_logging(out_dir=Path(args.out_dir).parent, experiment="centroid_moa_scoring")
     logger.info("Starting centroid_moa_scoring.")
 
     out_dir = Path(args.out_dir)
