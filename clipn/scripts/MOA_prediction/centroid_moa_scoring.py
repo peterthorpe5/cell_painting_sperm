@@ -50,7 +50,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import logging
-import os 
 import sys
 
 
@@ -190,6 +189,8 @@ def numeric_feature_columns(df: pd.DataFrame) -> list[str]:
     # 2) feat_### pattern
     import re
     feat_like = [c for c in cols if re.fullmatch(r"feat_\d+", c)]
+    feat_like = sorted(feat_like, key=lambda s: int(s.split("_")[1]))
+
     if feat_like:
         # keep order as they appear
         return feat_like
@@ -715,7 +716,6 @@ def estimate_fdr_by_permutation(
         pm = perm_margins  # (n_compounds, B)
         ref = pm.reshape(-1)
         ref_q = np.quantile(ref, [0.1, 0.5, 0.9])
-        logger.info(f"[fdr] perm margins pool q10/q50/q90: {ref_q[0]:.4f}/{ref_q[1]:.4f}/{ref_q[2]:.4f}")
     except Exception:
         pass
 
@@ -740,6 +740,7 @@ def estimate_fdr_by_permutation(
         r_val = np.max(ttmp, axis=1)
         perm_margins[:, b] = b_val - r_val
 
+    logger.info(f"[fdr] perm margins pool q10/q50/q90: {ref_q[0]:.4f}/{ref_q[1]:.4f}/{ref_q[2]:.4f}")
     pvals = (1.0 + np.sum(perm_margins >= observed_margin[:, None], axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))
     return pvals, qvals
@@ -868,7 +869,7 @@ def main() -> None:
         help="Include anchor compounds in the predictions output.",
     )
 
-    parser.set_defaults(exclude_anchors_from_queries=True)  # <— default ON
+    parser.set_defaults(exclude_anchors_from_queries=False)  # <— default ON
 
 
     parser.add_argument("--annotate_anchors", action="store_true",
@@ -1065,7 +1066,8 @@ def main() -> None:
     logger.info(f"Prepared long-form scores; shape {scores_df.shape}.")
     # Predictions (primary rule + diagnostics) with anchor annotations
     pred_rows: List[Dict[str, object]] = []
-    exclude_set = set(anchors[id_col].astype(str)) if args.exclude_anchors_from_queries else set()
+    exclude_set = set(anchors[id_col].dropna().astype(str)) if args.exclude_anchors_from_queries else set()
+
     logger.info(f"Excluding {len(exclude_set)} anchors from predictions." if args.exclude_anchors_from_queries else "Including all compounds in predictions.")
     for i, cid in enumerate(ids):
         if cid in exclude_set:
@@ -1168,7 +1170,7 @@ def main() -> None:
         logger.info("FDR estimation skipped (0 permutations).")
     
     logger.info("Final predictions summary:")
-    if len(preds_df) > 0:
+    if not preds_df.empty and {"top_score","top_moa"}.issubset(preds_df.columns):
         top_scores = preds_df["top_score"]
         top_moas = preds_df["top_moa"]
         top_score_qs = np.quantile(top_scores, [0.1, 0.5, 0.9])
