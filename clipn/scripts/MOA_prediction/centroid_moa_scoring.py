@@ -318,7 +318,7 @@ def build_moa_centroids(
     rng = np.random.RandomState(random_seed)
     id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
     # num_cols = embeddings.select_dtypes(include=[np.number]).columns.tolist()
-    num_cols = numeric_feature_columns(df)
+    num_cols = numeric_feature_columns(embeddings)
 
     X_all = l2_normalise(X=embeddings[num_cols].to_numpy())
 
