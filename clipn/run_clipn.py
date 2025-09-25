@@ -517,6 +517,7 @@ def plot_and_save_entropy(
     return tsv, pdf
 
 
+
 def compute_and_save_silhouette(
     *,
     X: pd.DataFrame,
@@ -2750,7 +2751,7 @@ def main(args: argparse.Namespace) -> None:
             groupby_cols=["Dataset", "Plate_Metadata"] if "Plate_Metadata" in combined_df.columns else ["Dataset"],
             max_nan_col_frac=0.30,
             max_nan_row_frac=0.80,
-            n_neighbors=args.impute_knn_k,
+            n_neighbors=args.impute_k,
         )
         if dropped_feats:
             feature_cols = [c for c in feature_cols if c not in dropped_feats]
@@ -3517,7 +3518,7 @@ if __name__ == "__main__":
         help="Distance metric for diagnostics.",
     )
 
-    parser.add_argument("--variance_threshold", type=float, default=0.001,
+    parser.add_argument("--variance_threshold", type=float, default=0.00001,
                 help="Keep features with population variance strictly greater than this value.")
     parser.add_argument("--variance_pdf", type=str, default=None,
                 help="Path to write linear-scale variance diagnostics PDF.")
@@ -3540,7 +3541,7 @@ if __name__ == "__main__":
     parser.add_argument(
             "--correlation_threshold",
             type=float,
-            default=0.98,
+            default=0.99,
             help="Absolute correlation at/above which a feature is dropped during merge-time correlation filtering."
         )
     parser.add_argument(
