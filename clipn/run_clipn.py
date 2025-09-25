@@ -59,6 +59,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Optional, Callable
+from cell_painting.process_data import variance_threshold_selector
 import re
 import numpy as np
 import pandas as pd
@@ -2036,9 +2037,179 @@ def run_clipn_integration(
     return latent_combined, cpd_ids, model, dataset_key_mapping
 
 
-# =========================
-# Downstream / merge helpers
-# =========================
+
+def _rank_features_for_corr_filter(
+    *,
+    X: pd.DataFrame,
+    strategy: str = "variance",
+    protect: Optional[Iterable[str]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> list[str]:
+    """
+    Produce an ordered list of feature names indicating the priority to KEEP.
+
+    Behaviour
+    ---------
+    - "variance": keep most variable first (sample variance, ddof=1).
+    - "min_redundancy": keep features with lower mean absolute correlation first.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Numeric feature matrix (rows = samples, columns = features).
+    strategy : {"variance", "min_redundancy"}
+        Ranking heuristic (see Behaviour).
+    protect : iterable of str, optional
+        Features that must be kept; they are placed at the front, preserving
+        their original order, then the ranked remainder follows.
+    logger : logging.Logger, optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    list[str]
+        Feature names sorted by priority to keep.
+    """
+    logger = logger or logging.getLogger("corr_filter")
+    cols = list(X.columns)
+    prot = [c for c in (protect or []) if c in cols]
+    tail = [c for c in cols if c not in prot]
+
+    if strategy == "variance":
+        variances = X[tail].var(ddof=1).astype(float)
+        ranked = list(variances.sort_values(ascending=False).index)
+        if len(ranked) >= 5:
+            logger.info("Correlation filter ranking=variance; top-5: %s", ranked[:5])
+    elif strategy == "min_redundancy":
+        corr = X[tail].corr().abs().fillna(0.0)
+        np.fill_diagonal(corr.values, 0.0)
+        mac = corr.mean(axis=0)
+        ranked = list(mac.sort_values(ascending=True).index)
+        if len(ranked) >= 5:
+            logger.info("Correlation filter ranking=min_redundancy; top-5: %s", ranked[:5])
+    else:
+        logger.warning("Unknown ranking strategy '%s'; using input order.", strategy)
+        ranked = tail
+
+    return prot + ranked
+
+
+def correlation_filter_variance_first(
+    *,
+    X: pd.DataFrame,
+    threshold: float,
+    method: str = "spearman",
+    strategy: str = "variance",
+    protect: Optional[Iterable[str]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Tuple[list[str], pd.DataFrame]:
+    """
+    Greedily drop highly correlated features and report 'keeper → partners'.
+
+    Behaviour
+    ---------
+    - Computes absolute correlation (requested method) on X (numeric only).
+    - Ranks columns with `_rank_features_for_corr_filter` (default: variance-first).
+    - Iterates in keep-priority order. A candidate is DROPPED if it has
+      |r| ≥ threshold with any already-kept feature; otherwise it is KEPT.
+    - Each DROPPED feature is *assigned* to the keeper with which it has the
+      strongest absolute correlation among the currently kept set (ties broken
+      by lexicographic column name).
+
+    Reporting
+    ---------
+    - Returns (kept_list, report_df).
+    - `report_df` has one row per dropped partner with columns:
+        ['keeper', 'partner', 'abs_corr', 'var_keeper', 'var_partner'].
+      Keepers with no partners will not appear in this table; we also write a
+      separate TSV of the kept list elsewhere.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Numeric feature matrix (rows = samples, columns = features).
+    threshold : float
+        Absolute correlation threshold at/above which a feature is considered
+        redundant and therefore dropped.
+    method : {"pearson", "spearman", "kendall"}, optional
+        Correlation method; default 'spearman' (robust to monotonic relations).
+    strategy : {"variance", "min_redundancy"}, optional
+        Ranking heuristic for priority to keep; default 'variance'.
+    protect : iterable of str, optional
+        Features that must be kept regardless; they are placed first in ranking.
+    logger : logging.Logger, optional
+        Logger for progress and summaries.
+
+    Returns
+    -------
+    kept : list[str]
+        Ordered list of features retained after correlation filtering.
+    report_df : pandas.DataFrame
+        Long-form table mapping each keeper to the partners it suppresses.
+    """
+    logger = logger or logging.getLogger("corr_filter")
+
+    # Numeric only and stable order
+    X_num = X.select_dtypes(include=[np.number])
+    if X_num.shape[1] <= 1:
+        return list(X_num.columns), pd.DataFrame(columns=["keeper", "partner", "abs_corr", "var_keeper", "var_partner"])
+
+    logger.info(
+        "Applying correlation filter: n_features=%d, threshold=%.3f, method=%s, strategy=%s",
+        X_num.shape[1], threshold, method, strategy,
+    )
+
+    keep_priority = _rank_features_for_corr_filter(
+        X=X_num, strategy=strategy, protect=protect, logger=logger
+    )
+
+    # Variances (sample ddof=1) for reporting and tie-breaks
+    var_s = X_num.var(ddof=1).astype(float)
+
+    # Absolute correlation matrix
+    C = X_num.corr(method=method).abs().fillna(0.0)
+
+    kept: list[str] = []
+    kept_set: set[str] = set()
+    dropped_records: list[tuple[str, str, float, float, float]] = []
+
+    for col in keep_priority:
+        if col in kept_set:
+            continue
+        if not kept:
+            kept.append(col)
+            kept_set.add(col)
+            continue
+
+        # If correlated to any keeper at/above threshold, drop and assign to the 'best' keeper
+        s = C.loc[col, kept]
+        max_r = float(s.max())
+        if max_r >= threshold:
+            # choose the keeper with maximum |r| (tie → lexicographically smallest name for determinism)
+            best_keepers = [k for k in kept if C.at[col, k] == max_r]
+            best_keeper = sorted(best_keepers)[0]
+            dropped_records.append(
+                (best_keeper, col, max_r, float(var_s.get(best_keeper, np.nan)), float(var_s.get(col, np.nan)))
+            )
+        else:
+            kept.append(col)
+            kept_set.add(col)
+
+    kept = list(kept)  # explicit copy
+    report_df = pd.DataFrame(
+        dropped_records,
+        columns=["keeper", "partner", "abs_corr", "var_keeper", "var_partner"],
+    ).sort_values(by=["keeper", "abs_corr"], ascending=[True, False], ignore_index=True)
+
+    n_before = X_num.shape[1]
+    n_after = len(kept)
+    logger.info(
+        "Correlation filter result: kept=%d, dropped=%d (%.1f%% removed).",
+        n_after, n_before - n_after, 100.0 * (n_before - n_after) / max(n_before, 1),
+    )
+
+    return kept, report_df
+
 
 def merge_annotations(
     latent_df_or_path: str | pd.DataFrame,
@@ -2461,6 +2632,86 @@ def main(args: argparse.Namespace) -> None:
     logger.info("Metadata columns present in combined DataFrame: %s", meta_columns)
     logger.info("Combined DataFrame shape after harmonisation: %s", combined_df.shape)
 
+
+    # ======================================================================
+    # Merge-time variance selection (numeric-only; before scaling/encoding)
+    # ======================================================================
+    variance_thr = getattr(args, "variance_threshold", 1e-4)
+    variance_pdf = getattr(args, "variance_pdf", None)
+    variance_log_pdf = getattr(args, "variance_log_pdf", None)
+    variance_title = getattr(args, "variance_diag_title", None)
+    variance_logx_linear = getattr(args, "variance_logx_linear", False)
+    variance_bins = getattr(args, "variance_bins", None)
+    variance_bin_scale = getattr(args, "variance_bin_scale", 3.0)
+    variance_max_bins = getattr(args, "variance_max_bins", 240)
+
+    if variance_pdf is None:
+        variance_pdf = str(Path(args.out) / f"{args.experiment}_variance_linear.pdf")
+    if variance_log_pdf is None:
+        variance_log_pdf = str(Path(args.out) / f"{args.experiment}_variance_log.pdf")
+
+
+    # Numeric feature columns only (exclude metadata)
+    numeric_cols = [
+        c for c in combined_df.columns
+        if c not in meta_columns and pd.api.types.is_numeric_dtype(combined_df[c])
+    ]
+
+
+    X_numeric = combined_df.loc[:, numeric_cols]
+
+    # Use your existing selector as-is
+    Xv = variance_threshold_selector(
+        data=X_numeric,
+        threshold=variance_thr,
+        pdf_path=variance_pdf,
+        log_pdf_path=variance_log_pdf,
+        title=variance_title,
+        log_x_linear_pdf=variance_logx_linear,
+        bins=variance_bins,
+        bin_scale=variance_bin_scale,
+        max_bins=variance_max_bins,
+        log_sorted_x=False,
+    )
+
+    selected_features = Xv.columns.tolist()
+    logger.info(
+        "Joint variance selection kept %d / %d features (threshold=%.6g).",
+        len(selected_features), len(numeric_cols), variance_thr
+    )
+
+    # Persist the selected feature names (TSV; never comma-separated)
+    sel_path = Path(args.out) / f"{args.experiment}_joint_variance_features.tsv"
+    pd.DataFrame({"feature": selected_features}).to_csv(sel_path, sep="\t", index=False)
+    logger.info("Wrote joint variance feature list → %s", sel_path)
+
+    # Subset the combined DataFrame to selected features + metadata (order preserved)
+    combined_df = pd.concat(
+        [combined_df.loc[:, selected_features], combined_df.loc[:, meta_columns]],
+        axis=1
+    )
+
+    # Keep each per-dataset frame in sync with the same selected features
+    for name, df in dataframes.items():
+        df_num = df.select_dtypes(include=[np.number])
+        missing = [c for c in selected_features if c not in df_num.columns]
+        if missing:
+            raise ValueError(
+                f"[{name}] Missing {len(missing)} selected features after harmonisation: {missing[:10]} ..."
+            )
+        dataframes[name] = pd.concat(
+            [df.loc[:, selected_features], df.loc[:, meta_columns]],
+            axis=1
+        )
+
+    logger.info(
+        "Post-variance shapes: combined=%s; per-dataset=%s",
+        combined_df.shape,
+        {n: d.shape for n, d in dataframes.items()}
+    )
+
+
+
     # Identify feature columns
     feature_cols = [
         col for col in combined_df.columns
@@ -2520,6 +2771,72 @@ def main(args: argparse.Namespace) -> None:
         )
 
 
+    # ======================================================================
+    # Joint correlation filtering (numeric-only; after clean/impute, pre-scaling)
+    # ======================================================================
+    corr_thr = args.correlation_threshold
+    corr_method = args.correlation_method
+    corr_strategy = args.corr_keep_order  # 'variance' keeps most variable first
+
+
+    # Re-identify current numeric feature columns after variance + impute
+    feature_cols = [
+        c for c in combined_df.columns
+        if c not in meta_columns and pd.api.types.is_numeric_dtype(combined_df[c])
+    ]
+    if not feature_cols:
+        raise ValueError("No numeric feature columns available prior to correlation filtering.")
+
+    X_for_corr = combined_df.loc[:, feature_cols]
+
+    kept_after_corr, corr_report = correlation_filter_variance_first(
+                X=X_for_corr,
+                threshold=corr_thr,
+                method=corr_method,
+                strategy=corr_strategy,
+                protect=None,
+                logger=logger,
+            )
+
+    # Persist kept list (TSV) and the keeper→partners mapping (TSV; never comma-separated)
+    kept_path = Path(args.out) / f"{args.experiment}_joint_correlation_kept_features.tsv"
+    pd.DataFrame({"feature": kept_after_corr}).to_csv(kept_path, sep="\t", index=False)
+
+    groups_path = Path(args.out) / f"{args.experiment}_joint_correlation_groups.tsv"
+    corr_report.to_csv(groups_path, sep="\t", index=False)
+
+    logger.info(
+        "Joint correlation filtering retained %d / %d features at |r| ≥ %.3f (method=%s).",
+        len(kept_after_corr), len(feature_cols), corr_thr, corr_method
+    )
+
+    # Subset combined_df and per-dataset frames to the correlation-kept features (+ metadata)
+    combined_df = pd.concat(
+        [combined_df.loc[:, kept_after_corr], combined_df.loc[:, meta_columns]],
+        axis=1
+    )
+    for name, df in dataframes.items():
+        df_num_cols = [c for c in kept_after_corr if c in df.columns]
+        missing = [c for c in kept_after_corr if c not in df.columns]
+        if missing:
+            raise ValueError(f"[{name}] Missing {len(missing)} correlation-kept features after harmonisation: {missing[:10]} ...")
+        dataframes[name] = pd.concat(
+            [df.loc[:, df_num_cols], df.loc[:, meta_columns]],
+            axis=1
+        )
+
+    logger.info(
+        "Post-correlation shapes: combined=%s; per-dataset=%s",
+        combined_df.shape,
+        {n: d.shape for n, d in dataframes.items()}
+    )
+    # ======================================================================
+    # Continue to scaling/encoding with 'combined_df' and 'dataframes'
+    # ======================================================================
+
+    # After subsetting combined_df and per-dataset frames
+    feature_cols = kept_after_corr  # use correlation-kept list downstream
+    logger.info("Feature column count before scaling: %d", len(feature_cols))
 
     # Optional scaling
     if args.skip_standardise:
@@ -3140,12 +3457,12 @@ if __name__ == "__main__":
         help="Subdirectory name for k-NN outputs inside --out.",
     )
     knn_group = parser.add_mutually_exclusive_group()
-    knn_group.add_argument(
+    knn_grou parser.add_argument((
                         "--knn_only",
                         action="store_true",
                         help="Run k-NN on the pre-CLIPn feature space and exit early."
                     )
-    knn_group.add_argument(
+    knn_grou parser.add_argument((
                             "--knn_also",
                             action="store_true",
                             help="Run k-NN baseline first, then continue to CLIPn."
@@ -3159,7 +3476,7 @@ if __name__ == "__main__":
          "'none' = skip imputation (default)."
     )
     parser.add_argument(
-        "--impute_knn_k",
+        "--impute_k",
         type=int,
         default=50,
         help="Number of neighbours for KNN imputation (used when --impute knn)."
@@ -3201,6 +3518,47 @@ if __name__ == "__main__":
         default="cosine",
         help="Distance metric for diagnostics.",
     )
+
+    parser.add_argument("--variance_threshold", type=float, default=0.001,
+                help="Keep features with population variance strictly greater than this value.")
+    parser.add_argument("--variance_pdf", type=str, default=None,
+                help="Path to write linear-scale variance diagnostics PDF.")
+    parser.add_argument("--variance_log_pdf", type=str, default=None,
+                help="Path to write log-focused variance diagnostics PDF.")
+    parser.add_argument("--variance_diag_title", type=str, default=None,
+                help="Optional title for variance diagnostic plots.")
+    parser.add_argument("--variance_logx_linear", action="store_true",
+                help="Use log10(x) for the histogram in the linear diagnostics PDF.")
+    parser.add_argument("--variance_bins", type=int, default=None,
+                help="Explicit bin count for diagnostics histograms (optional).")
+    parser.add_argument("--variance_bin_scale", type=float, default=3.0,
+                help="Multiplier for automatic bin choice.")
+    parser.add_argument("--variance_max_bins", type=int, default=240,
+                help="Maximum bins when auto-choosing.")
+    parser.add_argument("--feature_selection_scope", choices=["joint_variance_only", "none"],
+                default="joint_variance_only",
+                help="Run variance selection at merge time or skip it here.")
+    
+     parser.add_argument(
+            "--correlation_threshold",
+            type=float,
+            default=0.98,
+            help="Absolute correlation at/above which a feature is dropped during merge-time correlation filtering."
+        )
+    parser.add_argument(
+            "--correlation_method",
+            choices=["pearson", "spearman", "kendall"],
+            default="spearman",
+            help="Correlation method to use for merge-time correlation filtering."
+        )
+    parser.add_argument(
+            "--corr_keep_order",
+            choices=["variance", "min_redundancy"],
+            default="variance",
+            help="Heuristic for priority to keep when two features are highly correlated."
+        )
+
+
 
 
     main(parser.parse_args())
