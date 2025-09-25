@@ -3541,7 +3541,7 @@ if __name__ == "__main__":
     parser.add_argument(
             "--correlation_threshold",
             type=float,
-            default=0.95,
+            default=0.99,
             help="Absolute correlation at/above which a feature is dropped during merge-time correlation filtering."
         )
     parser.add_argument(
