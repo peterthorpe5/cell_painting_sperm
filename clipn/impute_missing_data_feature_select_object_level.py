@@ -365,6 +365,18 @@ def parse_args():
         help="Optional path to write diagnostics of categorical-like detection (TSV). "
             "Default: <output_file>_categorical_like.tsv"
     )
+    parser.add_argument(
+        '--no_prefix_from_filename',
+        action='store_true',
+        help='If set, do not prefix feature columns from the source filename (default: prefixing ON).'
+    )
+    parser.add_argument(
+        '--prefix_separator',
+        type=str,
+        default='__',
+        help='Separator between the derived prefix and the original feature name (default: "__").'
+    )
+
 
     parser.add_argument(
     "--drop_by_name",
@@ -725,6 +737,106 @@ def detect_categorical_like_features(
         len(candidates), len(flagged)
     )
     return flagged, diag
+
+
+def derive_object_prefix(filename: str) -> str:
+    """
+    Derive a column prefix from a CellProfiler object filename.
+
+    Rules
+    -----
+    - Strip '.csv' or '.csv.gz'
+    - Take the last '_' token (e.g., 'MyExpt_test_FilteredNuclei' → 'FilteredNuclei')
+    - Drop a leading 'Filtered' (case-insensitive), so 'FilteredNuclei' → 'Nuclei'
+
+    Parameters
+    ----------
+    filename : str
+        Basename of the file being loaded.
+
+    Returns
+    -------
+    str
+        Clean prefix to prepend to feature columns.
+    """
+    base = filename
+    if base.endswith(".csv.gz"):
+        base = base[:-7]
+    elif base.endswith(".csv"):
+        base = base[:-4]
+    last_token = base.split("_")[-1]
+    # Remove leading 'Filtered' if present
+    prefix = re.sub(r"(?i)^Filtered", "", last_token).strip()
+    return prefix or last_token
+
+
+def prefix_feature_columns(
+    df: pd.DataFrame,
+    *,
+    prefix: str,
+    sep: str = "__",
+    logger: Optional[logging.Logger] = None,
+) -> pd.DataFrame:
+    """
+    Prefix feature columns with '<prefix><sep>' while protecting metadata-like columns.
+
+    Protected (never prefixed)
+    --------------------------
+    - 'ImageNumber', 'ObjectNumber'
+    - Plate/Well variants: 'Plate', 'Well', 'Plate_Metadata', 'Well_Metadata',
+      'Metadata_Plate', 'Metadata_Well', 'Image_Metadata_Plate', 'Image_Metadata_Well'
+    - Any column starting with 'Metadata_', 'FileName_', 'PathName_', or 'URL_'
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame just read from a CellProfiler object CSV.
+    prefix : str
+        Prefix derived from the filename (e.g., 'Nuclei', 'Acrosome').
+    sep : str, optional
+        Separator between prefix and original column name (default: '__').
+    logger : logging.Logger, optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with feature columns renamed.
+    """
+    logger = logger or logging.getLogger("prefix_cols")
+    protected_exact = {
+        "ImageNumber", "ObjectNumber",
+        "Plate", "Well", "Plate_Metadata", "Well_Metadata",
+        "Metadata_Plate", "Metadata_Well",
+        "Image_Metadata_Plate", "Image_Metadata_Well",
+    }
+    protected_prefixes = ("Metadata_", "FileName_", "PathName_", "URL_")
+
+    # If some columns are already prefixed with this prefix + sep, avoid double-prefixing.
+    already_prefixed = f"{prefix}{sep}"
+    rename_map: dict[str, str] = {}
+    for col in df.columns:
+        if (
+            (col in protected_exact)
+            or col.startswith(protected_prefixes)
+            or col.startswith(already_prefixed)
+        ):
+            continue
+        rename_map[col] = f"{prefix}{sep}{col}"
+
+    if rename_map:
+        df = df.rename(columns=rename_map)
+        logger.info(
+            "Prefixed %d columns with '%s%s' (protected %d).",
+            len(rename_map),
+            prefix,
+            sep,
+            len(df.columns) - len(rename_map),
+        )
+    else:
+        logger.info("No columns needed prefixing for prefix '%s'.", prefix)
+
+    return df
 
 
 
@@ -2265,6 +2377,17 @@ def main():
         logger.info(f"Reading file: {f.name}")
         dtype_map = infer_dtypes(f)
         df = pd.read_csv(f, dtype=dtype_map)
+
+        # prefix feature columns from the filename (e.g., Nuclei, Acrosome) ---
+        if not args.no_prefix_from_filename:
+            _prefix = derive_object_prefix(f.name)
+            df = prefix_feature_columns(
+                df=df,
+                prefix=_prefix,
+                sep=args.prefix_separator,
+                logger=logger,
+            )
+
 
         # Add Plate/Well from the matching *_Image file if needed,
         # and coerce to a single, clean pair of Plate_Metadata/Well_Metadata
