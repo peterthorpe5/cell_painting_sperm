@@ -1062,6 +1062,191 @@ def scale_features(
     return df_scaled
 
 
+
+def feature_family(name: str) -> str:
+    """
+    Parse a CellProfiler-like feature name into a broad family label.
+
+    The heuristic groups by '<Object>__<Module>' where Module is the token
+    immediately after the double-underscore. Examples:
+    - 'Nuclei__Texture_SumVariance_DAPI_3_01_256'  -> 'Nuclei__Texture'
+    - 'Mitochondria__AreaShape_Area'               -> 'Mitochondria__AreaShape'
+    - 'Acrosome__Intensity_MeanIntensity_Cy5'      -> 'Acrosome__Intensity'
+
+    Parameters
+    ----------
+    name : str
+        Original feature name.
+
+    Returns
+    -------
+    str
+        Family key used for grouping and summaries.
+    """
+    if "__" not in name:
+        return "Unknown"
+    left, right = name.split("__", 1)
+    module = right.split("_", 1)[0] if "_" in right else right
+    return f"{left}__{module}"
+
+
+def analyse_corr_graph(
+    *,
+    X: pd.DataFrame,
+    threshold: float,
+    method: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Analyse the correlation graph at a given threshold and method.
+
+    Builds an undirected graph where vertices are features and edges connect
+    pairs with absolute correlation ≥ `threshold`. Returns:
+    1) component_sizes: one row per connected component with its size;
+    2) edge_summary: one row with basic edge statistics.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Numeric feature matrix (rows = samples, columns = features).
+    threshold : float
+        Absolute correlation threshold for edge formation.
+    method : {"pearson", "spearman", "kendall"}
+        Correlation method.
+
+    Returns
+    -------
+    component_sizes : pandas.DataFrame
+        Columns: ['component_id', 'size'] sorted by size descending.
+    edge_summary : pandas.DataFrame
+        Single-row summary with columns:
+        ['n_features', 'n_edges', 'density', 'threshold', 'method'].
+    """
+    X_num = X.select_dtypes(include=[np.number])
+    cols = list(X_num.columns)
+    n = len(cols)
+    if n == 0:
+        return pd.DataFrame(columns=["component_id", "size"]), pd.DataFrame(
+            [{"n_features": 0, "n_edges": 0, "density": 0.0, "threshold": threshold, "method": method}]
+        )
+
+    C = X_num.corr(method=method).abs().fillna(0.0).values
+
+    # Union–Find for connected components
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    edge_count = 0
+    for i in range(n):
+        ci = C[i]
+        for j in range(i + 1, n):
+            if float(ci[j]) >= threshold:
+                union(i, j)
+                edge_count += 1
+
+    comp_map: Dict[int, int] = {}
+    for i in range(n):
+        r = find(i)
+        comp_map[r] = comp_map.get(r, 0) + 1
+
+    component_sizes = (
+        pd.DataFrame({"component_id": list(range(len(comp_map))), "size": sorted(comp_map.values(), reverse=True)})
+        .sort_values(by="size", ascending=False, ignore_index=True)
+    )
+
+    possible_edges = n * (n - 1) / 2.0
+    density = float(edge_count) / float(possible_edges) if possible_edges > 0 else 0.0
+    edge_summary = pd.DataFrame(
+        [{
+            "n_features": n,
+            "n_edges": int(edge_count),
+            "density": density,
+            "threshold": float(threshold),
+            "method": str(method),
+        }]
+    )
+    return component_sizes, edge_summary
+
+
+def kept_counts_sweep(
+    *,
+    X: pd.DataFrame,
+    thresholds: Iterable[float],
+    methods: Iterable[str],
+    rank_strategy: str,
+    protect: Optional[Iterable[str]],
+    corr_filter_fn,
+) -> pd.DataFrame:
+    """
+    Run a small sweep over thresholds and methods to count kept features.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Numeric feature matrix.
+    thresholds : iterable of float
+        Thresholds to test (absolute correlation).
+    methods : iterable of {"pearson", "spearman", "kendall"}
+        Correlation methods to test.
+    rank_strategy : {"variance", "min_redundancy"}
+        Ranking strategy passed to the correlation filter.
+    protect : iterable of str, optional
+        Features to protect from dropping.
+    corr_filter_fn : callable
+        Function implementing the correlation filter:
+        f(X=..., threshold=..., method=..., strategy=..., protect=..., logger=...)
+
+    Returns
+    -------
+    pandas.DataFrame
+        Long-form table with columns: ['method', 'threshold', 'kept'].
+    """
+    rows: List[Dict[str, object]] = []
+    for m in methods:
+        for thr in thresholds:
+            kept, _ = corr_filter_fn(
+                X=X,
+                threshold=float(thr),
+                method=str(m),
+                strategy=str(rank_strategy),
+                protect=protect,
+                logger=None,
+            )
+            rows.append({"method": m, "threshold": float(thr), "kept": int(len(kept))})
+    return pd.DataFrame(rows)
+
+
+def summarise_kept_by_family(
+    *,
+    kept: Iterable[str],
+) -> pd.DataFrame:
+    """
+    Summarise how many kept features fall into each feature family.
+
+    Parameters
+    ----------
+    kept : iterable of str
+        Names of features retained by the correlation filter.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Table with columns ['family', 'n_kept'] sorted by n_kept descending.
+    """
+    fam = pd.Series([feature_family(k) for k in kept], dtype="string")
+    summary = fam.value_counts(dropna=False).rename_axis("family").reset_index(name="n_kept")
+    return summary.sort_values(by="n_kept", ascending=False, ignore_index=True)
+
+
 def _mode_strict(series: pd.Series) -> Optional[str]:
     """
     Return the most frequent non-null string in a Series, or None.
@@ -2788,6 +2973,50 @@ def main(args: argparse.Namespace) -> None:
 
     X_for_corr = combined_df.loc[:, feature_cols]
 
+
+    # --- Diagnostics BEFORE filtering (no behavioural change) --------------------
+    diag_dir = Path(args.out)
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    # Graph structure at the current (method, threshold)
+    comp_sizes_df, edge_summary_df = analyse_corr_graph(
+        X=X_for_corr,
+        threshold=float(corr_thr),
+        method=str(corr_method),
+    )
+    comp_sizes_path = diag_dir / f"{args.experiment}_joint_corr_components.tsv"
+    edge_summary_path = diag_dir / f"{args.experiment}_joint_corr_edge_summary.tsv"
+    comp_sizes_df.to_csv(comp_sizes_path, sep="\t", index=False)
+    edge_summary_df.to_csv(edge_summary_path, sep="\t", index=False)
+    logger.info(
+        "Correlation graph: %d components (largest=%s), edges=%d, density=%.4f.",
+        comp_sizes_df.shape[0],
+        (int(comp_sizes_df['size'].iloc[0]) if not comp_sizes_df.empty else 0),
+        int(edge_summary_df['n_edges'].iloc[0]),
+        float(edge_summary_df['density'].iloc[0]),
+    )
+
+    # Small sweep to show sensitivity and method effect
+    sweep_df = kept_counts_sweep(
+        X=X_for_corr,
+        thresholds=[0.980, 0.985, 0.990, 0.995],
+        methods=[str(corr_method), "pearson" if corr_method != "pearson" else "spearman"],
+        rank_strategy=str(corr_strategy),
+        protect=None,
+        corr_filter_fn=correlation_filter_variance_first,
+    )
+    sweep_path = diag_dir / f"{args.experiment}_joint_corr_kept_sweep.tsv"
+    sweep_df.to_csv(sweep_path, sep="\t", index=False)
+    logger.info(
+        "Correlation kept-count sweep written → %s. Current (%s, %.3f) kept=%s.",
+        sweep_path,
+        corr_method,
+        corr_thr,
+        int(sweep_df.loc[(sweep_df['method'] == str(corr_method)) & (sweep_df['threshold'] == float(corr_thr)), 'kept'].iloc[0]),
+    )
+    # --- End diagnostics BEFORE filtering ---------------------------------------
+
+
     kept_after_corr, corr_report = correlation_filter_variance_first(
                 X=X_for_corr,
                 threshold=corr_thr,
@@ -2796,6 +3025,18 @@ def main(args: argparse.Namespace) -> None:
                 protect=None,
                 logger=logger,
             )
+
+    # --- Diagnostics AFTER filtering (kept set composition) ---------------------
+    kept_families_df = summarise_kept_by_family(kept=kept_after_corr)
+    kept_families_path = Path(args.out) / f"{args.experiment}_joint_corr_kept_by_family.tsv"
+    kept_families_df.to_csv(kept_families_path, sep="\t", index=False)
+    logger.info(
+        "Kept-by-family (top 5): %s",
+        kept_families_df.head(5).to_dict(orient="records"),
+    )
+    # --- End diagnostics AFTER filtering ----------------------------------------
+
+
 
     # Persist kept list (TSV) and the keeper→partners mapping (TSV; never comma-separated)
     kept_path = Path(args.out) / f"{args.experiment}_joint_correlation_kept_features.tsv"
@@ -2836,6 +3077,21 @@ def main(args: argparse.Namespace) -> None:
     # After subsetting combined_df and per-dataset frames
     feature_cols = kept_after_corr  # use correlation-kept list downstream
     logger.info("Feature column count before scaling: %d", len(feature_cols))
+
+    # --- Safety assert: ensure correlation keepers persist to scaling -----------
+    final_numeric_cols = [
+        c for c in combined_df.columns
+        if c not in meta_columns and pd.api.types.is_numeric_dtype(combined_df[c])
+    ]
+    missing_keepers = sorted(set(kept_after_corr) - set(final_numeric_cols))
+    if missing_keepers:
+        raise AssertionError(
+            f"{len(missing_keepers)} correlation-kept features missing prior to scaling: "
+            f"{missing_keepers[:10]} ..."
+        )
+    # --- End safety assert -------------------------------------------------------
+
+
 
     # Optional scaling
     if args.skip_standardise:
