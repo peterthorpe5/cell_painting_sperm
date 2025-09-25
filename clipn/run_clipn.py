@@ -3537,7 +3537,7 @@ if __name__ == "__main__":
                 default="joint_variance_only",
                 help="Run variance selection at merge time or skip it here.")
     
-     parser.add_argument(
+    parser.add_argument(
             "--correlation_threshold",
             type=float,
             default=0.98,
