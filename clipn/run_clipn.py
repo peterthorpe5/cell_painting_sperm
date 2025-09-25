@@ -76,6 +76,7 @@ from clipn.model import CLIPn
 import math
 from sklearn.metrics import silhouette_score
 from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics import pairwise_distances
 from sklearn import set_config
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
@@ -1059,9 +1060,6 @@ def scale_features(
 
     return df_scaled
 
-
-from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics import pairwise_distances
 
 def _mode_strict(series: pd.Series) -> Optional[str]:
     """
