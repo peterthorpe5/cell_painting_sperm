@@ -2997,23 +2997,59 @@ def main(args: argparse.Namespace) -> None:
     )
 
     # Small sweep to show sensitivity and method effect
+    # Ensure the current (method, threshold) are included in the sweep.
+    _sweep_methods = [str(corr_method)]
+    _alt_method = "pearson" if corr_method != "pearson" else "spearman"
+    if _alt_method not in _sweep_methods:
+        _sweep_methods.append(_alt_method)
+
+    _sweep_thresholds = [0.980, 0.985, 0.990, 0.995]
+    if float(corr_thr) not in _sweep_thresholds:
+        _sweep_thresholds.append(float(corr_thr))
+
+    # De-duplicate and sort thresholds for tidy output
+    _sweep_thresholds = sorted(set(float(t) for t in _sweep_thresholds))
+
     sweep_df = kept_counts_sweep(
         X=X_for_corr,
-        thresholds=[0.980, 0.985, 0.990, 0.995],
-        methods=[str(corr_method), "pearson" if corr_method != "pearson" else "spearman"],
+        thresholds=_sweep_thresholds,
+        methods=_sweep_methods,
         rank_strategy=str(corr_strategy),
         protect=None,
         corr_filter_fn=correlation_filter_variance_first,
     )
+
     sweep_path = diag_dir / f"{args.experiment}_joint_corr_kept_sweep.tsv"
     sweep_df.to_csv(sweep_path, sep="\t", index=False)
+
+    # Safe lookup for the current (method, threshold) using isclose
+    _current = sweep_df[
+        (sweep_df["method"] == str(corr_method)) &
+        (np.isclose(sweep_df["threshold"].astype(float), float(corr_thr)))
+    ]
+
+    if _current.empty:
+        # Fallback: compute kept directly at the current setting
+        _kept_now, _ = correlation_filter_variance_first(
+            X=X_for_corr,
+            threshold=float(corr_thr),
+            method=str(corr_method),
+            strategy=str(corr_strategy),
+            protect=None,
+            logger=None,
+        )
+        _kept_now_n = len(_kept_now)
+    else:
+        _kept_now_n = int(_current["kept"].iloc[0])
+
     logger.info(
-        "Correlation kept-count sweep written → %s. Current (%s, %.3f) kept=%s.",
+        "Correlation kept-count sweep written → %s. Current (%s, %.5f) kept=%d.",
         sweep_path,
         corr_method,
         corr_thr,
-        int(sweep_df.loc[(sweep_df['method'] == str(corr_method)) & (sweep_df['threshold'] == float(corr_thr)), 'kept'].iloc[0]),
+        _kept_now_n,
     )
+
     # --- End diagnostics BEFORE filtering ---------------------------------------
 
 
