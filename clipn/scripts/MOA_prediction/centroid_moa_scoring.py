@@ -1261,19 +1261,22 @@ def main() -> None:
         float(S_cos.min()), float(np.median(S_cos)), float(S_cos.max())
     )
 
-
-
-  
     S_csls = None
     if args.use_csls:
         if args.csls_k is None or int(args.csls_k) <= 0:
-            k_eff = int(np.sqrt(P.shape[0]))
-            k_eff = int(np.clip(k_eff, 5, 50))
+            k_eff = int(np.clip(int(np.sqrt(P.shape[0])), 5, 50))
         else:
-            k_eff = min(int(args.csls_k), max(1, P.shape[0] - 1))
+            k_eff = int(args.csls_k)
+        # clamp for BOTH branches: k must be ≤ (#centroids - 1), but at least 1
+        k_eff = min(k_eff, max(1, P.shape[0] - 1))
         S_csls = csls_scores(Q=X, P=P, k=k_eff)
         logger.info("Computed CSLS scores (k=%d); shape %s.", k_eff, tuple(S_csls.shape))
-
+        logger.info(f"S_csls shape: {S_csls.shape}, "
+                    f"min: {float(S_csls.min()):.4f}, "
+                    f"median: {float(np.median(S_csls)):.4f}, "
+                    f"max: {float(S_csls.max()):.4f}"
+                    )
+    
 
     # Aggregate to MOA and choose primary matrix
     M_cos = agg_over_centroids(mat=S_cos, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg)
@@ -1292,6 +1295,12 @@ def main() -> None:
 
     # --- Build centroid-level matrix consistent with the decision rule ---
     # S_primary[i, :] = S_cos or S_csls row-for-row depending on decision_rule_vec
+    # right after args parsed
+    if args.primary_score == "csls" and not args.use_csls:
+        logger.warning("Requested primary_score='csls' but CSLS is disabled; falling back to cosine.")
+    if args.primary_score == "auto" and not args.use_csls:
+        logger.info("CSLS disabled; primary_score='auto' will use cosine for all rows.")
+
     if args.primary_score == "cosine" or S_csls is None:
         S_primary = S_cos
     elif args.primary_score == "csls":
