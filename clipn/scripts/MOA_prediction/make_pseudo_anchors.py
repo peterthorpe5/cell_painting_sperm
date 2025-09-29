@@ -38,9 +38,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import logging
-import os 
 import sys
-from pathlib import Path
+
 
 
 # ------------------------------- maths helpers ------------------------------- #
@@ -789,6 +788,8 @@ def bootstrap_k_selection_kmeans(
     stability_metric: str,
     consensus_linkage: str,
     random_seed: int,
+    pac_low: float = 0.1,
+    pac_high: float = 0.9,
 ) -> tuple[int, pd.DataFrame, dict[int, np.ndarray]]:
     """
     Choose k for KMeans via bootstrap/consensus stability.
@@ -868,13 +869,13 @@ def bootstrap_k_selection_kmeans(
         c_sil = _consensus_silhouette(consensus=C, labels=lab_cons)
         mean_ari = _mean_ari_between_partitions(labels_runs=labels_runs)
 
-        low, high = 0.1, 0.9
         try:
             low_s, high_s = map(float, [])
         except Exception:
             pass  # will set later outside
 
-        pac = _pac_score(consensus=C, low=0.1, high=0.9)
+        pac = _pac_score(consensus=C, low=pac_low, high=pac_high)
+
 
         # Also compute classical silhouette on features (tie-breaker)
         try:
@@ -1001,7 +1002,7 @@ def main() -> None:
     parser.add_argument("--silhouette_sample_size", type=int, default=2000,
                         help="Subsample size for auto-k silhouette scoring (default: 2000).")
     
-        # --- Bootstrap/consensus k-selection for main clusters ---
+    # --- Bootstrap/consensus k-selection for main clusters ---
     parser.add_argument("--bootstrap_k_main", action="store_true",
                         help="Enable bootstrap/consensus selection of k for main clustering (KMeans path).")
     parser.add_argument("--k_candidates_main", type=str, default="8,12,16,24,32",
@@ -1052,7 +1053,7 @@ def main() -> None:
     )
     logger.info("Aggregated to %d unique compounds using method '%s'.", agg.shape[0], args.aggregate_method)
     # num_cols = agg.select_dtypes(include=[np.number]).columns.tolist()
-    num_cols = numeric_feature_columns(df)
+    num_cols = numeric_feature_columns(agg)
 
     X_all = l2_normalise(X=agg[num_cols].to_numpy())
     ids_all = agg[id_col].astype(str).tolist()
@@ -1110,6 +1111,7 @@ def main() -> None:
         # Decide k: bootstrap/consensus if requested, else existing auto/fixed
         chosen_k_for_kmeans: Optional[int] = None
         per_k_table: Optional[pd.DataFrame] = None
+        out_k_selection_tsv_summary: str = ""
 
         if bool(args.bootstrap_k_main) and int(args.n_clusters) == -1:
             # Prepare candidates
@@ -1125,14 +1127,16 @@ def main() -> None:
 
                 # Run bootstrap/consensus selection
                 best_k, k_table, _cons_by_k = bootstrap_k_selection_kmeans(
-                    X=X_all,
-                    k_list=k_list,
-                    n_bootstrap=int(args.n_bootstrap_main),
-                    subsample_frac=float(args.subsample_main),
-                    stability_metric=str(args.stability_metric_main),
-                    consensus_linkage=str(args.consensus_linkage_main),
-                    random_seed=int(args.random_seed),
-                )
+                                                    X=X_all,
+                                                    k_list=k_list,
+                                                    n_bootstrap=int(args.n_bootstrap_main),
+                                                    subsample_frac=float(args.subsample_main),
+                                                    stability_metric=str(args.stability_metric_main),
+                                                    consensus_linkage=str(args.consensus_linkage_main),
+                                                    random_seed=int(args.random_seed),
+                                                    pac_low=pac_l,
+                                                    pac_high=pac_u,
+                                                )
 
                 per_k_table = k_table.copy()
                 chosen_k_for_kmeans = int(best_k)
@@ -1143,9 +1147,12 @@ def main() -> None:
                 out_k_tsv = args.out_k_selection_tsv
                 if out_k_tsv is None:
                     out_k_tsv = str(Path(args.out_summary_tsv).with_name("anchors_pseudo_k_selection.tsv"))
-                Path(out_k_tsv).parent.mkdir(parents=True, exist_ok=True)
-                per_k_table.to_csv(out_k_tsv, sep="\t", index=False)
-                logger.info("Wrote per-k stability table -> %s", out_k_tsv)
+                    Path(out_k_tsv).parent.mkdir(parents=True, exist_ok=True)
+                    per_k_table.to_csv(out_k_tsv, sep="\t", index=False)
+                    logger.info("Wrote per-k stability table -> %s", out_k_tsv)
+
+# Record for summary
+out_k_selection_tsv_summary = out_k_tsv
 
         from sklearn.cluster import KMeans
 
@@ -1266,8 +1273,6 @@ def main() -> None:
         logger.info("No labels_tsv provided; skipping label overlay.")
 
 
-    logger.info("Overlayed user labels; %d compounds labelled.", anchors_df["is_labelled"].sum())
-
     # Summary row
     summary = pd.DataFrame([{
         "algorithm": chosen_algo,
@@ -1295,7 +1300,8 @@ def main() -> None:
         "subsample_main": float(args.subsample_main),
         "stability_metric_main": str(args.stability_metric_main),
         "consensus_linkage_main": str(args.consensus_linkage_main),
-
+        "out_k_selection_tsv": out_k_selection_tsv_summary,
+        "consensus_pac_limits": str(args.consensus_pac_limits),
     }])
     logger.info("Run summary: %s", summary.iloc[0].to_dict())
 
