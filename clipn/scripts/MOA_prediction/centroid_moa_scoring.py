@@ -46,7 +46,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-
+from sklearn.cluster import KMeans
 import numpy as np
 import pandas as pd
 import logging
@@ -724,8 +724,10 @@ def build_moa_centroids(
                     max_k_allowed = max(1, N // min_per)  # ensures ≥ min_members_per_moa per sub-centroid
                     fallback_k = min(max(2, min_per), max_k_allowed)
                     n_k = min(fallback_k, N)
+                    chosen_k_by_moa.append((str(moa), int(n_k)))  # record chosen_k
             else:
                 n_k = min(int(n_centroids_per_moa), X_m.shape[0])
+                chosen_k_by_moa.append((str(moa), int(n_k)))  # record chosen_k
 
             km = KMeans(n_clusters=int(n_k), random_state=rng.randint(0, 10**6), n_init="auto")
             labels = km.fit_predict(X_m)
