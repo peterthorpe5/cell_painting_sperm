@@ -30,7 +30,6 @@ python centroid_moa_scoring.py \
   --out_dir moa_centroid_E150_L148_unsup \
   --id_col cpd_id \
   --aggregate_method median \
-  --n_centroids_per_moa 1 \
   --centroid_method median \
   --centroid_shrinkage 0.0 \
   --use_csls \
