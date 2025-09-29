@@ -491,7 +491,6 @@ def overlay_given_labels(
 
 
 
-
 def auto_kmeans(
     *,
     X: np.ndarray,
@@ -566,6 +565,350 @@ def auto_kmeans(
         best_k = 2
 
     return best_labels, int(best_k)
+
+
+def _parse_k_candidates(*, text: str, n_max: int) -> list[int]:
+    """
+    Parse a comma-separated candidate-k string into a validated, unique, sorted list.
+
+    Parameters
+    ----------
+    text : str
+        Comma-separated ks (e.g., "8,12,16,24").
+    n_max : int
+        Upper bound (exclusive) for k (must be < n_max).
+
+    Returns
+    -------
+    list[int]
+        Valid candidate ks (2 <= k <= n_max-1), sorted and unique.
+    """
+    ks = []
+    for tok in str(text).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            k = int(tok)
+        except ValueError:
+            continue
+        if 2 <= k <= max(2, n_max - 1):
+            ks.append(k)
+    ks = sorted(set(ks))
+    if not ks:
+        ks = [2] if n_max >= 3 else [1]
+    return ks
+
+
+def _consensus_matrix_from_labels(*, labels_runs: list[np.ndarray]) -> np.ndarray:
+    """
+    Build a co-association (consensus) matrix from repeated label assignments.
+
+    Each element (i,j) is the fraction of runs where sample i and j were assigned
+    the same cluster. Assumes each labels array covers the same N samples (we
+    predict labels for all rows even if a run was fit on a subsample).
+
+    Parameters
+    ----------
+    labels_runs : list[np.ndarray]
+        List of length R runs; each array has shape (N,) of integer labels.
+
+    Returns
+    -------
+    np.ndarray
+        Consensus matrix of shape (N, N) with values in [0, 1].
+    """
+    if not labels_runs:
+        raise ValueError("labels_runs is empty.")
+    N = int(labels_runs[0].shape[0])
+    R = len(labels_runs)
+    M = np.zeros((N, N), dtype=np.float32)
+    for lab in labels_runs:
+        if lab.shape[0] != N:
+            raise ValueError("All label arrays must have the same length.")
+        # Accumulate agreement: I[label_i == label_j]
+        eq = (lab[:, None] == lab[None, :])
+        M += eq.astype(np.float32)
+    M /= float(R)
+    np.fill_diagonal(M, 1.0)
+    return M
+
+
+def _consensus_silhouette(*, consensus: np.ndarray, labels: np.ndarray) -> float:
+    """
+    Compute silhouette on the consensus-derived distance matrix (1 - consensus).
+
+    We first convert the consensus matrix to a dissimilarity matrix D = 1 - C,
+    then compute the standard silhouette score with metric='precomputed'.
+
+    Parameters
+    ----------
+    consensus : np.ndarray
+        Consensus matrix (N x N), values in [0, 1].
+    labels : np.ndarray
+        Integer labels for the clustering used for scoring (length N).
+
+    Returns
+    -------
+    float
+        Mean silhouette score on the consensus distances (NaN if undefined).
+    """
+    try:
+        from sklearn.metrics import silhouette_score
+    except Exception:
+        return float("nan")
+    if consensus.ndim != 2 or consensus.shape[0] != consensus.shape[1]:
+        return float("nan")
+    N = consensus.shape[0]
+    if labels.shape[0] != N:
+        return float("nan")
+    # Need at least two clusters with >= 2 members
+    uniq, counts = np.unique(labels, return_counts=True)
+    valid = (counts >= 2).sum()
+    if valid < 2:
+        return float("nan")
+    D = 1.0 - np.clip(consensus, 0.0, 1.0)
+    # Guard: metric='precomputed' expects distances; diagonal must be 0
+    np.fill_diagonal(D, 0.0)
+    try:
+        return float(silhouette_score(X=D, labels=labels, metric="precomputed"))
+    except Exception:
+        return float("nan")
+
+
+def _consensus_partition(*, consensus: np.ndarray, n_clusters: int, linkage: str = "average",
+                         random_seed: int = 0) -> np.ndarray:
+    """
+    Derive a consensus partition by clustering the consensus matrix.
+
+    Parameters
+    ----------
+    consensus : np.ndarray
+        Consensus similarity matrix (N x N), values in [0, 1].
+    n_clusters : int
+        Number of clusters to extract.
+    linkage : {"average","complete","single","ward"}
+        Linkage for AgglomerativeClustering (default: "average").
+    random_seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    np.ndarray
+        Integer labels of length N.
+    """
+    from sklearn.cluster import AgglomerativeClustering
+    # Convert to distance for clustering where required
+    D = 1.0 - np.clip(consensus, 0.0, 1.0)
+    np.fill_diagonal(D, 0.0)
+    # 'precomputed' affinity uses distances
+    if linkage == "ward":
+        # Ward does not support precomputed distances; use features instead.
+        # Map similarities to features via spectral-style embedding (top components).
+        # Fast fallback: use (N x N) consensus directly as features.
+        X_feat = consensus
+        model = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
+        lab = model.fit_predict(X_feat)
+    else:
+        model = AgglomerativeClustering(
+            n_clusters=n_clusters,
+            affinity="precomputed",
+            linkage=linkage
+        )
+        lab = model.fit_predict(D)
+    return lab.astype(int)
+
+
+def _mean_ari_between_partitions(*, labels_runs: list[np.ndarray]) -> float:
+    """
+    Compute the mean pairwise Adjusted Rand Index across all runs.
+
+    Parameters
+    ----------
+    labels_runs : list[np.ndarray]
+        List of partitions (arrays of shape (N,)).
+
+    Returns
+    -------
+    float
+        Mean ARI across all unique pairs (NaN if < 2 runs).
+    """
+    if len(labels_runs) < 2:
+        return float("nan")
+    try:
+        from sklearn.metrics import adjusted_rand_score
+    except Exception:
+        return float("nan")
+    s = 0.0
+    m = 0
+    for i in range(len(labels_runs)):
+        for j in range(i + 1, len(labels_runs)):
+            s += float(adjusted_rand_score(labels_runs[i], labels_runs[j]))
+            m += 1
+    return (s / m) if m > 0 else float("nan")
+
+
+def _pac_score(*, consensus: np.ndarray, low: float = 0.1, high: float = 0.9) -> float:
+    """
+    Proportion of Ambiguous Clustering (PAC): fraction of consensus entries in (low, high).
+
+    Lower PAC means more stable clustering.
+
+    Parameters
+    ----------
+    consensus : np.ndarray
+        Consensus matrix (N x N), values in [0, 1].
+    low : float
+        Lower threshold (default 0.1).
+    high : float
+        Upper threshold (default 0.9).
+
+    Returns
+    -------
+    float
+        PAC score in [0, 1]; lower is better.
+    """
+    if consensus.size == 0:
+        return float("nan")
+    C = consensus.copy()
+    # Ignore diagonal
+    np.fill_diagonal(C, np.nan)
+    amb = np.logical_and(C > low, C < high)
+    denom = np.isfinite(C).sum()
+    if denom == 0:
+        return float("nan")
+    return float(np.nan_to_num(amb, nan=0.0).sum() / denom)
+
+
+def bootstrap_k_selection_kmeans(
+    *,
+    X: np.ndarray,
+    k_list: list[int],
+    n_bootstrap: int,
+    subsample_frac: float,
+    stability_metric: str,
+    consensus_linkage: str,
+    random_seed: int,
+) -> tuple[int, pd.DataFrame, dict[int, np.ndarray]]:
+    """
+    Choose k for KMeans via bootstrap/consensus stability.
+
+    For each k, repeat:
+      1) Subsample indices (without replacement) at 'subsample_frac';
+      2) Fit KMeans(k) on the subsample (random_state varies per run);
+      3) Predict labels for ALL N samples using km.predict(X) to align sizes.
+
+    Build a consensus matrix across runs for the same k and compute a stability score:
+      - 'consensus_silhouette': silhouette on (1 - consensus) using a consensus partition;
+      - 'mean_ari'           : mean ARI across all run partitions;
+      - 'pac'                : lower is better (proportion of ambiguous entries).
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Normalised data (N x D).
+    k_list : list[int]
+        Candidate k values (2..N-1).
+    n_bootstrap : int
+        Number of bootstrap replicates per k.
+    subsample_frac : float
+        Fraction in (0,1]; used to fit KMeans on a subset before predicting all.
+    stability_metric : {"consensus_silhouette","mean_ari","pac"}
+        Stability metric to optimise (higher is better except PAC).
+    consensus_linkage : {"average","complete","single","ward"}
+        Linkage for consensus partition.
+    random_seed : int
+        Random seed.
+
+    Returns
+    -------
+    tuple[int, pd.DataFrame, dict[int, np.ndarray]]
+        (best_k, table, consensus_by_k)
+        - best_k: chosen k under the metric (ties → higher silhouette on full data, then smaller k)
+        - table : per-k DataFrame with stability metrics and tie-breakers
+        - consensus_by_k: optional consensus matrices per k (may be large)
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    rng = np.random.default_rng(random_seed)
+    N = X.shape[0]
+    # Safety
+    k_list = [k for k in k_list if 2 <= k <= max(2, N - 1)]
+    results = []
+    consensus_by_k: dict[int, np.ndarray] = {}
+    repr_labels_for_sil: dict[int, np.ndarray] = {}
+
+    for k in k_list:
+        labels_runs: list[np.ndarray] = []
+        for b in range(n_bootstrap):
+            # Subsample to FIT only; PREDICT on all to align size
+            m = max(2 * k, int(np.round(subsample_frac * N)))  # ensure enough points
+            m = int(np.clip(m, 2 * k, N))
+            idx_fit = rng.choice(N, size=m, replace=False)
+
+            seed_b = int(rng.integers(0, 2**32 - 1))
+            km = KMeans(n_clusters=k, random_state=seed_b, n_init="auto")
+            km.fit(X[idx_fit, :])
+            lab_all = km.predict(X)  # length N
+            labels_runs.append(lab_all.astype(int))
+
+        # Consensus and stability
+        C = _consensus_matrix_from_labels(labels_runs=labels_runs)
+        consensus_by_k[k] = C
+
+        # Consensus partition for silhouette metric
+        try:
+            lab_cons = _consensus_partition(consensus=C, n_clusters=k, linkage=consensus_linkage,
+                                            random_seed=random_seed)
+        except Exception:
+            lab_cons = labels_runs[0]  # fallback to one run
+        repr_labels_for_sil[k] = lab_cons
+
+        c_sil = _consensus_silhouette(consensus=C, labels=lab_cons)
+        mean_ari = _mean_ari_between_partitions(labels_runs=labels_runs)
+
+        low, high = 0.1, 0.9
+        try:
+            low_s, high_s = map(float, [])
+        except Exception:
+            pass  # will set later outside
+
+        pac = _pac_score(consensus=C, low=0.1, high=0.9)
+
+        # Also compute classical silhouette on features (tie-breaker)
+        try:
+            sil_feat = float(silhouette_score(X=X, labels=lab_cons, metric="cosine"))
+        except Exception:
+            sil_feat = float("nan")
+
+        results.append({
+            "k": int(k),
+            "stability_consensus_silhouette": float(c_sil),
+            "stability_mean_ari": float(mean_ari),
+            "stability_pac": float(pac),
+            "silhouette_feature_cosine": sil_feat,
+        })
+
+    tab = pd.DataFrame(results).sort_values("k").reset_index(drop=True)
+
+    # Choose best k
+    metric = stability_metric
+    if metric == "consensus_silhouette":
+        key = "stability_consensus_silhouette"
+        # Higher is better
+        tab["_rank"] = (-tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+    elif metric == "mean_ari":
+        key = "stability_mean_ari"
+        tab["_rank"] = (-tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+    else:  # pac → lower is better
+        key = "stability_pac"
+        tab["_rank"] = (tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+
+    tab = tab.sort_values("_rank").drop(columns=["_rank"]).reset_index(drop=True)
+    best_k = int(tab.iloc[0]["k"])
+    return best_k, tab, consensus_by_k
+
 
 
 def setup_logging(out_dir: str | Path, experiment: str) -> logging.Logger:
@@ -657,6 +1000,30 @@ def main() -> None:
                         help="If fraction of singleton clusters > this, fall back to KMeans.")
     parser.add_argument("--silhouette_sample_size", type=int, default=2000,
                         help="Subsample size for auto-k silhouette scoring (default: 2000).")
+    
+        # --- Bootstrap/consensus k-selection for main clusters ---
+    parser.add_argument("--bootstrap_k_main", action="store_true",
+                        help="Enable bootstrap/consensus selection of k for main clustering (KMeans path).")
+    parser.add_argument("--k_candidates_main", type=str, default="8,12,16,24,32",
+                        help="Comma-separated list of k candidates for bootstrap selection (default: 8,12,16,24,32).")
+    parser.add_argument("--n_bootstrap_main", type=int, default=100,
+                        help="Number of bootstrap replicates per k (default: 100).")
+    parser.add_argument("--subsample_main", type=float, default=0.8,
+                        help="Fraction of rows to fit KMeans on per bootstrap (then predict all rows; default: 0.8).")
+    parser.add_argument("--stability_metric_main", type=str,
+                        choices=["consensus_silhouette", "mean_ari", "pac"],
+                        default="consensus_silhouette",
+                        help="Stability metric to pick k (default: consensus_silhouette).")
+    parser.add_argument("--consensus_linkage_main", type=str,
+                        choices=["average", "complete", "single", "ward"],
+                        default="average",
+                        help="Linkage for consensus clustering used in stability scoring (default: average).")
+    parser.add_argument("--consensus_pac_limits", type=str, default="0.1,0.9",
+                        help="PAC lower,upper thresholds for 'pac' metric (default: 0.1,0.9).")
+    parser.add_argument("--out_k_selection_tsv", type=str, default=None,
+                        help="Optional path to write per-k stability table (TSV). "
+                             "Default: alongside summary as anchors_pseudo_k_selection.tsv.")
+
 
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed.")
     args = parser.parse_args()
@@ -739,24 +1106,73 @@ def main() -> None:
 
     if (labels is None) and (args.clusterer in {"auto", "kmeans"}):
         logger.info("Using KMeans clustering...")
-        # KMeans path (auto-k or fixed)
+
+        # Decide k: bootstrap/consensus if requested, else existing auto/fixed
+        chosen_k_for_kmeans: Optional[int] = None
+        per_k_table: Optional[pd.DataFrame] = None
+
+        if bool(args.bootstrap_k_main) and int(args.n_clusters) == -1:
+            # Prepare candidates
+            k_list = _parse_k_candidates(text=args.k_candidates_main, n_max=X_all.shape[0])
+            if not k_list:
+                logger.warning("No valid k candidates parsed; falling back to auto silhouette.")
+            else:
+                # Parse PAC limits
+                try:
+                    pac_l, pac_u = map(float, str(args.consensus_pac_limits).split(","))
+                except Exception:
+                    pac_l, pac_u = 0.1, 0.9
+
+                # Run bootstrap/consensus selection
+                best_k, k_table, _cons_by_k = bootstrap_k_selection_kmeans(
+                    X=X_all,
+                    k_list=k_list,
+                    n_bootstrap=int(args.n_bootstrap_main),
+                    subsample_frac=float(args.subsample_main),
+                    stability_metric=str(args.stability_metric_main),
+                    consensus_linkage=str(args.consensus_linkage_main),
+                    random_seed=int(args.random_seed),
+                )
+
+                per_k_table = k_table.copy()
+                chosen_k_for_kmeans = int(best_k)
+                logger.info("Bootstrap/consensus selection chose k=%d (metric=%s).",
+                            chosen_k_for_kmeans, args.stability_metric_main)
+
+                # Write per-k table if requested
+                out_k_tsv = args.out_k_selection_tsv
+                if out_k_tsv is None:
+                    out_k_tsv = str(Path(args.out_summary_tsv).with_name("anchors_pseudo_k_selection.tsv"))
+                Path(out_k_tsv).parent.mkdir(parents=True, exist_ok=True)
+                per_k_table.to_csv(out_k_tsv, sep="\t", index=False)
+                logger.info("Wrote per-k stability table -> %s", out_k_tsv)
+
         from sklearn.cluster import KMeans
-        if int(args.n_clusters) == -1:
-            labels_k, k_chosen = auto_kmeans(
-                X=X_all,
-                random_seed=args.random_seed,
-                min_k=args.auto_min_clusters,
-                max_k=args.auto_max_clusters,
-                sample_size=args.silhouette_sample_size,
-            )
-            labels = labels_k
-            k_if_kmeans = int(k_chosen)
-        else:
-            k_fixed = max(2, min(int(args.n_clusters), X_all.shape[0]))
+
+        if chosen_k_for_kmeans is not None:
+            k_fixed = int(chosen_k_for_kmeans)
             km = KMeans(n_clusters=k_fixed, random_state=args.random_seed, n_init="auto")
             labels = km.fit_predict(X=X_all)
             k_if_kmeans = int(k_fixed)
-        chosen_algo = "kmeans"
+            chosen_algo = "kmeans_bootstrap"
+        else:
+            if int(args.n_clusters) == -1:
+                labels_k, k_chosen = auto_kmeans(
+                    X=X_all,
+                    random_seed=args.random_seed,
+                    min_k=args.auto_min_clusters,
+                    max_k=args.auto_max_clusters,
+                    sample_size=args.silhouette_sample_size,
+                )
+                labels = labels_k
+                k_if_kmeans = int(k_chosen)
+            else:
+                k_fixed = max(2, min(int(args.n_clusters), X_all.shape[0]))
+                km = KMeans(n_clusters=k_fixed, random_state=args.random_seed, n_init="auto")
+                labels = km.fit_predict(X=X_all)
+                k_if_kmeans = int(k_fixed)
+            chosen_algo = "kmeans"
+
         keep_mask = None  # we used all rows
         noise_handling = "n/a"
         # Overall silhouette on full data
@@ -765,6 +1181,7 @@ def main() -> None:
         except SystemExit:
             sil_overall = float("nan")
         silhouette_overall = sil_overall
+
 
     if labels is None:
         logger.error("Clustering failed in all modes.")
@@ -836,13 +1253,18 @@ def main() -> None:
     anchors_df = pd.DataFrame({id_col: ids, "moa": moa, "cluster_id": cl_ids})
     logger.info("Wrote anchors table with %d rows.", anchors_df.shape[0])
     anchors_df = anchors_df[[id_col, "moa", "cluster_id"]]
-    anchors_df = overlay_given_labels(
-                                anchors=anchors_df,
-                                labels_tsv=args.labels_tsv,
-                                id_col=id_col,
-                                labels_id_col=args.labels_id_col,
-                                labels_label_col=args.labels_label_col,
-                            )
+    if args.labels_tsv:
+        anchors_df = overlay_given_labels(
+            anchors=anchors_df,
+            labels_tsv=args.labels_tsv,
+            id_col=id_col,
+            labels_id_col=args.labels_id_col,
+            labels_label_col=args.labels_label_col,
+        )
+        logger.info("Overlayed user labels; %d compounds labelled.", anchors_df.get("is_labelled", pd.Series(dtype=bool)).sum())
+    else:
+        logger.info("No labels_tsv provided; skipping label overlay.")
+
 
     logger.info("Overlayed user labels; %d compounds labelled.", anchors_df["is_labelled"].sum())
 
@@ -867,6 +1289,13 @@ def main() -> None:
         "hdbscan_min_silhouette": float(args.hdbscan_min_silhouette),
         "max_singleton_frac": float(args.max_singleton_frac),
         "random_seed": int(args.random_seed),
+        "bootstrap_k_main": bool(args.bootstrap_k_main),
+        "k_candidates_main": str(args.k_candidates_main),
+        "n_bootstrap_main": int(args.n_bootstrap_main),
+        "subsample_main": float(args.subsample_main),
+        "stability_metric_main": str(args.stability_metric_main),
+        "consensus_linkage_main": str(args.consensus_linkage_main),
+
     }])
     logger.info("Run summary: %s", summary.iloc[0].to_dict())
 

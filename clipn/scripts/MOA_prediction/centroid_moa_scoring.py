@@ -1279,7 +1279,9 @@ def main() -> None:
     
 
     # Aggregate to MOA and choose primary matrix
-    M_cos = agg_over_centroids(mat=S_cos, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg)
+    M_cos = agg_over_centroids(mat=S_cos, moa_list=moa_list, 
+                               moa_to_idx=moa_to_idx,
+                               mode=args.moa_score_agg)
     M_csls = agg_over_centroids(mat=S_csls, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=args.moa_score_agg) if S_csls is not None else None
 
     M_primary, decision_rule_vec = choose_primary_matrix(
