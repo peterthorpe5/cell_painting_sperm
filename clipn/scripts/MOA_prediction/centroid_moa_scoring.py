@@ -320,7 +320,8 @@ def build_moa_centroids(
         - centroid_moas: per-centroid MOA labels (length n_centroids)
     """
     rng = np.random.RandomState(random_seed)
-    id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
+    # id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
+    id_idx = {str(cid): i for i, cid in enumerate(embeddings[id_col].astype(str))}
     # num_cols = embeddings.select_dtypes(include=[np.number]).columns.tolist()
     num_cols = numeric_feature_columns(embeddings)
 
@@ -332,6 +333,7 @@ def build_moa_centroids(
 
     # Collect labelled members per MOA
     labelled = anchors[[id_col, moa_col]].dropna().copy()
+    labelled[id_col] = labelled[id_col].astype(str)
     labelled = labelled[labelled[id_col].isin(id_idx.keys())]
     moa_groups = labelled.groupby(moa_col)
 
@@ -656,6 +658,10 @@ def estimate_fdr_by_anchor_shuffle(
     """
     Permutation FDR by shuffling anchor MOA labels and rebuilding centroids each time.
 
+    Null: keep the *number* of anchors per MOA fixed, but randomise which
+    compounds carry those labels → rebuild centroids → rescore → margins.
+    Permutation FDR by shuffling anchor MOA labels and rebuilding centroids each time.
+
     Parameters
     ----------
     agg_df : pd.DataFrame
@@ -691,42 +697,75 @@ def estimate_fdr_by_anchor_shuffle(
     -------
     Tuple[np.ndarray, np.ndarray]
         (p_values, q_values) aligned to 'ids'.
+
     """
     if rng is None:
         rng = np.random.default_rng()
 
-    # Precompute feature columns once
-    feat_cols = numeric_feature_columns(agg_df)
-    id_to_row = {cid: i for i, cid in enumerate(agg_df[id_col].astype(str))}
     n_compounds = len(ids)
 
-    # Observed step: we expect caller to have already computed p/q margins,
-    # so we just recompute the observed margins here for consistency.
-    # (But the caller can also pass the observed margins to avoid recompute if desired.)
+    # ---- sanity on inputs ---------------------------------------------------
+    if X_queries.shape[0] != n_compounds:
+        logger.warning("[fdr-anchor] X_queries rows (%d) != len(ids) (%d); proceeding with first n rows",
+                       X_queries.shape[0], n_compounds)
+        n_comp = min(X_queries.shape[0], n_compounds)
+        X_queries = X_queries[:n_comp, :]
+        ids = ids[:n_comp]
+        n_compounds = n_comp
 
-    # Helper to compute margins given centroids P and labels
-    def _margins_for(P: np.ndarray, centroid_moas: list[str]) -> np.ndarray:
+    # Optional: quick norm check
+    try:
+        norms = np.linalg.norm(X_queries, axis=1)
+        logger.debug("[fdr-anchor] ||Q|| mean±sd: %.4f ± %.4f", float(norms.mean()), float(norms.std()))
+    except Exception:
+        pass
+
+    # ---- base anchors used for BOTH observed and permutations ---------------
+    anchors_base = anchors_df[[id_col, moa_col]].dropna().copy()
+    # keep only anchors whose ids are present after aggregation
+    id_set = set(agg_df[id_col].astype(str))
+    anchors_base[id_col] = anchors_base[id_col].astype(str)
+    anchors_base = anchors_base[anchors_base[id_col].isin(id_set)]
+
+    # if duplicate ids exist, keep first (avoids double-counting in centroid build)
+    before = len(anchors_base)
+    anchors_base = anchors_base.drop_duplicates(subset=[id_col], keep="first")
+    dups = before - len(anchors_base)
+
+    if anchors_base.empty:
+        logger.warning("[fdr-anchor] no anchors overlap aggregated embeddings; returning p=q=1")
+        return np.ones(n_compounds), np.ones(n_compounds)
+
+    class_counts = anchors_base[moa_col].value_counts().sort_values(ascending=False)
+    logger.info("[fdr-anchor] anchors kept=%d (dropped_dups=%d), MOAs=%d, top sizes=%s",
+                len(anchors_base), dups, class_counts.size, class_counts.head(5).to_dict())
+
+    # ---- helper: compute margins given a centroid set -----------------------
+    def _margins_for(P: np.ndarray, centroid_moas: List[str]) -> np.ndarray:
         if P.size == 0:
             return np.zeros(n_compounds, dtype=float)
+
         # scores
         S_cos = cosine_scores(Q=X_queries, P=P, batch_size=4096)
         S_csls = None
         if use_csls:
-            k_eff = csls_k
-            if k_eff is None or int(k_eff) <= 0:
+            # auto k (as in main): sqrt(#centroids) clipped, then bounded by n_centroids-1
+            if csls_k is None or int(csls_k) <= 0:
                 k_eff = int(np.clip(int(np.sqrt(P.shape[0])), 5, 50))
-            S_csls = csls_scores(Q=X_queries, P=P, k=int(k_eff))
+            else:
+                k_eff = int(csls_k)
+            k_eff = min(k_eff, max(1, P.shape[0] - 1))
+            S_csls = csls_scores(Q=X_queries, P=P, k=k_eff)
 
         # aggregate to MOA
         moa_list, moa_to_idx = build_moa_indexers(centroid_moas=centroid_moas)
         M_cos = agg_over_centroids(mat=S_cos, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=agg_mode)
         M_csls = agg_over_centroids(mat=S_csls, moa_list=moa_list, moa_to_idx=moa_to_idx, mode=agg_mode) if S_csls is not None else None
 
+        # decide and compute margins
         M_primary, _ = choose_primary_matrix(
             M_cos=M_cos, M_csls=M_csls, rule=primary_rule, margin_threshold=float(auto_margin_threshold)
         )
-
-        # margins
         best_idx = np.argmax(M_primary, axis=1)
         best_val = M_primary[np.arange(n_compounds), best_idx]
         tmp = M_primary.copy()
@@ -734,38 +773,46 @@ def estimate_fdr_by_anchor_shuffle(
         runner = np.max(tmp, axis=1)
         return best_val - runner
 
-    # Observed centroids/margins
-    # (We rebuild once with the original anchors to ensure identical path)
-    cent_df_obs, P_obs, centroid_moas_obs = build_moa_centroids(
-        embeddings=agg_df, anchors=anchors_df, id_col=id_col, moa_col=moa_col, **build_kwargs
+    # ---- observed centroids/margins (rebuilt to match the null path) -------
+    _, P_obs, centroid_moas_obs = build_moa_centroids(
+        embeddings=agg_df, anchors=anchors_base, id_col=id_col, moa_col=moa_col, **build_kwargs
     )
+    if P_obs.size == 0:
+        logger.warning("[fdr-anchor] observed build produced 0 centroids; returning p=q=1")
+        return np.ones(n_compounds), np.ones(n_compounds)
+
     observed_margin = _margins_for(P_obs, centroid_moas_obs)
+    if observed_margin.size:
+        q10, q50, q90 = np.quantile(observed_margin, [0.1, 0.5, 0.9])
+        logger.info("[fdr-anchor] observed margins q10/q50/q90: %.4f/%.4f/%.4f", q10, q50, q90)
 
-    if n_compounds > 0:
-        q = np.quantile(observed_margin, [0.1, 0.5, 0.9])
-        logger.info("[fdr] observed margins q10/q50/q90: %.4f/%.4f/%.4f", q[0], q[1], q[2])
-
-    # Permutations
+    # ---- permutations: shuffle anchor labels (preserve class sizes) ---------
     perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
-    anchors_lbl = anchors_df[[id_col, moa_col]].dropna().copy()
-    ids_present = anchors_lbl[id_col].astype(str).isin(id_to_row.keys())
-    anchors_lbl = anchors_lbl.loc[ids_present].copy()
+    # Pre-extract label vector for cheap shuffles
+    base_labels = anchors_base[moa_col].to_numpy()
 
     for b in range(n_permutations):
-        shuffled = anchors_lbl.copy()
-        shuffled[moa_col] = rng.permutation(shuffled[moa_col].values)
-        cent_df_b, P_b, centroid_moas_b = build_moa_centroids(
-            embeddings=agg_df, anchors=shuffled, id_col=id_col, moa_col=moa_col, **build_kwargs
+        shuffled = anchors_base.copy()
+        shuffled[moa_col] = rng.permutation(base_labels)  # preserves class sizes
+        # jitter seed so any k-means sub-centroids differ under the null
+        bk = dict(build_kwargs)
+        bk["random_seed"] = int(rng.integers(0, 2**31 - 1))
+        _, P_b, centroid_moas_b = build_moa_centroids(
+            embeddings=agg_df, anchors=shuffled, id_col=id_col, moa_col=moa_col, **bk
         )
-        perm_margins[:, b] = _margins_for(P_b, centroid_moas_b)
+        perm_margins[:, b] = _margins_for(P_b, centroid_moas_b) if P_b.size else 0.0
 
-    pool_q = np.quantile(perm_margins.ravel(), [0.1, 0.5, 0.9])
-    logger.info("[fdr] perm margins pool q10/q50/q90: %.4f/%.4f/%.4f", pool_q[0], pool_q[1], pool_q[2])
+        if (b + 1) % max(1, n_permutations // 10) == 0:
+            logger.debug("[fdr-anchor] %d/%d permutations", b + 1, n_permutations)
 
-    # p (right-tailed) and BH q
+    pool_q10, pool_q50, pool_q90 = np.quantile(perm_margins.ravel(), [0.1, 0.5, 0.9])
+    logger.info("[fdr-anchor] perm margins pool q10/q50/q90: %.4f/%.4f/%.4f", pool_q10, pool_q50, pool_q90)
+
+    # ---- p (right-tailed) then BH q -----------------------------------------
     pvals = (1.0 + np.sum(perm_margins >= observed_margin[:, None], axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))
     return pvals, qvals
+
 
 
 def estimate_fdr_by_permutation(
@@ -776,6 +823,7 @@ def estimate_fdr_by_permutation(
     agg_mode: str = "max",
     n_permutations: int = 200,
     rng: Optional[np.random.Generator] = None,
+    min_centroids_for_label_perm: int = 2,
     logger: logging.Logger = logging.getLogger(__name__),
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -841,48 +889,64 @@ def estimate_fdr_by_permutation(
     # --- class size diagnostics ---
     counts = np.bincount(proto_to_moa, minlength=n_moas)
     all_ones = (counts.min() == 1 and counts.max() == 1 and counts.size == n_centroids)
+    singleton_moas = np.where(counts == 1)[0]
+    singleton_cols = np.where(np.isin(proto_to_moa, singleton_moas))[0]
+
     logger.info("[fdr] n_compounds=%d, n_centroids=%d, n_moas=%d", n_compounds, n_centroids, n_moas)
     logger.info("[fdr] centroid counts per MOA: min=%d, max=%d, unique=%s",
                 int(counts.min()), int(counts.max()), np.array2string(np.unique(counts)))
-    logger.info("[fdr] null mode: %s",
-                "row-shuffle per centroid (1 centroid/MOA)" if all_ones else "label-permutation (preserve counts)")
+    logger.info(
+        "[fdr] null mode: hybrid → row-shuffle cols for MOAs with < %d centroids, then label-permute preserving counts",
+        int(min_centroids_for_label_perm),
+    )
 
-    # --- permutations ---
+
+    # --- permutations (hybrid null): row-shuffle "thin" MOAs, then label-permute ---
+    # Row-shuffle threshold: MOAs with < this many centroids are considered "thin"
+    # Set to 2 by default (shuffle singleton MOAs). Increase if you want a stronger null.
+    # min_centroids_for_label_perm = 2
+    # Identify MOAs that are too small to move under pure label-permutation
+    # Identify thin MOAs once using the parameter
+    counts = np.bincount(proto_to_moa, minlength=n_moas)
+    thin_moas = np.where(counts < int(min_centroids_for_label_perm))[0]
+    thin_cols = np.where(np.isin(proto_to_moa, thin_moas))[0]
+    logger.info("[fdr] thin threshold=%d, thin_cols=%d/%d",
+                int(min_centroids_for_label_perm), int(thin_cols.size), 
+                int(n_centroids))
+
+
     perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
-    if all_ones:
-        # Degenerate case: permuting labels does nothing → break row association
-        for b in range(n_permutations):
-            S_shuf = np.empty_like(S_primary)
-            for c in range(n_centroids):
-                S_shuf[:, c] = S_primary[rng.permutation(n_compounds), c]
-            # With 1 centroid/MOA, aggregation is effectively identity, but call for consistency
-            M_perm = _aggregate(S_shuf, proto_to_moa)
-            b_idx = np.argmax(M_perm, axis=1)
-            b_val = M_perm[np.arange(n_compounds), b_idx]
-            ttmp = M_perm.copy()
-            ttmp[np.arange(n_compounds), b_idx] = -np.inf
-            r_val = np.max(ttmp, axis=1)
-            perm_margins[:, b] = b_val - r_val
-    else:
-        # General case: permute centroid→MOA labels preserving counts per MOA
-        for b in range(n_permutations):
-            perm_map = np.empty_like(proto_to_moa)
-            order = rng.permutation(n_centroids)
-            start = 0
-            for m, c in enumerate(counts):
-                if c == 0:
-                    continue
-                sel = order[start:start + c]
-                perm_map[sel] = m
-                start += c
-            M_perm = _aggregate(S_primary, perm_map)
-            b_idx = np.argmax(M_perm, axis=1)
-            b_val = M_perm[np.arange(n_compounds), b_idx]
-            ttmp = M_perm.copy()
-            ttmp[np.arange(n_compounds), b_idx] = -np.inf
-            r_val = np.max(ttmp, axis=1)
-            perm_margins[:, b] = b_val - r_val
 
+    for b in range(n_permutations):
+        # Start from the chosen per-centroid score matrix (cosine/CSLS/auto)
+        S_perm = S_primary.copy()
+
+        # 1) Break row-association in "thin" columns only (keeps column-wise distribution)
+        if thin_cols.size > 0:
+            for col in thin_cols:
+                S_perm[:, col] = S_perm[rng.permutation(n_compounds), col]
+
+        # 2) Permute centroid→MOA labels while preserving counts per MOA
+        perm_map = np.empty_like(proto_to_moa)
+        order = rng.permutation(n_centroids)
+        start = 0
+        for m, cnt in enumerate(counts):
+            if cnt == 0:
+                continue
+            sel = order[start:start + cnt]
+            perm_map[sel] = m
+            start += cnt
+
+        # 3) Aggregate to MOA and compute margins for this permutation
+        M_perm = _aggregate(S_perm, perm_map)
+        b_idx = np.argmax(M_perm, axis=1)
+        b_val = M_perm[np.arange(n_compounds), b_idx]
+        ttmp = M_perm.copy()
+        ttmp[np.arange(n_compounds), b_idx] = -np.inf
+        r_val = np.max(ttmp, axis=1)
+        perm_margins[:, b] = b_val - r_val
+
+    # Pool quantiles across all permutations (sanity check)
     pool_q = np.quantile(perm_margins.ravel(), [0.1, 0.5, 0.9])
     logger.info("[fdr] perm margins pool q10/q50/q90: %.4f/%.4f/%.4f", pool_q[0], pool_q[1], pool_q[2])
 
@@ -950,52 +1014,77 @@ def main() -> None:
     - CSLS is computed by default; the decision rule defaults to 'auto'.
     """
     parser = argparse.ArgumentParser(description="Centroid-based MOA scoring (TSV I/O, UK English).")
-    parser.add_argument("--embeddings_tsv", type=str, required=True, help="TSV with embeddings (well- or compound-level).")
-    parser.add_argument("--anchors_tsv", type=str, required=True, help="TSV with anchors: id + MOA.")
-    parser.add_argument("--out_dir", type=str, required=True, help="Directory to write outputs (TSV).")
+    parser.add_argument("--embeddings_tsv", type=str, required=True, 
+                        help="TSV with embeddings (well- or compound-level).")
+    parser.add_argument("--anchors_tsv", type=str, required=True, 
+                        help="TSV with anchors: id + MOA.")
+    parser.add_argument("--out_dir", type=str, required=True, 
+                        help="Directory to write outputs (TSV).")
 
-    parser.add_argument("--id_col", type=str, default="cpd_id", help="Identifier column name (default: cpd_id).")
-    parser.add_argument("--moa_col", type=str, default="moa_final", help="MOA label column in anchors (default: moa_final).")
+    parser.add_argument("--id_col", type=str, default="cpd_id", 
+                        help="Identifier column name (default: cpd_id).")
+    parser.add_argument("--moa_col", type=str, default="moa_final", 
+                        help="MOA label column in anchors (default: moa_final).")
 
-    parser.add_argument("--aggregate_method", type=str, default="median",
+    parser.add_argument("--aggregate_method", 
+                        type=str, 
+                        default="median",
                         choices=["median", "mean", "trimmed_mean", "geometric_median"],
                         help="Replicate aggregation method (default: median).")
-    parser.add_argument("--trimmed_frac", type=float, default=0.1,
+    parser.add_argument("--trimmed_frac", type=float, 
+                        default=0.1,
                         help="Trim fraction for trimmed_mean (default: 0.1).")
 
-    parser.add_argument("--n_centroids_per_moa", type=int, default=1,
+    parser.add_argument("--n_centroids_per_moa", 
+                        type=int, default=1,
                         help="Sub-centroids per MOA (k-means if >1).")
-    parser.add_argument("--centroid_method", type=str, default="median",
-                        choices=["median", "mean"], help="Centroid estimator when n_centroids_per_moa<=1 (default: median).")
-    parser.add_argument("--centroid_shrinkage", type=float, default=0.0,
+    parser.add_argument("--centroid_method", 
+                        type=str, 
+                        default="median",
+                        choices=["median", "mean"], 
+                        help="Centroid estimator when n_centroids_per_moa<=1 (default: median).")
+    parser.add_argument("--centroid_shrinkage", 
+                        type=float, 
+                        default=0.0,
                         help="Shrink centroids towards global mean (0..1).")
-    parser.add_argument("--min_members_per_moa", type=int, default=1,
+    parser.add_argument("--min_members_per_moa", type=int, 
+                        default=1,
                         help="Minimum labelled members needed to form a centroid (default: 1 keeps all).")
-    parser.add_argument("--skip_tiny_moas", action="store_true",
+    parser.add_argument("--skip_tiny_moas",
+                        action="store_true",
                         help="If set, MOAs with < min_members_per_moa are skipped (no centroid built).")
-    parser.add_argument("--adaptive_shrinkage", action="store_true",
+    parser.add_argument("--adaptive_shrinkage", 
+                        action="store_true",
                         help=("If set, adds size-aware shrinkage for small centroids: "
                               "alpha_eff = centroid_shrinkage + min(adaptive_shrinkage_max, "
                               "adaptive_shrinkage_c / n_members)."))
-    parser.add_argument("--adaptive_shrinkage_c", type=float, default=0.5,
+    parser.add_argument("--adaptive_shrinkage_c", type=float, 
+                        default=0.5,
                         help="C constant for size-aware shrinkage term (default: 0.5).")
-    parser.add_argument("--adaptive_shrinkage_max", type=float, default=0.3,
+    parser.add_argument("--adaptive_shrinkage_max", type=float, 
+                        default=0.3,
                         help="Maximum extra shrinkage due to size-aware term (default: 0.3).")
 
     parser.add_argument("--moa_score_agg", type=str, default="mean",
                         choices=["max", "mean"], help="Aggregate centroid→MOA score (default: mean).")
+    grp_csls = parser.add_mutually_exclusive_group()
+    grp_csls.add_argument("--use_csls", dest="use_csls", 
+                          action="store_true", 
+                          help="Also compute CSLS scores (in addition to cosine).")
+    grp_csls.add_argument("--no_csls", dest="use_csls", 
+                          action="store_false")
+    parser.set_defaults(use_csls=True)
 
-    parser.add_argument("--use_csls", action="store_true",
-                        help="Also compute CSLS scores (in addition to cosine).")
-    parser.set_defaults(use_csls=True)  # CSLS ON by default
 
     parser.add_argument("--csls_k", type=int, default=-1,
                         help="Neighbourhood size for CSLS. Use -1 to auto-select k≈sqrt(#centroids), clipped to [5, 50].")
 
-    parser.add_argument("--primary_score", type=str, default="auto",
+    parser.add_argument("--primary_score", type=str, 
+                        default="auto",
                         choices=["cosine", "csls", "auto"],
                         help="Which score decides the top MOA. 'auto' uses cosine unless the cosine margin < threshold.")
-    parser.add_argument("--auto_margin_threshold", type=float, default=0.02,
+    parser.add_argument("--auto_margin_threshold", type=float, 
+                        default=0.02,
                         help="When --primary_score auto: if cosine margin < this, switch to CSLS for the decision.")
 
 
@@ -1017,7 +1106,8 @@ def main() -> None:
     parser.set_defaults(exclude_anchors_from_queries=True)  # <— default ON
 
 
-    parser.add_argument("--annotate_anchors", action="store_true",
+    parser.add_argument("--annotate_anchors", 
+                        action="store_true",
                         help="Annotate outputs with is_anchor/anchor_moa and potential_inflation flags.")
     parser.set_defaults(annotate_anchors=True)
 
@@ -1037,11 +1127,18 @@ def main() -> None:
             "'centroid_label' shuffles centroid→MOA labels only (original behaviour).")
     )
 
-
-    parser.add_argument("--n_permutations", type=int, default=1000,
+    parser.add_argument("--n_permutations", type=int, 
+                        default=1000,
                         help="Permutations for FDR (0 to disable). Default: 1000.")
-    parser.add_argument("--random_seed", type=int, default=0,
+    parser.add_argument("--random_seed", type=int, 
+                        default=0,
                         help="Random seed for reproducibility (default: 0).")
+    parser.add_argument("--min_centroids_for_label_perm",
+                        type=int, 
+                        default=2,
+                        help="MOAs with < this many centroids are row-shuffled before label-permutation (hybrid null)."
+                        )
+
 
     args = parser.parse_args()
 
@@ -1087,6 +1184,9 @@ def main() -> None:
     if args.moa_col not in anchors.columns:
         raise ValueError(f"Anchors file must contain MOA column '{args.moa_col}'.")
     logger.info(f"Loaded {anchors.shape[0]} anchors from {args.anchors_tsv}.")
+    anchors[args.moa_col] = anchors[args.moa_col].replace({"nan": np.nan, "NaN": np.nan})
+
+    
     # Anchor lookup for annotation
     anchor_map: Dict[str, str] = dict(
         anchors[[id_col, args.moa_col]]
@@ -1097,7 +1197,6 @@ def main() -> None:
     logger.info(f"Found {len(anchor_map)} anchors with non-missing MOA labels.")
 
     # Build centroids
-    anchors[args.moa_col] = anchors[args.moa_col].replace({"nan": np.nan, "NaN": np.nan})
 
     centroids_df, P, centroid_moas = build_moa_centroids(
         embeddings=agg,
@@ -1330,49 +1429,52 @@ def main() -> None:
 
 
     # Optional permutation FDR (mirror the aggregator used for decisions)
+    # after S_primary, ids, X, centroid_moas, etc. are ready
     if args.n_permutations > 0:
+        logger.info("Estimating FDR with %d permutations using '%s' null model.", 
+                    args.n_permutations, args.fdr_mode)
         if args.fdr_mode == "anchor_shuffle":
             build_kwargs = dict(
-                n_centroids_per_moa=args.n_centroids_per_moa,
-                centroid_method=args.centroid_method,
-                centroid_shrinkage=args.centroid_shrinkage,
-                min_members_per_moa=args.min_members_per_moa,
-                skip_tiny_moas=args.skip_tiny_moas,
-                adaptive_shrinkage=args.adaptive_shrinkage,
-                adaptive_shrinkage_c=args.adaptive_shrinkage_c,
-                adaptive_shrinkage_max=args.adaptive_shrinkage_max,
-                random_seed=args.random_seed,
-            )
+                        n_centroids_per_moa=args.n_centroids_per_moa,
+                        centroid_method=args.centroid_method,
+                        centroid_shrinkage=args.centroid_shrinkage,
+                        min_members_per_moa=args.min_members_per_moa,
+                        skip_tiny_moas=args.skip_tiny_moas,
+                        adaptive_shrinkage=args.adaptive_shrinkage,
+                        adaptive_shrinkage_c=args.adaptive_shrinkage_c,
+                        adaptive_shrinkage_max=args.adaptive_shrinkage_max,
+                        random_seed=args.random_seed,
+                    )
             pvals_all, qvals_all = estimate_fdr_by_anchor_shuffle(
-                agg_df=agg,
-                anchors_df=anchors,
-                id_col=id_col,
-                moa_col=args.moa_col,
-                build_kwargs=build_kwargs,
-                X_queries=X,
-                ids=ids,
-                use_csls=bool(args.use_csls),
-                csls_k=int(args.csls_k),
-                agg_mode=args.moa_score_agg,
-                primary_rule=args.primary_score,
-                auto_margin_threshold=float(args.auto_margin_threshold),
-                n_permutations=int(args.n_permutations),
-                rng=np.random.default_rng(args.random_seed),
-                logger=logger,
+                            agg_df=agg, anchors_df=anchors, 
+                            id_col=id_col, moa_col=args.moa_col,
+                            build_kwargs=build_kwargs, 
+                            X_queries=X, ids=ids,
+                            use_csls=args.use_csls, 
+                            csls_k=args.csls_k,
+                            agg_mode=args.moa_score_agg, 
+                            primary_rule=args.primary_score,
+                            auto_margin_threshold=args.auto_margin_threshold,
+                            n_permutations=args.n_permutations,
+                            rng=np.random.default_rng(args.random_seed), 
+                            logger=logger
             )
-        else:
-            # centroid-label permutation (kept for completeness)
+        else:  # "centroid_label"
             moa_index_map = {m: i for i, m in enumerate(moa_list)}
             proto_to_moa_idx = np.array([moa_index_map[m] for m in centroid_moas], dtype=int)
             pvals_all, qvals_all = estimate_fdr_by_permutation(
-                S_primary=S_primary,
-                proto_to_moa=proto_to_moa_idx,
-                n_moas=len(moa_list),
-                agg_mode=args.moa_score_agg,
-                n_permutations=args.n_permutations,
-                rng=np.random.default_rng(args.random_seed),
-                logger=logger,
-            )
+                                        S_primary=S_primary, 
+                                        proto_to_moa=proto_to_moa_idx, 
+                                        n_moas=len(moa_list),
+                                        agg_mode=args.moa_score_agg, 
+                                        n_permutations=args.n_permutations,
+                                        rng=np.random.default_rng(args.random_seed),
+                                        min_centroids_for_label_perm=args.min_centroids_for_label_perm, 
+                                        logger=logger
+                                    )
+
+
+
 
 
         # Attach p/q by id, then LEFT-merge onto predictions subset
