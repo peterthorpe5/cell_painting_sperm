@@ -815,7 +815,7 @@ def estimate_fdr_by_permutation(
     n_compounds, n_centroids = S_primary.shape
     proto_to_moa = np.asarray(proto_to_moa, dtype=int)
 
-    # Aggregator from centroid-level to MOA-level under a mapping
+    # --- helper: aggregate centroid columns into MOAs under a mapping ---
     def _aggregate(mat: np.ndarray, mapping: np.ndarray) -> np.ndarray:
         out = np.full((n_compounds, n_moas), -np.inf, dtype=float)
         for m in range(n_moas):
@@ -823,13 +823,10 @@ def estimate_fdr_by_permutation(
             if cols.size == 0:
                 continue
             sub = mat[:, cols]
-            if agg_mode == "mean":
-                out[:, m] = sub.mean(axis=1)
-            else:
-                out[:, m] = sub.max(axis=1)
+            out[:, m] = sub.mean(axis=1) if agg_mode == "mean" else sub.max(axis=1)
         return out
 
-    # Observed margins
+    # --- observed margins ---
     M_obs = _aggregate(S_primary, proto_to_moa)
     best_idx = np.argmax(M_obs, axis=1)
     best_val = M_obs[np.arange(n_compounds), best_idx]
@@ -841,22 +838,34 @@ def estimate_fdr_by_permutation(
         q = np.quantile(observed_margin, [0.1, 0.5, 0.9])
         logger.info("[fdr] observed margins q10/q50/q90: %.4f/%.4f/%.4f", q[0], q[1], q[2])
 
-    # Determine degeneracy: all MOAs have exactly one centroid
+    # --- class size diagnostics ---
     counts = np.bincount(proto_to_moa, minlength=n_moas)
-    all_ones = counts.min() == 1 and counts.max() == 1 and counts.size == n_centroids
+    all_ones = (counts.min() == 1 and counts.max() == 1 and counts.size == n_centroids)
+    logger.info("[fdr] n_compounds=%d, n_centroids=%d, n_moas=%d", n_compounds, n_centroids, n_moas)
+    logger.info("[fdr] centroid counts per MOA: min=%d, max=%d, unique=%s",
+                int(counts.min()), int(counts.max()), np.array2string(np.unique(counts)))
+    logger.info("[fdr] null mode: %s",
+                "row-shuffle per centroid (1 centroid/MOA)" if all_ones else "label-permutation (preserve counts)")
 
+    # --- permutations ---
     perm_margins = np.empty((n_compounds, n_permutations), dtype=float)
-
-    for b in range(n_permutations):
-        if all_ones:
-            # Degenerate case: also disrupt row alignment (column-wise row shuffles)
+    if all_ones:
+        # Degenerate case: permuting labels does nothing → break row association
+        for b in range(n_permutations):
             S_shuf = np.empty_like(S_primary)
             for c in range(n_centroids):
                 S_shuf[:, c] = S_primary[rng.permutation(n_compounds), c]
-            # Mapping can be left as-is or randomly permuted; both equivalent when counts are all ones
+            # With 1 centroid/MOA, aggregation is effectively identity, but call for consistency
             M_perm = _aggregate(S_shuf, proto_to_moa)
-        else:
-            # Non-degenerate: shuffle centroid→MOA labels preserving counts
+            b_idx = np.argmax(M_perm, axis=1)
+            b_val = M_perm[np.arange(n_compounds), b_idx]
+            ttmp = M_perm.copy()
+            ttmp[np.arange(n_compounds), b_idx] = -np.inf
+            r_val = np.max(ttmp, axis=1)
+            perm_margins[:, b] = b_val - r_val
+    else:
+        # General case: permute centroid→MOA labels preserving counts per MOA
+        for b in range(n_permutations):
             perm_map = np.empty_like(proto_to_moa)
             order = rng.permutation(n_centroids)
             start = 0
@@ -867,19 +876,17 @@ def estimate_fdr_by_permutation(
                 perm_map[sel] = m
                 start += c
             M_perm = _aggregate(S_primary, perm_map)
+            b_idx = np.argmax(M_perm, axis=1)
+            b_val = M_perm[np.arange(n_compounds), b_idx]
+            ttmp = M_perm.copy()
+            ttmp[np.arange(n_compounds), b_idx] = -np.inf
+            r_val = np.max(ttmp, axis=1)
+            perm_margins[:, b] = b_val - r_val
 
-        b_idx = np.argmax(M_perm, axis=1)
-        b_val = M_perm[np.arange(n_compounds), b_idx]
-        ttmp = M_perm.copy()
-        ttmp[np.arange(n_compounds), b_idx] = -np.inf
-        r_val = np.max(ttmp, axis=1)
-        perm_margins[:, b] = b_val - r_val
-
-    # Log pool quantiles after we actually filled the permutations
     pool_q = np.quantile(perm_margins.ravel(), [0.1, 0.5, 0.9])
     logger.info("[fdr] perm margins pool q10/q50/q90: %.4f/%.4f/%.4f", pool_q[0], pool_q[1], pool_q[2])
 
-    # p (right-tailed) and BH q
+    # Right-tailed p; then BH q
     pvals = (1.0 + np.sum(perm_margins >= observed_margin[:, None], axis=1)) / (n_permutations + 1.0)
     qvals = benjamini_hochberg_q(pvals=pvals.astype(float))
     return pvals, qvals
