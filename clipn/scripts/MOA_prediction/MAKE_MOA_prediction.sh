@@ -1,6 +1,7 @@
 
 
 # A) Make pseudo-anchors by clustering compounds (K-means; auto-k ≈ √n)
+
 python make_pseudo_anchors.py \
   --embeddings_tsv ./STB_vs_mitotox_integrate_all_E150_L148/post_clipn/STB_vs_mitotox_integrate_all_E150_L148_decoded.tsv \
   --out_anchors_tsv pseudo_anchors.tsv \
@@ -12,7 +13,15 @@ python make_pseudo_anchors.py \
   --n_clusters -1 \
   --auto_min_clusters 8 \
   --auto_max_clusters 64 \
-  --random_seed 42
+  --random_seed 42 \
+  --bootstrap_k_main \
+  --k_candidates_main "8,12,16,24,32" \
+  --n_bootstrap_main 100 \
+  --subsample_main 0.8 \
+  --stability_metric_main consensus_silhouette \
+  --consensus_linkage_main average \
+  --consensus_pac_limits "0.1,0.9" \
+  --out_k_selection_tsv anchors_pseudo_k_selection.tsv
 
 # B) Score compounds (cosine + CSLS on; auto primary; adaptive shrinkage for small-n)
 python centroid_moa_scoring.py \

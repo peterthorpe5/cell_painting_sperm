@@ -821,6 +821,12 @@ def bootstrap_k_selection_kmeans(
     random_seed : int
         Random seed.
 
+    pac_low : float
+        Lower threshold for PAC (default 0.1).
+    pac_high : float
+        Upper threshold for PAC (default 0.9).
+
+
     Returns
     -------
     tuple[int, pd.DataFrame, dict[int, np.ndarray]]
@@ -868,11 +874,6 @@ def bootstrap_k_selection_kmeans(
 
         c_sil = _consensus_silhouette(consensus=C, labels=lab_cons)
         mean_ari = _mean_ari_between_partitions(labels_runs=labels_runs)
-
-        try:
-            low_s, high_s = map(float, [])
-        except Exception:
-            pass  # will set later outside
 
         pac = _pac_score(consensus=C, low=pac_low, high=pac_high)
 
@@ -1151,8 +1152,8 @@ def main() -> None:
                     per_k_table.to_csv(out_k_tsv, sep="\t", index=False)
                     logger.info("Wrote per-k stability table -> %s", out_k_tsv)
 
-# Record for summary
-out_k_selection_tsv_summary = out_k_tsv
+                # Record for summary
+                out_k_selection_tsv_summary = out_k_tsv
 
         from sklearn.cluster import KMeans
 

@@ -258,6 +258,250 @@ def aggregate_compounds(
     return out[[id_col] + num_cols]
 
 
+def _parse_k_candidates_local(*, text: str, n_max: int) -> list[int]:
+    """Parse candidate k values for per-MOA subclustering.
+
+    Accepts a comma-separated string and returns a validated, unique, sorted
+    list of integers within [1, n_max].
+
+    Args:
+        text: Comma-separated candidate values, e.g. "1,2,3,4".
+        n_max: Upper bound allowed for k (inclusive).
+
+    Returns:
+        A sorted list of unique integers in the range [1, n_max].
+    """
+    ks = []
+    for tok in str(text).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            k = int(tok)
+        except ValueError:
+            continue
+        if 1 <= k <= max(1, n_max):
+            ks.append(k)
+    ks = sorted(set(ks))
+    if not ks:
+        ks = [1] if n_max >= 1 else []
+    return ks
+
+
+def _consensus_matrix_from_labels_local(labels_runs: list[np.ndarray]) -> np.ndarray:
+    """Build a consensus (co-association) matrix from repeated labelings.
+
+    Each entry (i, j) is the fraction of runs in which samples i and j share
+    the same cluster. Diagonal entries are set to 1.0.
+
+    Args:
+        labels_runs: A list of integer label arrays, each of shape (N,).
+
+    Returns:
+        An (N, N) float32 consensus matrix with values in [0, 1].
+
+    Raises:
+        ValueError: If the list is empty or label lengths are inconsistent.
+    """
+    if not labels_runs:
+        raise ValueError("labels_runs is empty.")
+    N = int(labels_runs[0].shape[0])
+    M = np.zeros((N, N), dtype=np.float32)
+    for lab in labels_runs:
+        if lab.shape[0] != N:
+            raise ValueError("All label arrays must have the same length.")
+        eq = (lab[:, None] == lab[None, :])
+        M += eq.astype(np.float32)
+    M /= float(len(labels_runs))
+    np.fill_diagonal(M, 1.0)
+    return M
+
+
+def _consensus_partition_local(consensus: np.ndarray, n_clusters: int,
+                               linkage: str = "average") -> np.ndarray:
+    """Partition a consensus matrix into clusters via agglomerative clustering.
+
+    Uses the dissimilarity D = 1 - consensus. For 'ward' linkage, clusters are
+    derived directly from the consensus as features.
+
+    Args:
+        consensus: (N, N) consensus similarity matrix in [0, 1].
+        n_clusters: Number of clusters to extract.
+        linkage: Linkage strategy: "average", "complete", "single", or "ward".
+
+    Returns:
+        Integer labels of shape (N,).
+    """
+    from sklearn.cluster import AgglomerativeClustering
+    D = 1.0 - np.clip(consensus, 0.0, 1.0)
+    np.fill_diagonal(D, 0.0)
+    if linkage == "ward":
+        X_feat = consensus
+        model = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
+        lab = model.fit_predict(X_feat)
+    else:
+        model = AgglomerativeClustering(
+            n_clusters=n_clusters, affinity="precomputed", linkage=linkage
+        )
+        lab = model.fit_predict(D)
+    return lab.astype(int)
+
+
+def _consensus_silhouette_local(consensus: np.ndarray, labels: np.ndarray) -> float:
+    """Compute silhouette on the consensus dissimilarity (1 - consensus).
+
+    Returns NaN if fewer than two non-singleton clusters exist.
+
+    Args:
+        consensus: (N, N) consensus similarity matrix in [0, 1].
+        labels: Integer labels of shape (N,).
+
+    Returns:
+        Mean silhouette score (float) or NaN if undefined.
+    """
+    try:
+        from sklearn.metrics import silhouette_score
+    except Exception:
+        return float("nan")
+    uniq, counts = np.unique(labels, return_counts=True)
+    if (counts >= 2).sum() < 2:
+        return float("nan")
+    D = 1.0 - np.clip(consensus, 0.0, 1.0)
+    np.fill_diagonal(D, 0.0)
+    try:
+        return float(silhouette_score(X=D, labels=labels, metric="precomputed"))
+    except Exception:
+        return float("nan")
+
+
+def _mean_ari_local(labels_runs: list[np.ndarray]) -> float:
+    """Compute mean pairwise Adjusted Rand Index across labelings.
+
+    Args:
+        labels_runs: A list of integer label arrays, each of shape (N,).
+
+    Returns:
+        Mean ARI across all unique pairs, or NaN if fewer than two runs.
+    """
+    if len(labels_runs) < 2:
+        return float("nan")
+    try:
+        from sklearn.metrics import adjusted_rand_score
+    except Exception:
+        return float("nan")
+    s, m = 0.0, 0
+    for i in range(len(labels_runs)):
+        for j in range(i + 1, len(labels_runs)):
+            s += float(adjusted_rand_score(labels_runs[i], labels_runs[j]))
+            m += 1
+    return (s / m) if m else float("nan")
+
+
+def _pac_local(consensus: np.ndarray, low: float = 0.1, high: float = 0.9) -> float:
+    """Compute the Proportion of Ambiguous Clustering (PAC).
+
+    PAC is the fraction of off-diagonal consensus entries within (low, high).
+    Lower values indicate more stable clustering.
+
+    Args:
+        consensus: (N, N) consensus similarity matrix in [0, 1].
+        low: Lower ambiguity threshold (exclusive).
+        high: Upper ambiguity threshold (exclusive).
+
+    Returns:
+        PAC score in [0, 1], or NaN if undefined.
+    """
+    if consensus.size == 0:
+        return float("nan")
+    C = consensus.copy()
+    np.fill_diagonal(C, np.nan)
+    amb = (C > low) & (C < high)
+    denom = np.isfinite(C).sum()
+    return float(np.nan_to_num(amb, nan=0.0).sum() / denom) if denom else float("nan")
+
+
+def _bootstrap_pick_k_inside_moa(
+    X_m: np.ndarray,
+    k_list: list[int],
+    n_bootstrap: int,
+    subsample_frac: float,
+    stability_metric: str,
+    consensus_linkage: str,
+    random_seed: int,
+    pac_low: float = 0.1,
+    pac_high: float = 0.9,
+):
+    """Select k (number of sub-centroids) for a given MOA by bootstrap stability.
+
+    Each replicate fits KMeans on a subsample (size ~ subsample_frac * N), then
+    predicts labels for all N members so label arrays are aligned. Stability is
+    scored via consensus matrix metrics.
+
+    Args:
+        X_m: (N, D) L2-normalised embeddings for the MOA.
+        k_list: Candidate k values; integers in [1, N].
+        n_bootstrap: Number of bootstrap replicates per k.
+        subsample_frac: Fraction of rows used to fit KMeans per replicate.
+        stability_metric: One of {"consensus_silhouette", "mean_ari", "pac"}.
+        consensus_linkage: Linkage used to derive a consensus partition.
+        random_seed: Base RNG seed for reproducibility.
+        pac_low: Lower PAC threshold (exclusive).
+        pac_high: Upper PAC threshold (exclusive).
+
+    Returns:
+        A tuple (best_k, table_df) where:
+            best_k: The selected k under the chosen stability metric.
+            table_df: Per-k DataFrame with stability metrics.
+    """
+    from sklearn.cluster import KMeans
+    rng = np.random.default_rng(random_seed)
+    N = X_m.shape[0]
+    k_list = [k for k in k_list if 1 <= k <= N]
+    results = []
+    for k in k_list:
+        if k == 1:
+            labels_runs = [np.zeros(N, dtype=int)] * max(2, n_bootstrap // 5)
+        else:
+            labels_runs = []
+            for _ in range(n_bootstrap):
+                m = max(2 * k, int(np.round(subsample_frac * N)))
+                m = int(np.clip(m, k, N))
+                idx_fit = rng.choice(N, size=m, replace=False)
+                seed_b = int(rng.integers(0, 2**32 - 1))
+                km = KMeans(n_clusters=k, random_state=seed_b, n_init="auto")
+                km.fit(X_m[idx_fit, :])
+                lab_all = km.predict(X_m)
+                labels_runs.append(lab_all.astype(int))
+
+        C = _consensus_matrix_from_labels_local(labels_runs)
+        try:
+            lab_cons = _consensus_partition_local(C, n_clusters=k, linkage=consensus_linkage)
+        except Exception:
+            lab_cons = labels_runs[0]
+
+        c_sil = _consensus_silhouette_local(C, lab_cons)
+        mean_ari = _mean_ari_local(labels_runs)
+        pac = _pac_local(C, low=pac_low, high=pac_high)
+
+        results.append({
+            "k": int(k),
+            "stability_consensus_silhouette": float(c_sil),
+            "stability_mean_ari": float(mean_ari),
+            "stability_pac": float(pac),
+        })
+
+    tab = pd.DataFrame(results).sort_values("k").reset_index(drop=True)
+    if stability_metric == "consensus_silhouette":
+        tab["_rank"] = (-tab["stability_consensus_silhouette"], tab["k"])
+    elif stability_metric == "mean_ari":
+        tab["_rank"] = (-tab["stability_mean_ari"], tab["k"])
+    else:
+        tab["_rank"] = (tab["stability_pac"], tab["k"])
+    tab = tab.sort_values("_rank").drop(columns=["_rank"]).reset_index(drop=True)
+    best_k = int(tab.iloc[0]["k"])
+    return best_k, tab
+
+
 def build_moa_centroids(
     *,
     embeddings: pd.DataFrame,
@@ -273,162 +517,298 @@ def build_moa_centroids(
     adaptive_shrinkage_c: float = 0.5,
     adaptive_shrinkage_max: float = 0.3,
     random_seed: int = 0,
+    # Auto-k selection inside each MOA
+    bootstrap_k_moa: bool = False,
+    k_candidates_moa: str = "1,2,3,4",
+    n_bootstrap_moa: int = 50,
+    subsample_moa: float = 0.8,
+    stability_metric_moa: str = "consensus_silhouette",
+    consensus_linkage_moa: str = "average",
+    consensus_pac_limits_moa: str = "0.1,0.9",
 ) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
     """
-    Build one or more centroids per MOA, with optional minimum-members gate
-    and size-aware (adaptive) shrinkage for small-n centroids.
+    Build one or more centroids per MOA with optional shrinkage and per-MOA
+    k-selection.
+
+    The function:
+      1) L2-normalises embeddings,
+      2) collects labelled members per MOA from `anchors`,
+      3) for each MOA, either makes a single prototype (median/mean) or,
+         when `n_centroids_per_moa > 1` or `== -1`, splits into k-means
+         sub-centroids (k fixed or auto-picked by bootstrap stability),
+      4) applies optional size-aware shrinkage towards the global mean,
+      5) returns a summary table, the centroid matrix P (L2-normalised rows),
+         and the per-centroid MOA labels.
 
     Parameters
     ----------
-    embeddings : pd.DataFrame
-        Aggregated compound embeddings (one row per id).
-    anchors : pd.DataFrame
+    embeddings
+        Aggregated compound embeddings (one row per `id_col`).
+    anchors
         Table with columns [id_col, moa_col] giving labelled anchor compounds.
-    id_col : str
+        Only anchors whose `id_col` appear in `embeddings` are used.
+    id_col
         Identifier column name.
-    moa_col : str
+    moa_col
         MOA label column name.
-    n_centroids_per_moa : int, optional
-        Number of sub-centroids per MOA (k-means within each MOA if >1),
-        by default 1.
-    centroid_method : str, optional
-        'median' or 'mean' when n_centroids_per_moa == 1, by default 'median'.
-    centroid_shrinkage : float, optional
-        Baseline shrinkage towards the global mean (0..1), by default 0.0.
-    min_members_per_moa : int, optional
-        Minimum labelled members to form a centroid, by default 1.
-    skip_tiny_moas : bool, optional
-        If True, MOAs with < min_members_per_moa are skipped; otherwise they
-        are kept, but may be stabilised via adaptive shrinkage if enabled.
-    adaptive_shrinkage : bool, optional
-        If True, add a size-aware term alpha_add = min(adaptive_shrinkage_max,
-        adaptive_shrinkage_c / n_members). Effective alpha is clamped to [0, 1].
-    adaptive_shrinkage_c : float, optional
-        C constant for the size-aware term (default 0.5).
-    adaptive_shrinkage_max : float, optional
-        Maximum size-aware addition (default 0.3).
-    random_seed : int, optional
-        Random seed for subclustering, by default 0.
+    n_centroids_per_moa
+        - If > 1, use k-means within each MOA to create sub-centroids.
+        - If 1, use a single centroid per MOA (median/mean).
+        - If -1, auto-select k per MOA (see bootstrap args below).
+    centroid_method
+        "median" or "mean" (when using a single centroid or aggregating
+        points inside each k-means sub-cluster).
+    centroid_shrinkage
+        Baseline shrinkage alpha in [0, 1] towards the global mean direction.
+    min_members_per_moa
+        Minimum labelled members required to *keep* a centroid (or sub-centroid)
+        when `skip_tiny_moas=True`. Sub-clusters smaller than this are skipped.
+    skip_tiny_moas
+        If True, skip MOAs (and sub-clusters) with fewer than `min_members_per_moa`.
+    adaptive_shrinkage
+        If True, add a size-aware term: alpha_add =
+        min(adaptive_shrinkage_max, adaptive_shrinkage_c / n_members).
+        The effective alpha is clamped to [0, 1].
+    adaptive_shrinkage_c
+        C constant for the size-aware term.
+    adaptive_shrinkage_max
+        Maximum additional shrinkage contributed by the size-aware term.
+    random_seed
+        RNG seed for reproducibility of k-means when used.
+
+    Auto-k selection (used when n_centroids_per_moa == -1)
+    ------------------------------------------------------
+    bootstrap_k_moa
+        If True, pick k per MOA by bootstrap/consensus stability; otherwise use
+        a safe fallback that prefers ≥2 sub-centroids when feasible.
+    k_candidates_moa
+        Comma-separated candidate k values (e.g., "1,2,3,4").
+    n_bootstrap_moa
+        Number of bootstrap replicates per k.
+    subsample_moa
+        Fraction of MOA members used to FIT KMeans in each replicate (predict on all).
+    stability_metric_moa
+        One of {"consensus_silhouette", "mean_ari", "pac"}.
+    consensus_linkage_moa
+        Linkage for consensus clustering ("average", "complete", "single", "ward").
+    consensus_pac_limits_moa
+        PAC low,high thresholds as "low,high" (used when stability_metric_moa == "pac").
 
     Returns
     -------
-    Tuple[pd.DataFrame, np.ndarray, List[str]]
-        (centroids_summary_df, P_matrix, centroid_moas)
-        - centroids_summary_df: columns [moa, centroid_index, n_members,
-          method, shrinkage_effective]
-        - P_matrix: centroid matrix (n_centroids x d), L2-normalised
-        - centroid_moas: per-centroid MOA labels (length n_centroids)
+    (summary_df, P, centroid_moas)
+        summary_df : pd.DataFrame
+            Columns: ["moa", "centroid_index", "n_members",
+                      "method", "shrinkage_effective", "chosen_k?" optional]
+            Also carries an attribute `_per_moa_k_tables` with per-MOA
+            diagnostics tables when bootstrap k-selection is used.
+        P : np.ndarray
+            Centroid matrix of shape (n_centroids, d), rows L2-normalised.
+        centroid_moas : list[str]
+            Per-centroid MOA labels (length n_centroids).
     """
     rng = np.random.RandomState(random_seed)
-    # id_idx = {cid: i for i, cid in enumerate(embeddings[id_col].tolist())}
-    id_idx = {str(cid): i for i, cid in enumerate(embeddings[id_col].astype(str))}
-    # num_cols = embeddings.select_dtypes(include=[np.number]).columns.tolist()
-    num_cols = numeric_feature_columns(embeddings)
 
+    # Resolve numeric feature columns and normalise the full matrix once.
+    num_cols = numeric_feature_columns(embeddings)
     X_all = l2_normalise(X=embeddings[num_cols].to_numpy())
 
-    # Global mean direction for optional shrinkage
+    # Global mean direction for (optional) shrinkage.
     gmean = X_all.mean(axis=0)
-    gmean = gmean / np.linalg.norm(gmean) if np.linalg.norm(gmean) > 0 else gmean
+    gnorm = np.linalg.norm(gmean)
+    if gnorm > 0:
+        gmean = gmean / gnorm
 
-    # Collect labelled members per MOA
+    # Keep only anchors that are present in embeddings.
+    id_to_row = {str(cid): i for i, cid in enumerate(embeddings[id_col].astype(str))}
     labelled = anchors[[id_col, moa_col]].dropna().copy()
     labelled[id_col] = labelled[id_col].astype(str)
-    labelled = labelled[labelled[id_col].isin(id_idx.keys())]
+    labelled = labelled[labelled[id_col].isin(id_to_row.keys())]
+
+    # Group labelled members by MOA.
     moa_groups = labelled.groupby(moa_col)
 
-    def effective_alpha(n_members: int) -> float:
+    # Parse PAC thresholds once for the whole run.
+    try:
+        pac_low, pac_high = map(float, str(consensus_pac_limits_moa).split(","))
+    except Exception:
+        pac_low, pac_high = 0.1, 0.9
+
+    def _effective_alpha(n_members: int) -> float:
         """Combine baseline and optional size-aware shrinkage; clamp to [0, 1]."""
         alpha = float(centroid_shrinkage)
         if adaptive_shrinkage and n_members > 0:
-            alpha += min(float(adaptive_shrinkage_max), float(adaptive_shrinkage_c) / float(n_members))
+            alpha += min(float(adaptive_shrinkage_max),
+                         float(adaptive_shrinkage_c) / float(n_members))
         return float(min(1.0, max(0.0, alpha)))
 
     P_list: List[np.ndarray] = []
     centroid_moas: List[str] = []
     summary_rows: List[Dict[str, object]] = []
+    per_moa_k_tables: List[pd.DataFrame] = []
+    chosen_k_by_moa: List[Tuple[str, int]] = []
 
     for moa, sub in moa_groups:
-        idxs = [id_idx[c] for c in sub[id_col].tolist()]
+        idxs = [id_to_row[c] for c in sub[id_col].tolist()]
         X_m = X_all[idxs, :]
         n_members_moa = int(X_m.shape[0])
 
-        # Tiny MOA gate
+        # Tiny MOA gate (optional).
         if n_members_moa < int(min_members_per_moa) and bool(skip_tiny_moas):
             summary_rows.append(
-                {"moa": moa, "centroid_index": -1, "n_members": n_members_moa,
-                 "method": "skipped_tiny", "shrinkage_effective": 0.0}
+                {
+                    "moa": moa,
+                    "centroid_index": -1,
+                    "n_members": n_members_moa,
+                    "method": "skipped_tiny",
+                    "shrinkage_effective": 0.0,
+                }
             )
             continue
 
+        # Single-centroid path (or too few points to split safely).
         if n_centroids_per_moa <= 1 or X_m.shape[0] <= 2:
-            if centroid_method == "median":
-                proto = np.median(X_m, axis=0)
-            elif centroid_method == "mean":
-                proto = np.mean(X_m, axis=0)
-            else:
-                raise ValueError(f"Unknown centroid_method '{centroid_method}'")
-
-            alpha = effective_alpha(n_members=n_members_moa)
+            proto = np.median(X_m, axis=0) if centroid_method == "median" else np.mean(X_m, axis=0)
+            alpha = _effective_alpha(n_members=n_members_moa)
             if alpha > 0:
                 proto = (1 - alpha) * proto + alpha * gmean
-            proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
+
+            norm = np.linalg.norm(proto)
+            if norm > 0:
+                proto = proto / norm
 
             P_list.append(proto)
             centroid_moas.append(str(moa))
             summary_rows.append(
-                {"moa": moa, "centroid_index": 0, "n_members": n_members_moa,
-                 "method": f"{centroid_method}", "shrinkage_effective": float(alpha)}
+                {
+                    "moa": moa,
+                    "centroid_index": 0,
+                    "n_members": n_members_moa,
+                    "method": f"{centroid_method}",
+                    "shrinkage_effective": float(alpha),
+                }
             )
-        else:
-            # k-means within this MOA to create sub-centroids
-            try:
-                from sklearn.cluster import KMeans
-                n_k = min(n_centroids_per_moa, X_m.shape[0])
-                km = KMeans(n_clusters=n_k, random_state=rng.randint(0, 10**6), n_init="auto")
-                labels = km.fit_predict(X_m)
-                for j in range(n_k):
-                    sel = X_m[labels == j, :]
-                    n_sub = int(sel.shape[0])
-                    if n_sub == 0:
-                        continue
-                    if n_sub < int(min_members_per_moa) and bool(skip_tiny_moas):
-                        summary_rows.append(
-                            {"moa": moa, "centroid_index": j, "n_members": n_sub,
-                             "method": "skipped_tiny_subcluster", "shrinkage_effective": 0.0}
-                        )
-                        continue
+            continue
 
-                    proto = np.median(sel, axis=0) if centroid_method == "median" else np.mean(sel, axis=0)
-                    alpha = effective_alpha(n_members=n_sub)
-                    if alpha > 0:
-                        proto = (1 - alpha) * proto + alpha * gmean
-                    proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
+        # Multi-centroid path (k-means within MOA).
+        try:
 
-                    P_list.append(proto)
-                    centroid_moas.append(str(moa))
-                    summary_rows.append(
-                        {"moa": moa, "centroid_index": j, "n_members": n_sub,
-                         "method": f"kmeans/{centroid_method}", "shrinkage_effective": float(alpha)}
+            # Decide k for this MOA.
+            if n_centroids_per_moa == -1:
+                ks = _parse_k_candidates_local(text=k_candidates_moa, n_max=X_m.shape[0])
+
+                if bootstrap_k_moa and ks:
+                    best_k, ktab = _bootstrap_pick_k_inside_moa(
+                        X_m=X_m,
+                        k_list=ks,
+                        n_bootstrap=int(n_bootstrap_moa),
+                        subsample_frac=float(subsample_moa),
+                        stability_metric=str(stability_metric_moa),
+                        consensus_linkage=str(consensus_linkage_moa),
+                        random_seed=int(random_seed),
+                        pac_low=pac_low,
+                        pac_high=pac_high,
                     )
-            except Exception:
-                # Fallback: single centroid if k-means unavailable
-                proto = np.median(X_m, axis=0) if centroid_method == "median" else np.mean(X_m, axis=0)
-                alpha = effective_alpha(n_members=n_members_moa)
+                    n_k = int(best_k)
+
+                    # Collect diagnostics for optional export.
+                    ktab = ktab.copy()
+                    ktab.insert(0, "moa", moa)
+                    per_moa_k_tables.append(ktab)
+                    chosen_k_by_moa.append((str(moa), n_k))
+                else:
+                    # Safer non-bootstrap fallback: prefer ≥2 sub-centroids when feasible,
+                    # while respecting overall MOA size and min_members_per_moa.
+                    N = X_m.shape[0]
+                    min_per = max(1, int(min_members_per_moa))
+                    max_k_allowed = max(1, N // min_per)  # ensures ≥ min_members_per_moa per sub-centroid
+                    fallback_k = min(max(2, min_per), max_k_allowed)
+                    n_k = min(fallback_k, N)
+            else:
+                n_k = min(int(n_centroids_per_moa), X_m.shape[0])
+
+            km = KMeans(n_clusters=int(n_k), random_state=rng.randint(0, 10**6), n_init="auto")
+            labels = km.fit_predict(X_m)
+
+            for j in range(int(n_k)):
+                sel = X_m[labels == j, :]
+                n_sub = int(sel.shape[0])
+                if n_sub == 0:
+                    continue
+                if n_sub < int(min_members_per_moa) and bool(skip_tiny_moas):
+                    summary_rows.append(
+                        {
+                            "moa": moa,
+                            "centroid_index": j,
+                            "n_members": n_sub,
+                            "method": "skipped_tiny_subcluster",
+                            "shrinkage_effective": 0.0,
+                        }
+                    )
+                    continue
+
+                proto = np.median(sel, axis=0) if centroid_method == "median" else np.mean(sel, axis=0)
+                alpha = _effective_alpha(n_members=n_sub)
                 if alpha > 0:
                     proto = (1 - alpha) * proto + alpha * gmean
-                proto = proto / np.linalg.norm(proto) if np.linalg.norm(proto) > 0 else proto
+
+                norm = np.linalg.norm(proto)
+                if norm > 0:
+                    proto = proto / norm
 
                 P_list.append(proto)
                 centroid_moas.append(str(moa))
                 summary_rows.append(
-                    {"moa": moa, "centroid_index": 0, "n_members": n_members_moa,
-                     "method": f"{centroid_method}(fallback_no_kmeans)", "shrinkage_effective": float(alpha)}
+                    {
+                        "moa": moa,
+                        "centroid_index": j,
+                        "n_members": n_sub,
+                        "method": f"kmeans/{centroid_method}",
+                        "shrinkage_effective": float(alpha),
+                    }
                 )
 
-    P = np.vstack(P_list) if P_list else np.zeros((0, X_all.shape[1]), dtype=float)
+        except Exception:
+            # Fallback: single centroid if k-means is unavailable.
+            proto = np.median(X_m, axis=0) if centroid_method == "median" else np.mean(X_m, axis=0)
+            alpha = _effective_alpha(n_members=n_members_moa)
+            if alpha > 0:
+                proto = (1 - alpha) * proto + alpha * gmean
+
+            norm = np.linalg.norm(proto)
+            if norm > 0:
+                proto = proto / norm
+
+            P_list.append(proto)
+            centroid_moas.append(str(moa))
+            summary_rows.append(
+                {
+                    "moa": moa,
+                    "centroid_index": 0,
+                    "n_members": n_members_moa,
+                    "method": f"{centroid_method}(fallback_no_kmeans)",
+                    "shrinkage_effective": float(alpha),
+                }
+            )
+
+    # Assemble outputs.
+    if P_list:
+        P = np.vstack(P_list)
+    else:
+        # Preserve feature width even when no centroids were built.
+        P = np.zeros((0, X_all.shape[1]), dtype=float)
+
     summary_df = pd.DataFrame(summary_rows)
+
+    if chosen_k_by_moa:
+        chosen_k_df = pd.DataFrame(chosen_k_by_moa, columns=["moa", "chosen_k"])
+        summary_df = summary_df.merge(chosen_k_df, on="moa", how="left")
+
+    # Attach diagnostics tables for the caller (optional).
+    summary_df._per_moa_k_tables = per_moa_k_tables  # type: ignore[attr-defined]
+
     return summary_df, P, centroid_moas
+
 
 
 # -------------------------- scoring: cosine / CSLS --------------------------- #
@@ -660,7 +1040,6 @@ def estimate_fdr_by_anchor_shuffle(
 
     Null: keep the *number* of anchors per MOA fixed, but randomise which
     compounds carry those labels → rebuild centroids → rescore → margins.
-    Permutation FDR by shuffling anchor MOA labels and rebuilding centroids each time.
 
     Parameters
     ----------
@@ -1138,6 +1517,27 @@ def main() -> None:
                         default=2,
                         help="MOAs with < this many centroids are row-shuffled before label-permutation (hybrid null)."
                         )
+    # --- Per-MOA bootstrap k-selection for sub-centroids ---
+    parser.add_argument("--bootstrap_k_moa", action="store_true",
+                        help="Auto-pick #sub-centroids per MOA by bootstrap/consensus.")
+    parser.add_argument("--k_candidates_moa", type=str, default="1,2,3,4",
+                        help="Comma-separated k candidates to try per MOA (default: 1,2,3,4).")
+    parser.add_argument("--n_bootstrap_moa", type=int, default=50,
+                        help="Bootstrap replicates per k when picking MOA sub-centroids (default: 50).")
+    parser.add_argument("--subsample_moa", type=float, default=0.8,
+                        help="Fraction of MOA members used to FIT KMeans each replicate (predict on all).")
+    parser.add_argument("--stability_metric_moa", type=str,
+                        choices=["consensus_silhouette", "mean_ari", "pac"],
+                        default="consensus_silhouette",
+                        help="Stability metric to choose k per MOA (default: consensus_silhouette).")
+    parser.add_argument("--consensus_linkage_moa", type=str,
+                        choices=["average", "complete", "single", "ward"],
+                        default="average",
+                        help="Linkage for consensus clustering inside MOA scoring (default: average).")
+    parser.add_argument("--consensus_pac_limits_moa", type=str, default="0.1,0.9",
+                        help="PAC low,high thresholds for 'pac' metric (default: 0.1,0.9).")
+    parser.add_argument("--out_moa_k_selection_tsv", type=str, default=None,
+                        help="Optional TSV to write per-MOA k-selection tables; includes chosen k.")
 
 
     args = parser.parse_args()
@@ -1197,24 +1597,43 @@ def main() -> None:
     logger.info(f"Found {len(anchor_map)} anchors with non-missing MOA labels.")
 
     # Build centroids
-
     centroids_df, P, centroid_moas = build_moa_centroids(
-        embeddings=agg,
-        anchors=anchors,
-        id_col=id_col,
-        moa_col=args.moa_col,
-        n_centroids_per_moa=args.n_centroids_per_moa,
-        centroid_method=args.centroid_method,
-        centroid_shrinkage=args.centroid_shrinkage,
-        min_members_per_moa=args.min_members_per_moa,
-        skip_tiny_moas=args.skip_tiny_moas,
-        adaptive_shrinkage=args.adaptive_shrinkage,
-        adaptive_shrinkage_c=args.adaptive_shrinkage_c,
-        adaptive_shrinkage_max=args.adaptive_shrinkage_max,
-        random_seed=args.random_seed,
-    )
+                    embeddings=agg,
+                    anchors=anchors,
+                    id_col=id_col,
+                    moa_col=args.moa_col,
+                    n_centroids_per_moa=args.n_centroids_per_moa,
+                    centroid_method=args.centroid_method,
+                    centroid_shrinkage=args.centroid_shrinkage,
+                    min_members_per_moa=args.min_members_per_moa,
+                    skip_tiny_moas=args.skip_tiny_moas,
+                    adaptive_shrinkage=args.adaptive_shrinkage,
+                    adaptive_shrinkage_c=args.adaptive_shrinkage_c,
+                    adaptive_shrinkage_max=args.adaptive_shrinkage_max,
+                    random_seed=args.random_seed,
+                    bootstrap_k_moa=args.bootstrap_k_moa,
+                    k_candidates_moa=args.k_candidates_moa,
+                    n_bootstrap_moa=args.n_bootstrap_moa,
+                    subsample_moa=args.subsample_moa,
+                    stability_metric_moa=args.stability_metric_moa,
+                    consensus_linkage_moa=args.consensus_linkage_moa,
+                    consensus_pac_limits_moa=args.consensus_pac_limits_moa,
+                )
+
+
     centroids_df.to_csv(out_dir / "centroids_summary.tsv", sep="\t", index=False)
     logger.info(f"Built {P.shape[0]} centroids for {len(set(centroid_moas))} MOAs; wrote summary to {out_dir / 'centroids_summary.tsv'}")
+
+    # Optional: write per-MOA k-selection diagnostics
+    if getattr(args, "out_moa_k_selection_tsv", None):
+        per_moa_tabs = getattr(centroids_df, "_per_moa_k_tables", [])
+        if per_moa_tabs:
+            ksel = pd.concat(per_moa_tabs, ignore_index=True)
+            Path(args.out_moa_k_selection_tsv).parent.mkdir(parents=True, exist_ok=True)
+            ksel.to_csv(args.out_moa_k_selection_tsv, sep="\t", index=False)
+            logger.info("Wrote per-MOA k-selection tables -> %s", args.out_moa_k_selection_tsv)
+        else:
+            logger.info("No per-MOA k-selection tables to write (bootstrap_k_moa disabled or no MOAs had >1 member).")
 
 
     # If no centroids, write empty schemas and exit
@@ -1271,7 +1690,7 @@ def main() -> None:
         k_eff = min(k_eff, max(1, P.shape[0] - 1))
         S_csls = csls_scores(Q=X, P=P, k=k_eff)
         logger.info("Computed CSLS scores (k=%d); shape %s.", k_eff, tuple(S_csls.shape))
-        logger.info(f"S_csls shape: {S_csls.shape}, "
+        logger.debug(f"S_csls shape: {S_csls.shape}, "
                     f"min: {float(S_csls.min()):.4f}, "
                     f"median: {float(np.median(S_csls)):.4f}, "
                     f"max: {float(S_csls.max()):.4f}"
