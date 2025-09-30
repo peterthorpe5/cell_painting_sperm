@@ -34,7 +34,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+import re
 import numpy as np
 import pandas as pd
 import logging
@@ -359,7 +359,6 @@ def numeric_feature_columns(df: pd.DataFrame) -> list[str]:
         return sorted(int_like, key=lambda s: int(s))
 
     # 2) feat_### pattern
-    import re
     feat_like = [c for c in cols if re.fullmatch(r"feat_\d+", c)]
     if feat_like:
         # keep order as they appear
@@ -779,6 +778,22 @@ def _pac_score(*, consensus: np.ndarray, low: float = 0.1, high: float = 0.9) ->
     return float(np.nan_to_num(amb, nan=0.0).sum() / denom)
 
 
+def _cap_k_for_duplicates(X: np.ndarray, k: int, logger: "logging.Logger") -> int:
+    """
+    Ensure k does not exceed the number of distinct samples in X.
+    """
+    try:
+        # For large X, consider hashing rows for speed, but np.unique is okay for modest sizes.
+        n_distinct = np.unique(X, axis=0).shape[0]
+    except Exception:
+        logger.exception("Could not compute distinct rows; leaving k unchanged.")
+        return k
+    k_eff = max(2, min(k, max(2, n_distinct - 1)))
+    if k_eff < k:
+        logger.info("Clamping k from %d to %d due to %d distinct rows.", k, k_eff, n_distinct)
+    return k_eff
+
+
 def bootstrap_k_selection_kmeans(
     *,
     X: np.ndarray,
@@ -855,7 +870,11 @@ def bootstrap_k_selection_kmeans(
             idx_fit = rng.choice(N, size=m, replace=False)
 
             seed_b = int(rng.integers(0, 2**32 - 1))
-            km = KMeans(n_clusters=k, random_state=seed_b, n_init="auto")
+            k_eff = max(2, min(k, X.shape[0] - 1))
+            # Optional: respect distinct rows to avoid “distinct clusters < k” warnings
+            k_eff = _cap_k_for_duplicates(X[idx_fit, :], k_eff, logging.getLogger("clipn_logger"))
+            km = KMeans(n_clusters=k_eff, random_state=seed_b, n_init="auto")
+
             km.fit(X[idx_fit, :])
             lab_all = km.predict(X)  # length N
             labels_runs.append(lab_all.astype(int))
@@ -899,17 +918,41 @@ def bootstrap_k_selection_kmeans(
     if metric == "consensus_silhouette":
         key = "stability_consensus_silhouette"
         # Higher is better
-        tab["_rank"] = (-tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+        # tab["_rank"] = (-tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+        tab["_s2"] = tab["silhouette_feature_cosine"].fillna(-np.inf)
+        tab = tab.sort_values(
+            by=[key, "_s2", "k"],
+            ascending=[False, False, True],
+            kind="mergesort",
+        )
+        best_k = int(tab["k"].iloc[0])
+        tab.drop(columns=["_s2"], inplace=True)
+
     elif metric == "mean_ari":
         key = "stability_mean_ari"
-        tab["_rank"] = (-tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+        # tab["_rank"] = (-tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+        tab["_s2"] = tab["silhouette_feature_cosine"].fillna(-np.inf)
+        tab = tab.sort_values(
+            by=[key, "_s2", "k"],
+            ascending=[False, False, True],
+            kind="mergesort",
+        )
+        best_k = int(tab["k"].iloc[0])
+        tab.drop(columns=["_s2"], inplace=True)
     else:  # pac → lower is better
         key = "stability_pac"
-        tab["_rank"] = (tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+        # tab["_rank"] = (tab[key], -tab["silhouette_feature_cosine"].fillna(-np.inf), tab["k"])
+        tab["_s2"] = tab["silhouette_feature_cosine"].fillna(-np.inf)
+        tab = tab.sort_values(
+            by=[key, "_s2", "k"],
+            ascending=[False, False, True],
+            kind="mergesort",
+        )
+        best_k = int(tab["k"].iloc[0])
+        tab.drop(columns=["_s2"], inplace=True)
 
-    tab = tab.sort_values("_rank").drop(columns=["_rank"]).reset_index(drop=True)
-    best_k = int(tab.iloc[0]["k"])
-    return best_k, tab, consensus_by_k
+    return best_k, tab.reset_index(drop=True), consensus_by_k
+
 
 
 
@@ -1176,10 +1219,12 @@ def main() -> None:
                 k_if_kmeans = int(k_chosen)
             else:
                 k_fixed = max(2, min(int(args.n_clusters), X_all.shape[0]))
-                km = KMeans(n_clusters=k_fixed, random_state=args.random_seed, n_init="auto")
+                k_eff = _cap_k_for_duplicates(X_all, k_fixed, logger)
+                km = KMeans(n_clusters=k_eff, random_state=args.random_seed, n_init="auto")
                 labels = km.fit_predict(X=X_all)
-                k_if_kmeans = int(k_fixed)
+                k_if_kmeans = int(k_eff)
             chosen_algo = "kmeans"
+
 
         keep_mask = None  # we used all rows
         noise_handling = "n/a"
