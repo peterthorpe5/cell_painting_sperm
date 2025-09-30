@@ -279,6 +279,34 @@ def save_training_loss(
     return tsv_path, png_path
 
 
+def write_compressed_tsv(df: pd.DataFrame, out_dir: Path, filename: str, logger: logging.Logger) -> Path:
+    """
+    Write a DataFrame to a gzip-compressed TSV with tab separators.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Data to serialise.
+    out_dir : pathlib.Path
+        Output folder; will be created if missing.
+    filename : str
+        File name to write (should usually end with .tsv.gz).
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    pathlib.Path
+        Full path to the written file.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / filename
+    # Ensure no commas; always tab-separated and compressed
+    df.to_csv(path, sep="\t", index=False, compression="gzip")
+    logger.info("Wrote compressed TSV → %s (rows=%d, cols=%d)", path, df.shape[0], df.shape[1])
+    return path
+
+
 def extract_latent_and_meta(
     *,
     decoded_df: pd.DataFrame,
@@ -1223,6 +1251,209 @@ def kept_counts_sweep(
             )
             rows.append({"method": m, "threshold": float(thr), "kept": int(len(kept))})
     return pd.DataFrame(rows)
+
+
+
+def _cosine_similarity_rows(X: np.ndarray) -> np.ndarray:
+    """
+    Compute cosine similarity matrix between rows of X.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        2D array (rows = observations, cols = features). Assumed L2-normalised
+        beforehand in this pipeline, but guarded anyway.
+
+    Returns
+    -------
+    numpy.ndarray
+        Cosine similarity matrix (n x n), diagonal = 1.
+    """
+    # Defensive normalisation
+    norms = np.linalg.norm(X, axis=1, keepdims=True) + 1e-12
+    Xn = X / norms
+    return Xn @ Xn.T
+
+
+def run_replicate_similarity_qc(
+    *,
+    decoded_df: pd.DataFrame,
+    out_dir: Path,
+    experiment: str,
+    mode: str,
+    level: str = "image",
+    k_nn: int = 10,
+    metric: str = "cosine",
+    logger: logging.Logger,
+) -> None:
+    """
+    Evaluate how similar replicate entries are to each other (image/well level).
+
+    This QC intentionally avoids compound-level aggregation and operates on the
+    requested granularity ('image' or 'well'). It produces:
+      1) Replicate@k (cpd_id) precision curve (TSV + PDF).
+      2) Top-1 replicate hit-rate (nearest neighbour shares the same cpd_id).
+      3) Per-cpd within-replicate similarity table (median cosine similarity of
+         all off-diagonal replicate pairs) + histogram PDF.
+      4) Optional WBDR-style within/between ratio computed at the chosen level.
+
+    Parameters
+    ----------
+    decoded_df : pandas.DataFrame
+        Decoded latent space with integer-named latent columns and metadata.
+    out_dir : pathlib.Path
+        Base output directory; results are written to out_dir / "QC".
+    experiment : str
+        Experiment name for file naming.
+    mode : str
+        'reference_only' or 'integrate_all' (for filenames only).
+    level : str
+        'image' (default) or 'well'. Image uses rows as-is; 'well' aggregates to
+        (Plate_Metadata, Well_Metadata) via median of latent columns.
+    k_nn : int
+        Neighbourhood size for k-NN replicate QC.
+    metric : str
+        'cosine' (default) or 'euclidean' for k-NN based metrics.
+    logger : logging.Logger
+        Logger instance.
+    """
+    qc_dir = Path(out_dir) / "QC"
+    qc_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build X/meta at the requested granularity, deliberately not aggregating by cpd_id
+    X, meta, _ = extract_latent_and_meta(
+        decoded_df=decoded_df,
+        level=("image" if level == "image" else "image"),  # extract raw first
+        aggregate="median",
+        logger=logger,
+    )
+
+    # If user requested 'well', aggregate to Plate×Well while keeping cpd_id modes
+    if level == "well":
+        if not {"Plate_Metadata", "Well_Metadata"}.issubset(decoded_df.columns):
+            logger.warning("Replicate QC at well-level requested, but Plate/Well missing. Falling back to image-level.")
+        else:
+            # Rebuild X/meta using the existing helper at well-level
+            # (re-using run-time cleaning already done in pipeline)
+            from pandas import DataFrame
+            tmp_df: DataFrame = decoded_df.copy()
+            latent_cols = [c for c in tmp_df.columns if str(c).isdigit()]
+            feature_cols = latent_cols
+            # aggregate_for_knn builds well-level median matrix plus meta
+            X, meta = aggregate_for_knn(
+                df=tmp_df.set_index(["Dataset", "Sample"]),
+                feature_cols=feature_cols,
+                level="well",
+                logger=logger,
+            )
+
+    # 1) k-NN based replicate@k (labels = cpd_id)
+    if "cpd_id" not in meta.columns or meta["cpd_id"].isna().all():
+        logger.warning("Replicate QC skipped: 'cpd_id' not present at the chosen level.")
+        return
+
+    nn_idx, _ = build_knn_index(X=X, k=k_nn, metric=metric, logger=logger)
+    prec_curve = precision_at_k(labels=meta["cpd_id"], nn_indices=nn_idx)
+
+    # Save replicate@k (cpd_id)
+    prec_tsv, prec_pdf = plot_and_save_precision_curves(
+        out_dir=qc_dir,
+        experiment=experiment,
+        mode=f"{mode}_{level}",
+        label_name="replicate_cpd_id",
+        prec_curve=prec_curve,
+        logger=logger,
+    )
+
+    # Top-1 replicate hit-rate
+    y = meta["cpd_id"].astype(str).to_numpy()
+    top1_same = (y[nn_idx[:, 0]] == y).mean() if nn_idx.shape[1] >= 1 else float("nan")
+    top1_path = qc_dir / f"{experiment}_{mode}_{level}_replicate_top1.tsv"
+    pd.DataFrame([{"replicate_top1_hit_rate": float(top1_same)}]).to_csv(top1_path, sep="\t", index=False)
+    logger.info("Saved replicate Top-1 hit-rate -> %s", top1_path)
+
+    # 2) Per-cpd within-replicate similarity (cosine), median per compound
+    # Only meaningful under cosine; if Euclidean was requested for k-NN, we still
+    # use cosine for this intra-class summary (more interpretable in latent).
+    try:
+        S = _cosine_similarity_rows(X.values)
+        ids = meta["cpd_id"].astype(str).to_numpy()
+        rows = []
+        # For each cpd_id with >= 2 items, collect all off-diagonal pair sims
+        for cpd, idx in pd.Series(range(len(ids)), index=ids).groupby(level=0).groups.items():
+            if len(idx) < 2:
+                continue
+            sub = S[np.ix_(idx, idx)]
+            mask = ~np.eye(len(idx), dtype=bool)
+            vals = sub[mask]
+            rows.append({
+                "cpd_id": cpd,
+                "n_items": int(len(idx)),
+                "median_within_cosine": float(np.median(vals)),
+                "mean_within_cosine": float(np.mean(vals)),
+                "p25_within_cosine": float(np.percentile(vals, 25)),
+                "p75_within_cosine": float(np.percentile(vals, 75)),
+            })
+        per_cpd = pd.DataFrame(rows).sort_values(by=["median_within_cosine", "n_items"], ascending=[False, False])
+    except Exception:
+        logger.exception("Failed to compute within-replicate cosine similarities.")
+        per_cpd = pd.DataFrame(columns=["cpd_id", "n_items", "median_within_cosine",
+                                        "mean_within_cosine", "p25_within_cosine", "p75_within_cosine"])
+
+    percpd_path = qc_dir / f"{experiment}_{mode}_{level}_within_replicate_similarity.tsv"
+    per_cpd.to_csv(percpd_path, sep="\t", index=False)
+    logger.info("Saved per-cpd within-replicate similarity -> %s", percpd_path)
+
+    # Histogram of per-CPD medians
+    if not per_cpd.empty and "median_within_cosine" in per_cpd.columns:
+        pdf = qc_dir / f"{experiment}_{mode}_{level}_within_replicate_similarity.pdf"
+        fig, ax = plt.subplots(figsize=(7, 5))
+        per_cpd["median_within_cosine"].plot(kind="hist", bins=40, ax=ax, legend=False)
+        ax.set_xlabel("Median within-replicate cosine similarity")
+        ax.set_ylabel("Count (cpd_id)")
+        ax.set_title(f"Within-replicate similarity — {level}-level")
+        fig.tight_layout()
+        fig.savefig(pdf)
+        plt.close(fig)
+        logger.info("Saved within-replicate similarity histogram -> %s", pdf)
+
+    # 3) Optional WBDR at the same granularity (uses k_nn, metric from args)
+    #    This complements the compound-level WBDR you already compute elsewhere.
+    try:
+        wbd_tsv, wbd_pdf = wbd_ratio_per_compound(
+            X=X,
+            meta=meta.rename(columns={"EntityID": "cpd_id"}) if "EntityID" in meta.columns and "cpd_id" not in meta.columns else meta,
+            k=k_nn,
+            metric=metric,
+            out_dir=qc_dir,
+            experiment=experiment,
+            mode=f"{mode}_{level}",
+            logger=logger,
+        )
+        logger.info("Saved replicate-level WBDR -> %s ; %s", wbd_tsv, wbd_pdf)
+    except Exception:
+        logger.exception("Replicate-level WBDR failed; continuing.")
+
+
+def _infer_qc_level_from_rows(decoded_df: pd.DataFrame, logger: logging.Logger) -> str:
+    """
+    Infer whether replicate QC should run at 'well' or 'image' level.
+
+    Rule (as requested):
+    - If the decoded DataFrame has exactly 384 rows, assume a single 384-well plate
+      and use 'well' level.
+    - Otherwise, default to 'image'.
+
+    Notes
+    -----
+    This is intentionally conservative. If you later decide to treat cases with
+    multiple plates (e.g., 768, 1152 rows) as well-level by modulo 384, we can
+    extend the logic to check `n_rows % 384 == 0` and confirm Plate/Well metadata.
+    """
+    n_rows = int(decoded_df.shape[0])
+    level = "well" if n_rows == 384 else "image"
+    logger.info("Replicate QC auto-level inference: n_rows=%d -> %s-level", n_rows, level)
+    return level
 
 
 def summarise_kept_by_family(
@@ -2475,6 +2706,32 @@ def read_table_auto(path: str) -> pd.DataFrame:
     return pd.read_csv(filepath_or_buffer=path, sep=sep)
 
 
+from pathlib import Path
+
+def get_qc_dir(out_dir: Path, *subdirs: str) -> Path:
+    """
+    Return the QC directory path (optionally a nested subdirectory), creating it.
+
+    Parameters
+    ----------
+    out_dir : pathlib.Path
+        The run output directory (args.out).
+    *subdirs : str
+        Optional subdirectory names under QC/, e.g. ("replicates",) or ("knn",).
+
+    Returns
+    -------
+    pathlib.Path
+        The created QC (sub)directory path.
+    """
+    qc = Path(out_dir) / "QC"
+    for sd in subdirs:
+        qc = qc / sd
+    qc.mkdir(parents=True, exist_ok=True)
+    return qc
+
+
+
 def clean_and_impute_features_knn(
     df: pd.DataFrame,
     feature_cols: list[str],
@@ -2757,6 +3014,10 @@ def main(args: argparse.Namespace) -> None:
     _register_clipn_for_pickle()
     post_clipn_dir = Path(args.out) / "post_clipn"
     post_clipn_dir.mkdir(parents=True, exist_ok=True)
+
+    qc_root = get_qc_dir(Path(args.out))  # Ensures --out/QC exists
+    logger.info("QC root: %s", qc_root)
+
 
     plot_loss = not args.no_plot_loss
 
@@ -3163,6 +3424,17 @@ def main(args: argparse.Namespace) -> None:
         feature_audit_dir / "features_used_after_imputation.tsv", sep="\t", index=False
     )
     logger.info("Final feature column count after cleaning: %d", len(feature_cols))
+
+    if args.save_preencode_tsv:
+        schema_path = (Path(args.out) / args.preencode_subdir /
+                    (Path(pre_fn).stem + "_schema.tsv"))
+        pd.DataFrame({
+            "column": preencode_df.columns,
+            "dtype": preencode_df.dtypes.astype(str).values,
+        }).to_csv(schema_path, sep="\t", index=False)
+        logger.info("Wrote schema TSV → %s", schema_path)
+
+
 
     # If imputation is off, fail fast if NaNs remain in features
     if args.impute == "none" and df_scaled_all[feature_cols].isna().any().any():
@@ -3574,6 +3846,24 @@ def main(args: argparse.Namespace) -> None:
             )
         logger.info("Diagnostics completed.")
 
+    # Replicate-level QC (image/well) → out/QC
+    if not args.no_qc_replicates:
+        qc_level = args.qc_level
+        if qc_level == "auto":
+            qc_level = _infer_qc_level_from_rows(decoded_df=decoded_df, logger=logger)
+
+        run_replicate_similarity_qc(
+            decoded_df=decoded_df,
+            out_dir=Path(args.out),
+            experiment=args.experiment,
+            mode=args.mode,
+            level=qc_level,
+            k_nn=args.qc_k,
+            metric=args.qc_metric,
+            logger=logger,
+        )
+        logger.info("Replicate-similarity QC completed (level=%s).", qc_level)
+
 
     post_decoded_path = post_clipn_dir / f"{args.experiment}_decoded.tsv"
     safe_to_csv(df=decoded_df,
@@ -3849,7 +4139,53 @@ if __name__ == "__main__":
             help="Heuristic for priority to keep when two features are highly correlated."
         )
 
+    # Replicate QC options
+    parser.add_argument(
+        "--no_qc_replicates",
+        action="store_true",
+        help="Disable replicate-similarity QC (image/well-level outputs in out/QC).",
+    )
 
+    parser.add_argument(
+        "--qc_level",
+        choices=["auto", "image", "well"],
+        default="auto",
+        help="Granularity for replicate QC. 'auto' picks 'well' iff decoded rows == 384; "
+            "otherwise 'image' (default: auto).",
+    )
+
+    parser.add_argument(
+        "--qc_k",
+        type=int,
+        default=10,
+        help="Neighbourhood size k for replicate QC k-NN summaries (default: 10).",
+    )
+    parser.add_argument(
+        "--qc_metric",
+        choices=["cosine", "euclidean"],
+        default="cosine",
+        help="Distance metric for replicate QC k-NN (default: cosine).",
+    )
+
+    parser.add_argument(
+        "--save_preencode_tsv",
+        action="store_true",
+        help="If set, save a compressed TSV of the dataframe after metadata merge "
+            "and before any encoding/imputation.",
+    )
+    parser.add_argument(
+        "--preencode_subdir",
+        type=str,
+        default="data",
+        help="Subdirectory under --out to place the pre-encode TSV (default: data).",
+    )
+    parser.add_argument(
+        "--preencode_filename",
+        type=str,
+        default=None,
+        help="Optional filename for the pre-encode TSV. Default is derived from "
+            "experiment/mode: {experiment}_{mode}_preencode_merged.tsv.gz",
+    )
 
 
     main(parser.parse_args())
