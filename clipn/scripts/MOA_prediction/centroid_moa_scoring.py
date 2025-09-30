@@ -258,6 +258,21 @@ def aggregate_compounds(
     return out[[id_col] + num_cols]
 
 
+def _normalise_label_strings(*, s: pd.Series) -> pd.Series:
+    """
+    Replace common textual nulls with proper NaN and trim whitespace.
+    """
+    return (
+        s.astype(str)
+         .str.strip()
+         .replace(
+             to_replace={"": np.nan, "nan": np.nan, "NA": np.nan, "N/A": np.nan, "None": np.nan},
+             regex=False
+         )
+    )
+
+
+
 def _parse_k_candidates_local(*, text: str, n_max: int) -> list[int]:
     """Parse candidate k values for per-MOA subclustering.
 
@@ -807,7 +822,10 @@ def build_moa_centroids(
         summary_df = summary_df.merge(chosen_k_df, on="moa", how="left")
 
     # Attach diagnostics tables for the caller (optional).
-    summary_df._per_moa_k_tables = per_moa_k_tables  # type: ignore[attr-defined]
+    # summary_df._per_moa_k_tables = per_moa_k_tables  # type: ignore[attr-defined]
+    # preferred: keep side-data in DataFrame metadata
+    summary_df.attrs["per_moa_k_tables"] = per_moa_k_tables
+
 
     return summary_df, P, centroid_moas
 
@@ -1580,7 +1598,11 @@ def main() -> None:
     logger.info(f"Wrote aggregated compound embeddings to {out_dir / 'compound_embeddings.tsv'}")
 
     # Load anchors
-    anchors = pd.read_csv(args.anchors_tsv, sep="\t", low_memory=False)
+    anchors = pd.read_csv(args.anchors_tsv, 
+                          dtype=str,
+                            keep_default_na=True,
+                            na_values=["", "NA", "N/A", "nan", "NaN", "None"],
+                            sep="\t", low_memory=False)
     if id_col not in anchors.columns:
         raise ValueError(f"Anchors file must contain id column '{id_col}'.")
     if args.moa_col not in anchors.columns:
