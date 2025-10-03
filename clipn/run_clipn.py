@@ -1253,26 +1253,125 @@ def kept_counts_sweep(
     return pd.DataFrame(rows)
 
 
-
-def _cosine_similarity_rows(X: np.ndarray) -> np.ndarray:
+def _mean_within_group_cosine(
+    *,
+    X: pd.DataFrame,
+    group: pd.Series,
+    sample_pairs_per_group: int | None = 20000,
+    random_seed: int = 0,
+) -> pd.DataFrame:
     """
-    Compute cosine similarity matrix between rows of X.
+    Compute per-group within-replicate cosine similarity statistics without
+    forming an all-pairs similarity matrix.
+
+    This returns the exact mean pairwise cosine for each group using:
+        mean = (||sum(v)||^2 - n) / (n * (n - 1))
+    where rows v are L2-normalised feature vectors in X.
+
+    Optionally, it estimates dispersion (median and selected quantiles) by
+    sampling a bounded number of pairs per group.
 
     Parameters
     ----------
-    X : numpy.ndarray
-        2D array (rows = observations, cols = features). Assumed L2-normalised
-        beforehand in this pipeline, but guarded anyway.
+    X : pd.DataFrame
+        Feature matrix with rows aligned to `group`. Must be L2-normalised.
+    group : pd.Series
+        Group labels (e.g., replicate compound ID) aligned to X.
+    sample_pairs_per_group : int | None, optional
+        Maximum number of pairs to sample per group to estimate quantiles.
+        If None or 0, dispersion is skipped. Default is 20000.
+    random_seed : int, optional
+        Random seed for the pair sampling, by default 0.
 
     Returns
     -------
-    numpy.ndarray
-        Cosine similarity matrix (n x n), diagonal = 1.
+    pd.DataFrame
+        Columns:
+            ['group', 'n', 'mean_within_cosine',
+             'q05', 'q25', 'q50', 'q75', 'q95']  (quantiles only if sampled)
     """
-    # Defensive normalisation
-    norms = np.linalg.norm(X, axis=1, keepdims=True) + 1e-12
-    Xn = X / norms
-    return Xn @ Xn.T
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(random_seed)
+    # Ensure numpy array, no copy unless needed; X must be float and L2-normalised already.
+    Xv = X.to_numpy(copy=False)
+    # Pre-flight normalisation check (cheap): norms≈1
+    # Skip strict assertion to avoid overhead; rely on your pipeline’s L2-normalise step.
+
+    out_rows: list[dict[str, float | int | str]] = []
+
+    for gid, idx in pd.Series(group).groupby(group).groups.items():
+        idx = np.asarray(list(idx), dtype=int)
+        n = int(idx.size)
+        if n <= 1:
+            out_rows.append({
+                "group": str(gid),
+                "n": n,
+                "mean_within_cosine": float("nan"),
+                **({"q05": float("nan"), "q25": float("nan"), "q50": float("nan"),
+                    "q75": float("nan"), "q95": float("nan")} if sample_pairs_per_group else {})
+            })
+            continue
+
+        Xi = Xv[idx, :]
+        # Exact mean pairwise cosine via vector sum identity
+        s = Xi.sum(axis=0, dtype=np.float64)
+        ss = float(np.dot(s, s))
+        mean_cos = (ss - n) / (n * (n - 1))
+
+        row = {"group": str(gid), "n": n, "mean_within_cosine": float(mean_cos)}
+
+        # Optional dispersion by bounded pair sampling (approximate)
+        if sample_pairs_per_group and sample_pairs_per_group > 0:
+            # Total possible pairs
+            total_pairs = n * (n - 1) // 2
+            m = int(min(sample_pairs_per_group, total_pairs))
+            # Sample m unordered pairs (i < j) without replacement (approx):
+            # Efficient approach: sample m distinct flat indices in [0, total_pairs)
+            # then map to (i, j). For very large n, do this in chunks.
+            # Mapping from flat k to (i, j): i = floor((2n-1 - sqrt((2n-1)^2 - 8k))/2), j computed from offset.
+            ks = rng.choice(total_pairs, size=m, replace=False)
+            # Vectorised mapping
+            # Derivation: triangular numbers T(i) = i*(2n - i - 1)/2
+            # Find i s.t. T(i) <= k < T(i+1)
+            # Use quadratic inverse approximation then fix with while loops (rare).
+            n_f = float(n)
+            a = (2 * n_f - 1.0)
+            # initial guess for i
+            i_guess = np.floor((a - np.sqrt(a * a - 8.0 * ks)) / 2.0).astype(np.int64)
+            # compute T(i)
+            Ti = (i_guess * (2 * n - i_guess - 1)) // 2
+            # adjust where needed
+            mask = ks < Ti
+            while np.any(mask):
+                i_guess[mask] -= 1
+                Ti = (i_guess * (2 * n - i_guess - 1)) // 2
+                mask = ks < Ti
+            # j offset
+            j = (ks - Ti + i_guess + 1).astype(np.int64)
+            i = i_guess.astype(np.int64)
+
+            # Compute cosines for sampled pairs in small batches to limit RAM
+            batch = 50000
+            cos_vals = np.empty(shape=m, dtype=np.float32)
+            for start in range(0, m, batch):
+                end = min(start + batch, m)
+                ii = i[start:end]
+                jj = j[start:end]
+                # Cosine is dot product because Xi rows are L2-normalised
+                cos_vals[start:end] = np.einsum("ij,ij->i", Xi[ii, :], Xi[jj, :], optimize=True)
+
+            qs = np.nanpercentile(cos_vals, [5, 25, 50, 75, 95]).astype(float)
+            row.update({"q05": qs[0], "q25": qs[1], "q50": qs[2], "q75": qs[3], "q95": qs[4]})
+
+        out_rows.append(row)
+
+    cols = ["group", "n", "mean_within_cosine"]
+    if sample_pairs_per_group and sample_pairs_per_group > 0:
+        cols += ["q05", "q25", "q50", "q75", "q95"]
+    return pd.DataFrame(out_rows, columns=cols)
+
 
 
 def run_replicate_similarity_qc(
@@ -1375,34 +1474,60 @@ def run_replicate_similarity_qc(
     # 2) Per-cpd within-replicate similarity (cosine), median per compound
     # Only meaningful under cosine; if Euclidean was requested for k-NN, we still
     # use cosine for this intra-class summary (more interpretable in latent).
+    # --- Within-replicate similarity QC (memory-safe) ---
     try:
-        S = _cosine_similarity_rows(X.values)
-        ids = meta["cpd_id"].astype(str).to_numpy()
-        rows = []
-        # For each cpd_id with >= 2 items, collect all off-diagonal pair sims
-        for cpd, idx in pd.Series(range(len(ids)), index=ids).groupby(level=0).groups.items():
-            if len(idx) < 2:
-                continue
-            sub = S[np.ix_(idx, idx)]
-            mask = ~np.eye(len(idx), dtype=bool)
-            vals = sub[mask]
-            rows.append({
-                "cpd_id": cpd,
-                "n_items": int(len(idx)),
-                "median_within_cosine": float(np.median(vals)),
-                "mean_within_cosine": float(np.mean(vals)),
-                "p25_within_cosine": float(np.percentile(vals, 25)),
-                "p75_within_cosine": float(np.percentile(vals, 75)),
+        # Pick grouping key
+        group_col = "replicate_cpd_id" if "replicate_cpd_id" in meta.columns else "cpd_id"
+
+        # X must be L2-normalised already at this stage of your pipeline.
+        # If you’re unsure, uncomment the next line:
+        # X = pd.DataFrame(l2_normalise(X=X.values), index=X.index, columns=X.columns)
+
+        stats_df = _mean_within_group_cosine(
+            X=X,                              # features DataFrame, rows aligned to meta
+            group=meta[group_col],            # grouping vector
+            sample_pairs_per_group=20000,     # None/0 if you want only the exact mean
+            random_seed=0,
+        )
+
+        # Make column names consistent with your previous output
+        # (mean + median + p25/p75 if quantiles were sampled)
+        rename_map = {"group": group_col, "n": "n_items", "mean_within_cosine": "mean_within_cosine"}
+        per_cpd = stats_df.rename(columns=rename_map).copy()
+
+        if {"q25", "q50", "q75"}.issubset(per_cpd.columns):
+            per_cpd = per_cpd.rename(columns={
+                "q50": "median_within_cosine",
+                "q25": "p25_within_cosine",
+                "q75": "p75_within_cosine",
             })
-        per_cpd = pd.DataFrame(rows).sort_values(by=["median_within_cosine", "n_items"], ascending=[False, False])
+        else:
+            # Quantiles not computed (sample_pairs_per_group=None/0)
+            per_cpd["median_within_cosine"] = np.nan
+            per_cpd["p25_within_cosine"] = np.nan
+            per_cpd["p75_within_cosine"] = np.nan
+
+        # Order columns
+        ordered_cols = [group_col, "n_items", "median_within_cosine",
+                        "mean_within_cosine", "p25_within_cosine", "p75_within_cosine"]
+        per_cpd = per_cpd[ordered_cols].sort_values(
+            by=["median_within_cosine", "n_items"], ascending=[False, False]
+        )
+
+        # Write once to QC
+        percpd_path = qc_dir / f"{experiment}_{mode}_{level}_within_replicate_similarity.tsv"
+        per_cpd.to_csv(percpd_path, sep="\t", index=False)
+        logger.info("Saved per-cpd within-replicate similarity -> %s", percpd_path)
+
     except Exception:
         logger.exception("Failed to compute within-replicate cosine similarities.")
-        per_cpd = pd.DataFrame(columns=["cpd_id", "n_items", "median_within_cosine",
-                                        "mean_within_cosine", "p25_within_cosine", "p75_within_cosine"])
+        per_cpd = pd.DataFrame(columns=[
+            "cpd_id", "n_items", "median_within_cosine",
+            "mean_within_cosine", "p25_within_cosine", "p75_within_cosine"
+        ])
+        percpd_path = qc_dir / f"{experiment}_{mode}_{level}_within_replicate_similarity.tsv"
+        per_cpd.to_csv(percpd_path, sep="\t", index=False)
 
-    percpd_path = qc_dir / f"{experiment}_{mode}_{level}_within_replicate_similarity.tsv"
-    per_cpd.to_csv(percpd_path, sep="\t", index=False)
-    logger.info("Saved per-cpd within-replicate similarity -> %s", percpd_path)
 
     # Histogram of per-CPD medians
     if not per_cpd.empty and "median_within_cosine" in per_cpd.columns:
