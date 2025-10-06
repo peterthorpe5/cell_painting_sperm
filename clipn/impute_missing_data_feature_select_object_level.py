@@ -2357,6 +2357,9 @@ def main():
         ]
 
     csv_files = [f for f in csv_files if not EXCLUDE_PAT.search(f.name)]
+    # remove MAC ._ files. 
+    csv_files = [f for f in csv_files if not f.name.startswith((".", "_"))]
+
     excluded_files = [f.name for f in all_files if f not in csv_files]
     logger.info(f"Looking for CellProfiler CSV files in {input_dir}...")
     logger.info("Excluding files with 'image' or 'normalised' in their names.")

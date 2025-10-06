@@ -13,7 +13,7 @@ the run, *without* collapsing to per-well medians. It uses `ImageNumber` as
 a time-like axis and computes for selected features:
 
 - Spearman correlation (rho) vs acquisition order (with p-value).
-- Theil–Sen robust slope with 95% confidence interval.
+- Robust slope on per-image medians (binned OLS / optional Huber) with a bootstrap CI.
 - Early-vs-late shift via Cliff's delta (effect size).
 
 Outputs are written **per compartment** into subfolders of --out_dir:
@@ -40,17 +40,16 @@ Notes
 - Plots are limited to a small auto-picked feature panel unless you pass
   --plot_features explicitly.
 
-Author
+
 ------
 Prepared for object-level QC with per-compartment outputs and UK English.
 """
-
 from __future__ import annotations
 import warnings
 import argparse
 import logging
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -58,10 +57,14 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from typing import Tuple
-from sklearn.linear_model import HuberRegressor
-from scipy.stats import spearmanr, theilslopes
 
+from scipy.stats import spearmanr
+
+# Optional sklearn import (fallback to OLS if unavailable)
+try:
+    from sklearn.linear_model import HuberRegressor  # type: ignore
+except Exception:
+    HuberRegressor = None
 
 # ----------------------------- Logging ------------------------------------- #
 
@@ -788,7 +791,7 @@ def load_image_metadata(path: Path, logger: logging.Logger) -> pd.DataFrame:
     return meta
 
 
-def parse_well_id(well: str) -> tuple[int, int]:
+def parse_well_id(well: str) -> tuple[float, float]:
     """
     Convert a well like 'A01' or 'H12' to zero-based (row, col).
 
