@@ -771,7 +771,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--controls_query",
-        default="DMSO",
+        default='(Library == "DMSO") or (cpd_type == "DMSO")',
         help="Pandas query string to subset control objects (e.g., 'Library == \"DMSO\"').",
     )
     parser.add_argument(
