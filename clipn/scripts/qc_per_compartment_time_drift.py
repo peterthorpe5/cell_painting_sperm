@@ -46,7 +46,7 @@ Prepared for object-level QC with per-compartment outputs and UK English.
 """
 
 from __future__ import annotations
-
+import warnings
 import argparse
 import logging
 from pathlib import Path
@@ -135,10 +135,6 @@ def list_compartment_files(
     return mapping
 
 
-from typing import Tuple
-from sklearn.linear_model import HuberRegressor  # optional; guard if you prefer no sklearn
-
-
 def per_image_median_series(
     df: pd.DataFrame,
     feature: str,
@@ -177,6 +173,78 @@ def per_image_median_series(
     order = np.argsort(x)
     return x[order], y[order]
 
+
+def normalise_well_id(well: str) -> Optional[str]:
+    """
+    Normalise a well ID to 'RowLetter<ColumnInt>' form to match A1..P24 style.
+
+    Examples
+    --------
+    'A01' -> 'A1', 'a001' -> 'A1', 'H12' -> 'H12'.
+
+    Parameters
+    ----------
+    well : str
+        Raw well identifier.
+
+    Returns
+    -------
+    Optional[str]
+        Normalised well ID or None if unparsable.
+    """
+    if not isinstance(well, str) or len(well) < 2:
+        return None
+    row = well[0].upper()
+    digits = "".join(ch for ch in well[1:] if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        col = int(digits)
+    except ValueError:
+        return None
+    return f"{row}{col}"
+
+
+def get_controls_subset_by_wells(
+    df: pd.DataFrame,
+    well_col: str,
+    controls_wells: list[str],
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    """
+    Subset rows whose well is in a provided list of control wells.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table with a well column.
+    well_col : str
+        Name of the well column (e.g., 'Well_Metadata').
+    controls_wells : list[str]
+        List of control wells, e.g., ['A23','B23',...].
+    logger : logging.Logger
+        Logger.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Subset of df corresponding to control wells (may be empty).
+    """
+    if well_col not in df.columns:
+        logger.warning("Well column '%s' not found; cannot apply controls-by-well filter.", well_col)
+        return df.iloc[0:0]
+
+    target = {w for w in (normalise_well_id(w) for w in controls_wells) if w is not None}
+    if not target:
+        logger.warning("No valid control wells parsed; skipping controls-by-well filter.")
+        return df.iloc[0:0]
+
+    wells_norm = df[well_col].astype(str).map(normalise_well_id)
+    mask = wells_norm.isin(target)
+    out = df.loc[mask].copy()
+    logger.info("Controls-by-wells: %d/%d rows retained using %d wells.",
+                out.shape[0], df.shape[0], len(target))
+    return out
 
 def bin_by_count(
     x: np.ndarray,
@@ -253,7 +321,7 @@ def fit_slope(
     x0 = x - np.median(x)
     X = x0.reshape(-1, 1)
 
-    if method == "huber_binned":
+    if method == "huber_binned" and HuberRegressor is not None:
         try:
             hub = HuberRegressor().fit(X, y)
             slope = float(hub.coef_[0])
@@ -604,9 +672,23 @@ def compute_drift_stats(
             sub = df.loc[mask, [image_col, feat]].dropna()
             if sub.shape[0] > spearman_max_objects:
                 sub = sub.sample(n=spearman_max_objects, random_state=0)
-            rho, pval = spearmanr(ensure_numeric(sub[image_col]), ensure_numeric(sub[feat]))
+            xv = ensure_numeric(sub[feat]).to_numpy()
+            iv = ensure_numeric(sub[image_col]).to_numpy()
+            if np.nanstd(xv) == 0.0 or np.nanstd(iv) == 0.0:
+                rho, pval = (np.nan, np.nan)
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    rho, pval = spearmanr(iv, xv)
         else:
-            rho, pval = spearmanr(x_img, y_img)
+            if np.nanstd(y_img) == 0.0 or np.nanstd(x_img) == 0.0:
+                rho, pval = (np.nan, np.nan)
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    rho, pval = spearmanr(x_img, y_img)
+
+
 
         # Early vs late effect size (object-level)
         img = img_all.loc[mask]
@@ -975,6 +1057,12 @@ def run_for_compartment(
     well_col: str,
     heatmap_features: Optional[str],
     image_meta: Optional[pd.DataFrame],
+    slope_method: str,
+    n_bins_slope: int,
+    min_per_bin: int,
+    spearman_mode: str,
+    spearman_max_objects: int,
+    controls_wells: list[str],
     logger: logging.Logger,
 ) -> None:
     """
@@ -1101,45 +1189,59 @@ def run_for_compartment(
         image_col=image_col,
         early_frac=0.2,
         min_points=2000,
-        slope_method="ols_binned",
-        n_bins_slope=400,
-        min_per_bin=20,
-        spearman_mode="images",
-        spearman_max_objects=500_000,
+        slope_method=slope_method,
+        n_bins_slope=n_bins_slope,
+        min_per_bin=min_per_bin,
+        spearman_mode=spearman_mode,
+        spearman_max_objects=spearman_max_objects,
     )
 
     stats_path = comp_dir / "qc_feature_drift_raw.tsv"
     stats.to_csv(stats_path, sep="\t", index=False)
     logger.info("%s: wrote drift stats -> %s", compartment, stats_path)
 
-    # Optional: control-only analysis (subset via user query)
+
+    # Optional: control-only analysis (query first, then wells fallback)
+    ctrl_df = None
     if controls_query:
         try:
-            ctrl = data.query(controls_query)
-            if ctrl.shape[0] >= 2000:
-                stats_ctrl = compute_drift_stats(
-                    df=ctrl,
-                    feature_cols=num_feats,
-                    image_col=image_col,
-                    early_frac=0.2,
-                    min_points=500,
-                )
-                stats_ctrl_path = comp_dir / "qc_feature_drift_controls.tsv"
-                stats_ctrl.to_csv(stats_ctrl_path, sep="\t", index=False)
-                logger.info(
-                    "%s: wrote control-only drift stats -> %s",
-                    compartment, stats_ctrl_path
-                )
+            tmp = data.query(controls_query)
+            if tmp.shape[0] >= 2000:
+                ctrl_df = tmp
             else:
-                logger.warning(
-                    "%s: controls subset too small (%d rows); skipping control-only stats.",
-                    compartment, ctrl.shape[0]
-                )
+                logger.warning("%s: controls query returned %d rows (<2000); will try wells fallback.",
+                            compartment, tmp.shape[0])
         except Exception as exc:
-            logger.error(
-                "%s: controls query failed (%s): %s",
-                compartment, controls_query, exc
-            )
+            logger.error("%s: controls query failed (%s). Falling back to wells list. Error: %s",
+                        compartment, controls_query, exc)
+
+    if ctrl_df is None:
+        ctrl_df = get_controls_subset_by_wells(
+            df=data,
+            well_col=well_col,
+            controls_wells=controls_wells,
+            logger=logger,
+        )
+
+    if ctrl_df is not None and ctrl_df.shape[0] >= 2000:
+        stats_ctrl = compute_drift_stats(
+            df=ctrl_df,
+            feature_cols=num_feats,
+            image_col=image_col,
+            early_frac=0.2,
+            min_points=500,
+            slope_method=slope_method,
+            n_bins_slope=n_bins_slope,
+            min_per_bin=min_per_bin,
+            spearman_mode=spearman_mode,
+            spearman_max_objects=spearman_max_objects,
+        )
+        stats_ctrl_path = comp_dir / "qc_feature_drift_controls.tsv"
+        stats_ctrl.to_csv(stats_ctrl_path, sep="\t", index=False)
+        logger.info("%s: wrote control-only drift stats -> %s", compartment, stats_ctrl_path)
+    else:
+        logger.warning("%s: no adequate control subset available; skipping control-only stats.", compartment)
+
 
     # Per-image summary (medians/IQRs) for a compact panel, then write TSV
     per_img = per_image_summary(
@@ -1255,9 +1357,11 @@ def main(args: argparse.Namespace) -> None:
         logger.info("Using Image table: %s", image_path)
         image_meta = load_image_metadata(image_path, logger=logger)
 
-    # Normalise a bare 'DMSO' controls_query into a valid boolean expression
-    if args.controls_query and args.controls_query.strip().upper() == "DMSO":
-        args.controls_query = '(Library == "DMSO") or (cpd_type == "DMSO")'
+    if args.controls_wells_tsv:
+        controls_wells = pd.read_csv(args.controls_wells_tsv, sep="\t", header=None)[0].astype(str).tolist()
+    else:
+        controls_wells = [w.strip() for w in args.controls_wells.split(",") if w.strip()]
+
 
     include_glob = args.include_glob or [
         "*Cell*.csv.gz",
@@ -1293,7 +1397,13 @@ def main(args: argparse.Namespace) -> None:
             plate_col=args.plate_col,
             well_col=args.well_col,
             heatmap_features=args.heatmap_features,
-            image_meta=image_meta,        # always pass; it's None if not found
+            image_meta=image_meta,
+            slope_method=args.slope_method,
+            n_bins_slope=args.n_bins_slope,
+            min_per_bin=args.min_per_bin,
+            spearman_mode=args.spearman_mode,
+            spearman_max_objects=args.spearman_max_objects,       # always pass; it's None if not found
+            controls_wells=controls_wells,
             logger=logger,
         )
 
@@ -1401,6 +1511,20 @@ if __name__ == "__main__":
         default=500000,
         help="If 'objects', random cap of rows for Spearman (default: 500000).",
     )
+
+    parser.add_argument(
+        "--controls_wells",
+        default="A23,B23,C23,D23,E23,F23,G23,H23,I23,J23,K23,L23,M23,N23,O23,P23",
+        help="Comma-separated list of control wells (case-insensitive). "
+            "Used if controls_query is missing/invalid or yields too few rows.",
+    )
+    parser.add_argument(
+        "--controls_wells_tsv",
+        default=None,
+        help="Optional TSV (one well per line, no header) to define control wells. "
+            "Overrides --controls_wells if provided.",
+    )
+
 
     parser.add_argument(
         "--log_level",
