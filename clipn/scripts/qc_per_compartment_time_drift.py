@@ -466,6 +466,228 @@ def benjamini_hochberg(pvals: np.ndarray, alpha: float = 0.05) -> tuple[np.ndarr
     return reject, q
 
 
+
+def compute_time_trend_smoothed(
+    df: pd.DataFrame,
+    feature: str,
+    image_col: str,
+    window: int = 301,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute a smoothed time trend for a feature using per-image medians.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table that includes `image_col` and `feature`.
+    feature : str
+        Feature to model vs acquisition order.
+    image_col : str
+        Acquisition-order column (e.g., 'ImageNumber').
+    window : int
+        Window size for centred rolling median smoothing.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        Sorted unique image indices (x) and corresponding smoothed medians (y).
+    """
+    x_img, y_img = per_image_median_series(
+        df=df[[image_col, feature]],
+        feature=feature,
+        image_col=image_col,
+    )
+    if x_img.size == 0:
+        return x_img, y_img
+    y_smooth = rolling_median(y=y_img, window=min(window, max(3, x_img.size // 50)))
+    return x_img, y_smooth
+
+
+def compute_plate_residual_map(
+    df: pd.DataFrame,
+    feature: str,
+    image_col: str,
+    plate_col: str,
+    well_col: str,
+    window: int = 301,
+    logger: Optional[logging.Logger] = None,
+) -> pd.DataFrame:
+    """
+    Build a per-well residual map after removing the *plate-specific* time trend.
+
+    For each plate:
+      1) Compute per-image medians of `feature` and smooth across `image_col`.
+      2) Interpolate the smoothed trend at each object's acquisition index.
+      3) Residual = feature_value - trend_predicted(ImageNumber).
+      4) Aggregate residuals per (plate, well) with the median.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table including `feature`, `image_col`, `plate_col`, `well_col`.
+    feature : str
+        Feature to process.
+    image_col : str
+        Acquisition order column.
+    plate_col : str
+        Plate identifier column.
+    well_col : str
+        Well identifier column.
+    window : int
+        Smoothing window for the time trend (centred rolling median).
+    logger : logging.Logger, optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: [plate_col, well_col, 'residual'] with one row per well.
+    """
+    req = [plate_col, well_col, image_col, feature]
+    miss = [c for c in req if c not in df.columns]
+    if miss:
+        raise KeyError(f"Missing required columns for residual map: {miss}")
+
+    sub = df[req].dropna().copy()
+    if sub.empty:
+        return pd.DataFrame(columns=[plate_col, well_col, "residual"])
+
+    sub[image_col] = pd.to_numeric(sub[image_col], errors="coerce")
+    sub[feature] = pd.to_numeric(sub[feature], errors="coerce")
+    sub = sub.dropna(subset=[image_col, feature])
+
+    out_blocks: list[pd.DataFrame] = []
+    for plate_id, block in sub.groupby(plate_col, observed=False):
+        x_tr, y_tr = compute_time_trend_smoothed(
+            df=block[[image_col, feature]],
+            feature=feature,
+            image_col=image_col,
+            window=window,
+        )
+        if x_tr.size == 0 or y_tr.size == 0:
+            if logger is not None:
+                logger.warning("Residual map: empty trend for plate %s.", plate_id)
+            continue
+
+        # Interpolate trend at each object's acquisition index
+        xi = block[image_col].to_numpy(dtype=float)
+        yi = block[feature].to_numpy(dtype=float)
+        # In case of duplicate x_tr, np.interp requires strictly increasing x
+        order = np.argsort(x_tr)
+        x_tr = x_tr[order]
+        y_tr = y_tr[order]
+        y_hat = np.interp(x=xi, xp=x_tr, fp=y_tr)  # linear interpolation
+        resid = yi - y_hat
+
+        wmed = (
+            pd.DataFrame({
+                plate_col: block[plate_col].to_numpy(),
+                well_col: block[well_col].to_numpy(),
+                "residual": resid,
+            })
+            .groupby([plate_col, well_col], observed=False)["residual"]
+            .median()
+            .reset_index()
+        )
+        out_blocks.append(wmed)
+
+    if not out_blocks:
+        return pd.DataFrame(columns=[plate_col, well_col, "residual"])
+
+    return pd.concat(out_blocks, axis=0, ignore_index=True)
+
+
+def per_well_time_quantile(
+    df: pd.DataFrame,
+    image_col: str,
+    plate_col: str,
+    well_col: str,
+) -> pd.DataFrame:
+    """
+    Compute per-well acquisition quantile based on the median ImageNumber.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table with `image_col`, `plate_col`, `well_col`.
+    image_col : str
+        Acquisition-order column.
+    plate_col : str
+        Plate identifier.
+    well_col : str
+        Well identifier.
+
+    Returns
+    -------
+    pandas.DataFrame
+        [plate_col, well_col, 'acq_q'] in [0, 1].
+    """
+    req = [plate_col, well_col, image_col]
+    sub = df[req].dropna()
+    if sub.empty:
+        return pd.DataFrame(columns=[plate_col, well_col, "acq_q"])
+    wmed = (
+        sub.groupby([plate_col, well_col], observed=False)[image_col]
+        .median()
+        .rename("img_median")
+        .reset_index()
+    )
+    wmed["acq_q"] = (
+        wmed.groupby(plate_col, observed=False)["img_median"]
+        .rank(method="average", pct=True)
+        .astype(float)
+    )
+    return wmed[[plate_col, well_col, "acq_q"]]
+
+
+def per_well_feature_median_z(
+    df: pd.DataFrame,
+    feature: str,
+    plate_col: str,
+    well_col: str,
+) -> pd.DataFrame:
+    """
+    Compute per-well feature median and robust z-score within each plate.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table with `feature`, `plate_col`, `well_col`.
+    feature : str
+        Feature name to summarise.
+    plate_col : str
+        Plate identifier.
+    well_col : str
+        Well identifier.
+
+    Returns
+    -------
+    pandas.DataFrame
+        [plate_col, well_col, 'feat_z'].
+    """
+    req = [plate_col, well_col, feature]
+    sub = df[req].dropna()
+    if sub.empty:
+        return pd.DataFrame(columns=[plate_col, well_col, "feat_z"])
+    wmed = (
+        sub.groupby([plate_col, well_col], observed=False)[feature]
+        .median()
+        .rename("w_med")
+        .reset_index()
+    )
+
+    def _robust_z(g: pd.DataFrame) -> pd.DataFrame:
+        med = g["w_med"].median()
+        mad = (g["w_med"] - med).abs().median()
+        scale = 1.4826 * mad if mad and mad > 0 else (g["w_med"].std() or 1.0)
+        g["feat_z"] = (g["w_med"] - med) / (scale if scale else 1.0)
+        return g
+
+    out = wmed.groupby(plate_col, observed=False, group_keys=False).apply(_robust_z)
+    return out[[plate_col, well_col, "feat_z"]]
+
+
+
 def cliffs_delta(x: np.ndarray, y: np.ndarray) -> float:
     """
     Compute Cliff's delta (x vs y) in [-1, 1]; positive => x > y tendency.
@@ -1295,17 +1517,22 @@ def run_for_compartment(
 
     # Optional: control-only analysis (query first, then wells fallback)
     ctrl_df = None
-    if controls_query:
+    if controls_query and all(c in data.columns for c in ["Library", "cpd_type"]):
         try:
             tmp = data.query(controls_query)
             if tmp.shape[0] >= 2000:
                 ctrl_df = tmp
             else:
-                logger.warning("%s: controls query returned %d rows (<2000); will try wells fallback.",
-                            compartment, tmp.shape[0])
+                logger.warning(
+                    "%s: controls query returned %d rows (<2000); will try wells fallback.",
+                    compartment, tmp.shape[0]
+                )
         except Exception as exc:
             logger.error("%s: controls query failed (%s). Falling back to wells list. Error: %s",
-                        compartment, controls_query, exc)
+                         compartment, controls_query, exc)
+    # fallback by wells as you already had
+
+
 
     if ctrl_df is None:
         ctrl_df = get_controls_subset_by_wells(
@@ -1381,46 +1608,118 @@ def run_for_compartment(
             if not stats.empty else num_feats[:3]
         )
 
-    # Compute early–late deltas per well and render heatmaps (if Plate/Well present)
+    # Compute maps and render heatmaps (if Plate/Well present)
     if plate_col in data.columns and well_col in data.columns:
         hm_dir = comp_dir / "heatmaps"
         hm_dir.mkdir(exist_ok=True)
+        pdf_count = 0
+
         for feat in heat_feats:
+            made_any = 0
 
-            delta_df = compute_plate_delta_robust(
-                        df=data,
-                        feature=feat,
-                        image_col=image_col,
-                        plate_col=plate_col,
-                        well_col=well_col,
-                        early_frac=0.2,
-                        min_images_per_side=1,
-                        logger=logger,
-        )
-
-
-            delta_path = hm_dir / f"{feat}.plate_delta.tsv"
-            delta_df.to_csv(delta_path, sep="\t", index=False)
-
-            # One heatmap per plate
-            for plate_id, plate_block in delta_df.groupby(plate_col, observed=False):
-                pdf = hm_dir / f"{feat}.plate_{plate_id}.pdf"
-                plot_plate_heatmap(
-                    plate_df=plate_block,
-                    plate=str(plate_id),
+            # 1) Try delta if requested or in auto mode
+            use_delta = (args.heatmap_mode in ("delta", "auto"))
+            delta_df = None
+            if use_delta:
+                delta_df = compute_plate_delta_robust(
+                    df=data,
+                    feature=feat,
+                    image_col=image_col,
+                    plate_col=plate_col,
                     well_col=well_col,
-                    value_col="delta",
-                    out_pdf=pdf,
+                    early_frac=args.early_frac,
+                    min_images_per_side=args.min_images_per_side,
+                    logger=logger,
                 )
+                non_null = int(delta_df["delta"].notna().sum()) if "delta" in delta_df.columns else 0
+                delta_path = hm_dir / f"{feat}.plate_delta.tsv"
+                delta_df.to_csv(delta_path, sep="\t", index=False)
+                if non_null >= args.min_wells_for_delta:
+                    for plate_id, plate_block in delta_df.groupby(plate_col, observed=False):
+                        pdf = hm_dir / f"{feat}.plate_{plate_id}.delta.pdf"
+                        plot_plate_heatmap(
+                            plate_df=plate_block,
+                            plate=str(plate_id),
+                            well_col=well_col,
+                            value_col="delta",
+                            out_pdf=pdf,
+                        )
+                        made_any += 1
+
+            # 2) If delta was not requested or insufficient, try residual
+            if made_any == 0 and args.heatmap_mode in ("residual", "auto"):
+                resid_df = compute_plate_residual_map(
+                    df=data,
+                    feature=feat,
+                    image_col=image_col,
+                    plate_col=plate_col,
+                    well_col=well_col,
+                    window=args.resid_window,
+                    logger=logger,
+                )
+                resid_path = hm_dir / f"{feat}.plate_residual.tsv"
+                resid_df.to_csv(resid_path, sep="\t", index=False)
+                for plate_id, plate_block in resid_df.groupby(plate_col, observed=False):
+                    pdf = hm_dir / f"{feat}.plate_{plate_id}.residual.pdf"
+                    plot_plate_heatmap(
+                        plate_df=plate_block.rename(columns={"residual": "delta"}),
+                        plate=str(plate_id),
+                        well_col=well_col,
+                        value_col="delta",
+                        out_pdf=pdf,
+                    )
+                    made_any += 1
+
+            # 3) Diagnostics if still nothing
+            if made_any == 0 and args.heatmap_mode in ("time_quantile", "well_median_z", "auto"):
+                # Acquisition quantile
+                tq_df = per_well_time_quantile(
+                    df=data,
+                    image_col=image_col,
+                    plate_col=plate_col,
+                    well_col=well_col,
+                )
+                for plate_id, plate_block in tq_df.groupby(plate_col, observed=False):
+                    pdf = hm_dir / f"{feat}.plate_{plate_id}.acq_time_quantile.pdf"
+                    plot_plate_heatmap(
+                        plate_df=plate_block.rename(columns={"acq_q": "delta"}),
+                        plate=str(plate_id),
+                        well_col=well_col,
+                        value_col="delta",
+                        out_pdf=pdf,
+                    )
+                    made_any += 1
+
+                # Feature median z-score
+                wz_df = per_well_feature_median_z(
+                    df=data,
+                    feature=feat,
+                    plate_col=plate_col,
+                    well_col=well_col,
+                )
+                for plate_id, plate_block in wz_df.groupby(plate_col, observed=False):
+                    pdf = hm_dir / f"{feat}.plate_{plate_id}.well_median_z.pdf"
+                    plot_plate_heatmap(
+                        plate_df=plate_block.rename(columns={"feat_z": "delta"}),
+                        plate=str(plate_id),
+                        well_col=well_col,
+                        value_col="delta",
+                        out_pdf=pdf,
+                    )
+                    made_any += 1
+
+            pdf_count += made_any
+
         logger.info(
-            "%s: wrote plate heatmaps for %d feature(s) -> %s",
-            compartment, len(heat_feats), hm_dir
+            "%s: plate heatmap PDFs created: %d (mode=%s). Output -> %s",
+            compartment, pdf_count, args.heatmap_mode, hm_dir
         )
     else:
         logger.warning(
             "%s: plate/well columns not found (%s, %s); skipping heatmaps.",
             compartment, plate_col, well_col
         )
+
 
 
 
@@ -1514,130 +1813,179 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Stand-alone per-compartment drift QC for CellProfiler object files."
     )
-    parser.add_argument(
+
+    # I/O
+    io = parser.add_argument_group("I/O")
+    io.add_argument(
         "--input_dir",
         required=True,
-        help="Directory containing CellProfiler object CSVs (e.g., *Cell.csv.gz, *Cytoplasm.csv.gz, *Nuclei.csv.gz).",
+        help="Directory containing CellProfiler object CSV/TSV files "
+             "(e.g., *Cell.csv.gz, *Cytoplasm.csv.gz, *Nuclei.csv.gz).",
     )
-    parser.add_argument(
+    io.add_argument(
         "--out_dir",
         required=True,
         help="Directory to write QC outputs (TSVs and plots).",
     )
-    parser.add_argument(
+    io.add_argument(
+        "--include_glob",
+        nargs="+",
+        default=[
+            "*[Nn]uclei*.csv.gz", "*[Nn]uclei*.tsv.gz",
+            "*[Cc]ell*.csv.gz", "*[Cc]ell*.tsv.gz",
+            "*[Cc]ytoplasm*.csv.gz", "*[Cc]ytoplasm*.tsv.gz",
+            "*[Mm]itochondria*.csv.gz", "*[Mm]itochondria*.tsv.gz",
+            "*[Aa]crosome*.csv.gz", "*[Aa]crosome*.tsv.gz",
+        ],
+        help=("Filename patterns to include. Defaults cover Cell/Cytoplasm/Nuclei/"
+              "Mitochondria/Acrosome (csv/tsv, case-agnostic via [Aa])."),
+    )
+
+    # Columns / metadata
+    cols = parser.add_argument_group("Column mapping")
+    cols.add_argument(
         "--image_col",
         default="ImageNumber",
         help="Column indicating acquisition order (default: ImageNumber).",
     )
+    cols.add_argument(
+        "--plate_col",
+        default="Plate_Metadata",
+        help="Column holding plate identifier (default: Plate_Metadata).",
+    )
+    cols.add_argument(
+        "--well_col",
+        default="Well_Metadata",
+        help="Column holding well ID like A01, H12 (default: Well_Metadata).",
+    )
 
-    parser.add_argument(
-                "--include_glob",
-                nargs="+",
-                default=[
-                    "*[Nn]uclei*.csv.gz", "*[Nn]uclei*.tsv.gz",
-                    "*[Cc]ell*.csv.gz", "*[Cc]ell*.tsv.gz",
-                    "*[Cc]ytoplasm*.csv.gz", "*[Cc]ytoplasm*.tsv.gz",
-                    "*[Mm]itochondria*.csv.gz", "*[Mm]itochondria*.tsv.gz",
-                    "*[Aa]crosome*.csv.gz", "*[Aa]crosome*.tsv.gz",
-                ],
-                help=("Filename patterns to include. Defaults cover Cell/Cytoplasm/Nuclei/"
-                    "Mitochondria/Acrosome (csv/tsv, case-agnostic via [Aa])."),
-            )
-
-    parser.add_argument(
+    # Feature selection & plotting
+    feat = parser.add_argument_group("Feature selection and plotting")
+    feat.add_argument(
         "--feature_list_tsv",
         default=None,
         help="Optional TSV (one column, no header) listing exact feature columns to test.",
     )
-    parser.add_argument(
+    feat.add_argument(
         "--plot_features",
         default=None,
         help="Optional comma-separated list of features to plot. Defaults to top drifters.",
     )
-    parser.add_argument(
+    feat.add_argument(
         "--bin_size",
         type=int,
         default=150,
         help="Reserved for future binned-distribution plots (default: 150).",
     )
-    parser.add_argument(
+    feat.add_argument(
         "--max_points_plot",
         type=int,
-        default=200000,
+        default=200_000,
         help="Maximum random-subsampled points for plotting per feature (default: 200000).",
     )
-    parser.add_argument(
-        "--controls_query",
-        default='(Library == "DMSO") or (cpd_type == "DMSO")',
-        help="Pandas query string to subset control objects (e.g., 'Library == \"DMSO\"').",
-    )
-
-
-    parser.add_argument(
-        "--plate_col",
-        default="Plate_Metadata",
-        help="Column holding plate identifier (default: Plate_Metadata).",
-    )
-    parser.add_argument(
-        "--well_col",
-        default="Well_Metadata",
-        help="Column holding well ID like A01, H12 (default: Well_Metadata).",
-    )
-    parser.add_argument(
+    feat.add_argument(
         "--heatmap_features",
         default=None,
-        help="Comma-separated list of features to plot as plate heatmaps (early-late median delta).",
+        help="Comma-separated list of features to plot as plate heatmaps.",
     )
 
-    parser.add_argument(
+    # Drift modelling
+    drift = parser.add_argument_group("Drift modelling")
+    drift.add_argument(
         "--slope_method",
         default="ols_binned",
         choices=["ols_binned", "huber_binned", "ols"],
         help="Slope estimator on per-image medians (default: ols_binned).",
-        )
-    parser.add_argument(
+    )
+    drift.add_argument(
         "--n_bins_slope",
         type=int,
         default=400,
         help="Target number of equal-count bins for slope fitting (default: 400).",
     )
-    parser.add_argument(
+    drift.add_argument(
         "--min_per_bin",
         type=int,
         default=20,
         help="Minimum observations required per bin (default: 20).",
     )
-    parser.add_argument(
+    drift.add_argument(
         "--spearman_mode",
         default="images",
         choices=["images", "objects"],
         help="Compute Spearman on per-image medians or on objects (default: images).",
     )
-    parser.add_argument(
+    drift.add_argument(
         "--spearman_max_objects",
         type=int,
-        default=500000,
+        default=500_000,
         help="If 'objects', random cap of rows for Spearman (default: 500000).",
     )
 
-    parser.add_argument(
+    # Controls handling
+    controls = parser.add_argument_group("Controls handling")
+    controls.add_argument(
+        "--controls_query",
+        default=None,
+        help=("Pandas query string to subset control objects (e.g., 'Library == \"DMSO\"'). "
+              "If required columns are absent, this is skipped."),
+    )
+    controls.add_argument(
         "--controls_wells",
         default="A23,B23,C23,D23,E23,F23,G23,H23,I23,J23,K23,L23,M23,N23,O23,P23",
-        help="Comma-separated list of control wells (case-insensitive). "
-            "Used if controls_query is missing/invalid or yields too few rows.",
+        help=("Comma-separated list of control wells (case-insensitive). "
+              "Used if --controls_query is missing/invalid or yields too few rows."),
     )
-    parser.add_argument(
+    controls.add_argument(
         "--controls_wells_tsv",
         default=None,
-        help="Optional TSV (one well per line, no header) to define control wells. "
-            "Overrides --controls_wells if provided.",
+        help=("Optional TSV (one well per line, no header) to define control wells. "
+              "Overrides --controls_wells if provided."),
     )
 
+    # Heatmap modes & robustness
+    hm = parser.add_argument_group("Heatmap modes and robustness")
+    hm.add_argument(
+        "--heatmap_mode",
+        choices=["auto", "delta", "residual", "time_quantile", "well_median_z"],
+        default="auto",
+        help=("Statistic to plot for plate heatmaps. "
+              "'auto' tries delta then falls back to residual; "
+              "diagnostics include time_quantile and well_median_z."),
+    )
+    hm.add_argument(
+        "--early_frac",
+        type=float,
+        default=0.2,
+        help="Early/late split fraction for delta maps (default: 0.2).",
+    )
+    hm.add_argument(
+        "--min_images_per_side",
+        type=int,
+        default=1,
+        help="Minimum per-well image count required on each side for delta (default: 1).",
+    )
+    hm.add_argument(
+        "--min_wells_for_delta",
+        type=int,
+        default=10,
+        help=("Minimum number of wells with valid early/late medians to accept "
+              "delta heatmaps before falling back (default: 10)."),
+    )
+    hm.add_argument(
+        "--resid_window",
+        type=int,
+        default=301,
+        help="Rolling-median window for residual time trend smoothing (default: 301).",
+    )
 
-    parser.add_argument(
+    # Logging
+    log = parser.add_argument_group("Logging")
+    log.add_argument(
         "--log_level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity (default: INFO).",
     )
+
     main(parser.parse_args())
