@@ -1386,8 +1386,7 @@ def run_for_compartment(
         hm_dir = comp_dir / "heatmaps"
         hm_dir.mkdir(exist_ok=True)
         for feat in heat_feats:
-            delta_df = compute_plate_delta(
-                # Inside run_for_compartment(), replace compute_plate_delta(...) with:
+
             delta_df = compute_plate_delta_robust(
                         df=data,
                         feature=feat,
