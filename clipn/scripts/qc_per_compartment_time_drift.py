@@ -1213,7 +1213,6 @@ def plot_plate_heatmap(
 
     vals = pd.to_numeric(plate_df[value_col], errors="coerce")
     if vals.notna().sum() == 0:
-        # Nothing to plot for this plate
         return
 
     n_rows, n_cols = infer_plate_shape(plate_df[well_col])
@@ -1229,14 +1228,17 @@ def plot_plate_heatmap(
         except Exception:
             continue
 
-    # Robust symmetric limits to ensure visible contrast even if low variance
     finite = grid[np.isfinite(grid)]
     if finite.size == 0:
         return
     low = np.nanpercentile(finite, 2)
     high = np.nanpercentile(finite, 98)
-    vmax = max(abs(low), abs(high))
-    vmin = -vmax
+
+    if low >= 0:  # non-centred metric (e.g., 0..1 quantiles)
+        vmin, vmax = low, high
+    else:        # centred metric (delta/residual/z) -> symmetric scaling
+        vmax = max(abs(low), abs(high))
+        vmin = -vmax
 
     fig = plt.figure(figsize=(max(6, n_cols * 0.4), max(4, n_rows * 0.4)))
     ax = fig.add_subplot(111)
@@ -1252,6 +1254,7 @@ def plot_plate_heatmap(
     fig.tight_layout()
     fig.savefig(out_pdf, dpi=180)
     plt.close(fig)
+
 
 
 
@@ -1377,6 +1380,11 @@ def run_for_compartment(
     spearman_mode: str,
     spearman_max_objects: int,
     controls_wells: list[str],
+    heatmap_mode: str,
+    early_frac: float,
+    min_images_per_side: int,
+    min_wells_for_delta: int,
+    resid_window: int,
     logger: logging.Logger,
 ) -> None:
     """
@@ -1617,24 +1625,21 @@ def run_for_compartment(
         for feat in heat_feats:
             made_any = 0
 
-            # 1) Try delta if requested or in auto mode
-            use_delta = (args.heatmap_mode in ("delta", "auto"))
-            delta_df = None
-            if use_delta:
+            # 1) Delta (auto or explicit)
+            if heatmap_mode in ("delta", "auto"):
                 delta_df = compute_plate_delta_robust(
                     df=data,
                     feature=feat,
                     image_col=image_col,
                     plate_col=plate_col,
                     well_col=well_col,
-                    early_frac=args.early_frac,
-                    min_images_per_side=args.min_images_per_side,
+                    early_frac=early_frac,
+                    min_images_per_side=min_images_per_side,
                     logger=logger,
                 )
-                non_null = int(delta_df["delta"].notna().sum()) if "delta" in delta_df.columns else 0
-                delta_path = hm_dir / f"{feat}.plate_delta.tsv"
-                delta_df.to_csv(delta_path, sep="\t", index=False)
-                if non_null >= args.min_wells_for_delta:
+                delta_df.to_csv(hm_dir / f"{feat}.plate_delta.tsv", sep="\t", index=False)
+                non_null = int(delta_df["delta"].notna().sum()) if "delta" in delta_df else 0
+                if non_null >= min_wells_for_delta:
                     for plate_id, plate_block in delta_df.groupby(plate_col, observed=False):
                         pdf = hm_dir / f"{feat}.plate_{plate_id}.delta.pdf"
                         plot_plate_heatmap(
@@ -1646,19 +1651,18 @@ def run_for_compartment(
                         )
                         made_any += 1
 
-            # 2) If delta was not requested or insufficient, try residual
-            if made_any == 0 and args.heatmap_mode in ("residual", "auto"):
+            # 2) Residuals (fallback or explicit)
+            if made_any == 0 and heatmap_mode in ("residual", "auto"):
                 resid_df = compute_plate_residual_map(
                     df=data,
                     feature=feat,
                     image_col=image_col,
                     plate_col=plate_col,
                     well_col=well_col,
-                    window=args.resid_window,
+                    window=resid_window,
                     logger=logger,
                 )
-                resid_path = hm_dir / f"{feat}.plate_residual.tsv"
-                resid_df.to_csv(resid_path, sep="\t", index=False)
+                resid_df.to_csv(hm_dir / f"{feat}.plate_residual.tsv", sep="\t", index=False)
                 for plate_id, plate_block in resid_df.groupby(plate_col, observed=False):
                     pdf = hm_dir / f"{feat}.plate_{plate_id}.residual.pdf"
                     plot_plate_heatmap(
@@ -1670,9 +1674,8 @@ def run_for_compartment(
                     )
                     made_any += 1
 
-            # 3) Diagnostics if still nothing
-            if made_any == 0 and args.heatmap_mode in ("time_quantile", "well_median_z", "auto"):
-                # Acquisition quantile
+            # 3) Diagnostics if still nothing (or explicitly requested)
+            if made_any == 0 and heatmap_mode in ("time_quantile", "well_median_z", "auto"):
                 tq_df = per_well_time_quantile(
                     df=data,
                     image_col=image_col,
@@ -1690,7 +1693,6 @@ def run_for_compartment(
                     )
                     made_any += 1
 
-                # Feature median z-score
                 wz_df = per_well_feature_median_z(
                     df=data,
                     feature=feat,
@@ -1712,14 +1714,13 @@ def run_for_compartment(
 
         logger.info(
             "%s: plate heatmap PDFs created: %d (mode=%s). Output -> %s",
-            compartment, pdf_count, args.heatmap_mode, hm_dir
+            compartment, pdf_count, heatmap_mode, hm_dir
         )
     else:
         logger.warning(
             "%s: plate/well columns not found (%s, %s); skipping heatmaps.",
             compartment, plate_col, well_col
         )
-
 
 
 
@@ -1802,6 +1803,11 @@ def main(args: argparse.Namespace) -> None:
             spearman_mode=args.spearman_mode,
             spearman_max_objects=args.spearman_max_objects,       # always pass; it's None if not found
             controls_wells=controls_wells,
+            heatmap_mode=args.heatmap_mode,
+            early_frac=args.early_frac,
+            min_images_per_side=args.min_images_per_side,
+            min_wells_for_delta=args.min_wells_for_delta,
+            resid_window=args.resid_window,
             logger=logger,
         )
 
