@@ -58,7 +58,8 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
+from typing import Tuple
+from sklearn.linear_model import HuberRegressor
 from scipy.stats import spearmanr, theilslopes
 
 
@@ -132,6 +133,159 @@ def list_compartment_files(
     for k in mapping:
         mapping[k] = sorted(mapping[k])
     return mapping
+
+
+from typing import Tuple
+from sklearn.linear_model import HuberRegressor  # optional; guard if you prefer no sklearn
+
+
+def per_image_median_series(
+    df: pd.DataFrame,
+    feature: str,
+    image_col: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Create per-image medians for a feature.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table.
+    feature : str
+        Feature column to summarise.
+    image_col : str
+        Column indicating acquisition order (e.g., 'ImageNumber').
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        (x, y) where x are sorted unique image indices (float64),
+        and y are corresponding medians (float64), with NaNs dropped.
+    """
+    sub = df[[image_col, feature]].copy()
+    sub[image_col] = ensure_numeric(sub[image_col])
+    sub[feature] = ensure_numeric(sub[feature])
+    sub = sub.dropna()
+    if sub.empty:
+        return np.array([]), np.array([])
+    med = sub.groupby(image_col, observed=False)[feature].median()
+    med = med.dropna()
+    if med.empty:
+        return np.array([]), np.array([])
+    x = med.index.to_numpy(dtype=float)
+    y = med.to_numpy(dtype=float)
+    order = np.argsort(x)
+    return x[order], y[order]
+
+
+def bin_by_count(
+    x: np.ndarray,
+    y: np.ndarray,
+    n_bins: int = 400,
+    min_per_bin: int = 20,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Bin (x, y) into ~equal-count bins and take bin medians.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        X values (e.g., ImageNumber).
+    y : numpy.ndarray
+        Y values (per-image medians).
+    n_bins : int
+        Target number of bins.
+    min_per_bin : int
+        Minimum observations required to keep a bin.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        (xb, yb) arrays of bin midpoints and bin medians.
+    """
+    n = x.size
+    if n == 0:
+        return x, y
+    k = int(max(5, min(n_bins, n // min_per_bin)))
+    qs = np.linspace(0.0, 1.0, k + 1)
+    edges = np.quantile(x, qs)
+    edges[0] = np.floor(edges[0])
+    edges[-1] = np.ceil(edges[-1]) + 1e-9
+    xb = []
+    yb = []
+    for i in range(k):
+        lo, hi = edges[i], edges[i + 1]
+        mask = (x >= lo) & (x < hi)
+        if mask.sum() >= min_per_bin:
+            xb.append(0.5 * (lo + hi))
+            yb.append(np.median(y[mask]))
+    if not xb:
+        return x, y
+    return np.asarray(xb, dtype=float), np.asarray(yb, dtype=float)
+
+
+def fit_slope(
+    x: np.ndarray,
+    y: np.ndarray,
+    method: str = "ols_binned",
+) -> Tuple[float, float, float]:
+    """
+    Fit a robust slope to (x, y) medians.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        X values (binned midpoints or image numbers).
+    y : numpy.ndarray
+        Y values (binned medians or medians).
+    method : {"ols_binned", "huber_binned", "ols"}
+        Slope estimator to use.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        (slope, ci_low, ci_high). CI is a light bootstrap over bins (or NaN if too few bins).
+    """
+    if x.size < 5:
+        return (np.nan, np.nan, np.nan)
+
+    # Center x to improve conditioning
+    x0 = x - np.median(x)
+    X = x0.reshape(-1, 1)
+
+    if method == "huber_binned":
+        try:
+            hub = HuberRegressor().fit(X, y)
+            slope = float(hub.coef_[0])
+        except Exception:
+            # Fallback to OLS
+            slope = float(np.polyfit(x0, y, deg=1)[0])
+    elif method in ("ols_binned", "ols"):
+        slope = float(np.polyfit(x0, y, deg=1)[0])
+    else:
+        slope = float(np.polyfit(x0, y, deg=1)[0])
+
+    # Bootstrap CI over bins if we have enough bins
+    ci_low = np.nan
+    ci_high = np.nan
+    if x.size >= 15:
+        rng = np.random.default_rng(0)
+        B = 300
+        slopes = []
+        for _ in range(B):
+            idx = rng.integers(0, x.size, size=x.size)
+            xx = x0[idx]
+            yy = y[idx]
+            try:
+                b = float(np.polyfit(xx, yy, deg=1)[0])
+                slopes.append(b)
+            except Exception:
+                continue
+        if slopes:
+            ci_low = float(np.quantile(slopes, 0.025))
+            ci_high = float(np.quantile(slopes, 0.975))
+
+    return (slope, ci_low, ci_high)
 
 
 def infer_compartment_from_name(filename: str) -> Optional[str]:
@@ -370,16 +524,27 @@ def feature_candidates(header: Iterable[str], compartment: str) -> list[str]:
 
 
 # ----------------------------- Core analysis -------------------------------- #
-
 def compute_drift_stats(
     df: pd.DataFrame,
     feature_cols: list[str],
     image_col: str,
     early_frac: float = 0.2,
     min_points: int = 2000,
+    slope_method: str = "ols_binned",
+    n_bins_slope: int = 400,
+    min_per_bin: int = 20,
+    spearman_mode: str = "images",
+    spearman_max_objects: int = 500_000,
 ) -> pd.DataFrame:
     """
-    Compute per-feature drift statistics vs acquisition order.
+    Compute per-feature drift statistics vs acquisition order at scale.
+
+    Strategy
+    --------
+    - Build per-image medians to reduce N dramatically.
+    - Estimate slope on **binned** medians (OLS or Huber).
+    - Compute Spearman on image medians (default) or on objects with a cap.
+    - Early/late comparisons use **object-level** values for effect size.
 
     Parameters
     ----------
@@ -392,63 +557,92 @@ def compute_drift_stats(
     early_frac : float
         Fraction for early/late split (e.g., 0.2 => bottom/top 20%).
     min_points : int
-        Minimum number of non-NaN points required to compute stats.
+        Minimum number of non-NaN object rows required to compute stats.
+    slope_method : {"ols_binned", "huber_binned", "ols"}
+        Slope estimator used on per-image (optionally binned) medians.
+    n_bins_slope : int
+        Target number of equal-count bins for slope fitting.
+    min_per_bin : int
+        Minimum samples required per bin to keep the bin.
+    spearman_mode : {"images", "objects"}
+        Whether to compute Spearman on per-image medians (default) or on objects.
+    spearman_max_objects : int
+        If spearman_mode == "objects", a random cap of object rows used for speed.
 
     Returns
     -------
     pandas.DataFrame
-        Rows: features; columns with rho, p, slope, CI, Cliff's delta and counts.
+        Rows: features; columns with rho, q, slope, CI, Cliff's delta and counts.
     """
-    img = ensure_numeric(df[image_col])
-    valid_img = img.notna()
-    df = df.loc[valid_img].copy()
-    img = img[valid_img]
+    # Ensure numeric image axis
+    img_all = ensure_numeric(df[image_col])
+    df = df.loc[img_all.notna()].copy()
+    img_all = img_all[img_all.notna()]
 
-    # Early/late thresholds
-    q_low = img.quantile(early_frac)
-    q_high = img.quantile(1.0 - early_frac)
+    # Early/late thresholds on the image axis
+    q_low = img_all.quantile(early_frac)
+    q_high = img_all.quantile(1.0 - early_frac)
 
     records = []
     for feat in feature_cols:
-        x = ensure_numeric(df[feat])
-        mask = x.notna()
+        x_obj = ensure_numeric(df[feat])
+        mask = x_obj.notna()
         if mask.sum() < min_points:
             continue
-        xv = x[mask].to_numpy()
-        iv = img[mask].to_numpy()
 
-        # Spearman
-        rho, pval = spearmanr(iv, xv)
+        # Per-image medians (x_img = image numbers, y_img = medians)
+        x_img, y_img = per_image_median_series(df.loc[mask, [image_col, feat]], feature=feat, image_col=image_col)
+        if x_img.size < 5:
+            continue
 
-        # Theil–Sen slope (robust)
-        # theilslopes returns slope, intercept, lo_slope, up_slope
-        slope, _, lo_slope, up_slope = theilslopes(y=xv, x=iv)
+        # Bin and fit slope on image medians
+        xb, yb = bin_by_count(x_img, y_img, n_bins=n_bins_slope, min_per_bin=min_per_bin)
+        slope, lo_slope, up_slope = fit_slope(xb, yb, method=slope_method)
 
-        # Early vs late Cliff's delta
-        early = xv[iv <= q_low]
-        late = xv[iv >= q_high]
+        # Spearman correlation
+        if spearman_mode == "objects":
+            sub = df.loc[mask, [image_col, feat]].dropna()
+            if sub.shape[0] > spearman_max_objects:
+                sub = sub.sample(n=spearman_max_objects, random_state=0)
+            rho, pval = spearmanr(ensure_numeric(sub[image_col]), ensure_numeric(sub[feat]))
+        else:
+            rho, pval = spearmanr(x_img, y_img)
+
+        # Early vs late effect size (object-level)
+        img = img_all.loc[mask]
+        xv = x_obj.loc[mask]
+        early = xv[img <= q_low].to_numpy()
+        late = xv[img >= q_high].to_numpy()
         cd = np.nan
+        early_med = np.nan
+        late_med = np.nan
         if early.size > 0 and late.size > 0:
             cd = cliffs_delta(early, late)
+            early_med = float(np.median(early))
+            late_med = float(np.median(late))
 
         records.append({
             "feature": feat,
-            "n_objects": int(xv.size),
+            "n_objects": int(mask.sum()),
+            "n_images": int(x_img.size),
             "spearman_rho": float(rho),
             "spearman_p": float(pval),
-            "theil_sen_slope": float(slope),
-            "theil_sen_ci_low": float(lo_slope),
-            "theil_sen_ci_high": float(up_slope),
-            "early_median": float(np.median(early)) if early.size else np.nan,
-            "late_median": float(np.median(late)) if late.size else np.nan,
+            "slope_method": slope_method,
+            "slope_binned": float(slope),
+            "slope_ci_low": float(lo_slope) if np.isfinite(lo_slope) else np.nan,
+            "slope_ci_high": float(up_slope) if np.isfinite(up_slope) else np.nan,
+            "early_median": early_med,
+            "late_median": late_med,
             "cliffs_delta": float(cd),
         })
+
     out = pd.DataFrame.from_records(records)
     if out.empty:
         return out
+
     # FDR across all features tested
-    reject, q = benjamini_hochberg(out["spearman_p"].to_numpy(), alpha=0.05)
-    out["spearman_q"] = q
+    _, qvals = benjamini_hochberg(out["spearman_p"].to_numpy(), alpha=0.05)
+    out["spearman_q"] = qvals
     out["drift_flag"] = (np.abs(out["spearman_rho"]) >= 0.10) & (out["spearman_q"] <= 0.01)
     return out.sort_values(["drift_flag", "spearman_q", "spearman_rho"], ascending=[False, True, True])
 
@@ -907,7 +1101,13 @@ def run_for_compartment(
         image_col=image_col,
         early_frac=0.2,
         min_points=2000,
+        slope_method="ols_binned",
+        n_bins_slope=400,
+        min_per_bin=20,
+        spearman_mode="images",
+        spearman_max_objects=500_000,
     )
+
     stats_path = comp_dir / "qc_feature_drift_raw.tsv"
     stats.to_csv(stats_path, sep="\t", index=False)
     logger.info("%s: wrote drift stats -> %s", compartment, stats_path)
@@ -1170,6 +1370,38 @@ if __name__ == "__main__":
         default=None,
         help="Comma-separated list of features to plot as plate heatmaps (early-late median delta).",
     )
+
+    parser.add_argument(
+        "--slope_method",
+        default="ols_binned",
+        choices=["ols_binned", "huber_binned", "ols"],
+        help="Slope estimator on per-image medians (default: ols_binned).",
+        )
+    parser.add_argument(
+        "--n_bins_slope",
+        type=int,
+        default=400,
+        help="Target number of equal-count bins for slope fitting (default: 400).",
+    )
+    parser.add_argument(
+        "--min_per_bin",
+        type=int,
+        default=20,
+        help="Minimum observations required per bin (default: 20).",
+    )
+    parser.add_argument(
+        "--spearman_mode",
+        default="images",
+        choices=["images", "objects"],
+        help="Compute Spearman on per-image medians or on objects (default: images).",
+    )
+    parser.add_argument(
+        "--spearman_max_objects",
+        type=int,
+        default=500000,
+        help="If 'objects', random cap of rows for Spearman (default: 500000).",
+    )
+
     parser.add_argument(
         "--log_level",
         default="INFO",
