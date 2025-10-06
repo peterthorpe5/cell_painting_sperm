@@ -846,54 +846,115 @@ def infer_plate_shape(wells: pd.Series) -> tuple[int, int]:
     return (int(max(rows) + 1), int(max(cols) + 1))
 
 
-def compute_plate_delta(
+def compute_plate_delta_robust(
     df: pd.DataFrame,
     feature: str,
     image_col: str,
     plate_col: str,
     well_col: str,
     early_frac: float = 0.2,
+    min_images_per_side: int = 1,
+    logger: Optional[logging.Logger] = None,
 ) -> pd.DataFrame:
     """
-    Compute per-plate, per-well early-late median delta for a feature.
+    Compute per-plate, per-well early–late median delta robustly.
+
+    This version collapses to per-image medians per well first, then performs an
+    early/late split using plate-specific quantiles of the acquisition axis. For
+    each well, it uses whatever early/late images that well actually has (with a
+    minimum count per side), avoiding the all-NaN 'delta' problem seen when wells
+    occur only in one half of the run.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        Object-level table with feature, plate, well, image columns.
+        Object-level table containing the feature, plate, well and image columns.
     feature : str
-        Feature to summarise.
+        Feature to summarise (must be numeric).
     image_col : str
-        Acquisition-order column.
+        Acquisition-order column (e.g., 'ImageNumber').
     plate_col : str
-        Plate identifier column.
+        Plate identifier column (e.g., 'Plate_Metadata').
     well_col : str
-        Well identifier column (e.g., A01).
+        Well identifier column (e.g., 'Well_Metadata', like 'A01' or 'A1').
     early_frac : float
-        Fraction for early/late split boundaries.
+        Fraction for the lower tail; the upper tail uses (1 - early_frac).
+    min_images_per_side : int
+        Minimum number of per-well images required on each side to compute medians.
+    logger : logging.Logger, optional
+        Logger for progress reporting.
 
     Returns
     -------
     pandas.DataFrame
-        Columns: plate, well, early_median, late_median, delta
+        Columns: [plate_col, well_col, early_median, late_median, delta, n_img_early, n_img_late].
+        Rows with insufficient images on either side have NaN delta.
     """
-    sub = df[[plate_col, well_col, image_col, feature]].dropna()
+    req = [plate_col, well_col, image_col, feature]
+    miss = [c for c in req if c not in df.columns]
+    if miss:
+        raise KeyError(f"Missing required columns for plate delta: {miss}")
+
+    sub = df[req].dropna(subset=[image_col, feature, plate_col, well_col]).copy()
+    sub[image_col] = pd.to_numeric(sub[image_col], errors="coerce")
+    sub[feature] = pd.to_numeric(sub[feature], errors="coerce")
+    sub = sub.dropna(subset=[image_col, feature])
+
     if sub.empty:
-        return pd.DataFrame(columns=[plate_col, well_col, "early_median", "late_median", "delta"])
+        return pd.DataFrame(columns=[plate_col, well_col, "early_median", "late_median",
+                                     "delta", "n_img_early", "n_img_late"])
 
-    # Split thresholds *globally* by acquisition order
-    q_low = sub[image_col].quantile(early_frac)
-    q_high = sub[image_col].quantile(1.0 - early_frac)
+    # Per-image medians per (plate, well)
+    img_med = (
+        sub.groupby([plate_col, well_col, image_col], observed=False)[feature]
+        .median()
+        .rename("value")
+        .reset_index()
+    )
 
-    early = sub.loc[sub[image_col] <= q_low]
-    late = sub.loc[sub[image_col] >= q_high]
+    # Compute plate-specific early/late thresholds
+    thr = (
+        img_med.groupby(plate_col, observed=False)[image_col]
+        .quantile([early_frac, 1.0 - early_frac])
+        .unstack(level=-1)
+        .rename(columns={early_frac: "thr_low", 1.0 - early_frac: "thr_high"})
+        .reset_index()
+    )
 
-    gcols = [plate_col, well_col]
-    e_med = early.groupby(gcols, observed=False)[feature].median().rename("early_median")
-    l_med = late.groupby(gcols, observed=False)[feature].median().rename("late_median")
-    out = e_med.to_frame().join(l_med, how="outer")
+    img_med = img_med.merge(thr, on=plate_col, how="left")
+
+    # Split within each plate using plate thresholds, then summarise per well
+    early = img_med.loc[img_med[image_col] <= img_med["thr_low"]]
+    late = img_med.loc[img_med[image_col] >= img_med["thr_high"]]
+
+    e_med = (
+        early.groupby([plate_col, well_col], observed=False)["value"]
+        .agg(["median", "count"])
+        .rename(columns={"median": "early_median", "count": "n_img_early"})
+    )
+    l_med = (
+        late.groupby([plate_col, well_col], observed=False)["value"]
+        .agg(["median", "count"])
+        .rename(columns={"median": "late_median", "count": "n_img_late"})
+    )
+
+    out = e_med.join(l_med, how="outer")
+    # Enforce a minimal image count per side
+    ok = (out["n_img_early"].fillna(0) >= min_images_per_side) & (
+        out["n_img_late"].fillna(0) >= min_images_per_side
+    )
+    out.loc[~ok, ["early_median", "late_median"]] = np.nan
     out["delta"] = out["late_median"] - out["early_median"]
-    out.reset_index(inplace=True)
+    out = out.reset_index()
+
+    if logger is not None:
+        n_total = out.shape[0]
+        n_valid = int(out["delta"].notna().sum())
+        logger.info(
+            "Plate delta coverage: %d/%d wells with valid early and late medians.",
+            n_valid, n_total
+        )
+
     return out
 
 
@@ -905,26 +966,32 @@ def plot_plate_heatmap(
     out_pdf: Path,
 ) -> None:
     """
-    Render a plate heatmap (imshow) for the given plate.
+    Render a plate heatmap for the given plate.
+
+    Improvements:
+    - Symmetric scaling based on robust percentiles to avoid degenerate colourbars.
+    - Clear warning and early return if all values are NaN.
+    - Grid labels preserved (rows A..P, columns 1..24 for 384-well; adaptively inferred).
 
     Parameters
     ----------
     plate_df : pandas.DataFrame
-        Rows for a single plate with well IDs and value column.
+        Rows for a single plate with well IDs and a numeric value to plot.
     plate : str
-        Plate identifier (used in title/filename).
+        Plate identifier for title/filename.
     well_col : str
-        Well ID column (e.g., A01).
+        Well ID column (e.g., 'A01').
     value_col : str
-        Column in plate_df holding the value to plot (e.g., 'delta').
+        Column holding the value to plot (e.g., 'delta').
     out_pdf : pathlib.Path
-        Output path for pdf.
-
-    Returns
-    -------
-    None
+        Output path for the PDF.
     """
-    if plate_df.empty:
+    if plate_df.empty or value_col not in plate_df.columns:
+        return
+
+    vals = pd.to_numeric(plate_df[value_col], errors="coerce")
+    if vals.notna().sum() == 0:
+        # Nothing to plot for this plate
         return
 
     n_rows, n_cols = infer_plate_shape(plate_df[well_col])
@@ -934,11 +1001,24 @@ def plot_plate_heatmap(
         r, c = parse_well_id(str(row[well_col]))
         if pd.isna(r) or pd.isna(c) or r >= n_rows or c >= n_cols:
             continue
-        grid[int(r), int(c)] = row[value_col]
+        v = row[value_col]
+        try:
+            grid[int(r), int(c)] = float(v)
+        except Exception:
+            continue
+
+    # Robust symmetric limits to ensure visible contrast even if low variance
+    finite = grid[np.isfinite(grid)]
+    if finite.size == 0:
+        return
+    low = np.nanpercentile(finite, 2)
+    high = np.nanpercentile(finite, 98)
+    vmax = max(abs(low), abs(high))
+    vmin = -vmax
 
     fig = plt.figure(figsize=(max(6, n_cols * 0.4), max(4, n_rows * 0.4)))
     ax = fig.add_subplot(111)
-    im = ax.imshow(grid, aspect="auto")  # use default colormap
+    im = ax.imshow(grid, aspect="auto", vmin=vmin, vmax=vmax)
     ax.set_title(f"Plate {plate}: {value_col} per well")
     ax.set_xlabel("Column")
     ax.set_ylabel("Row")
@@ -950,6 +1030,7 @@ def plot_plate_heatmap(
     fig.tight_layout()
     fig.savefig(out_pdf, dpi=180)
     plt.close(fig)
+
 
 
 def per_image_summary(
@@ -1306,13 +1387,19 @@ def run_for_compartment(
         hm_dir.mkdir(exist_ok=True)
         for feat in heat_feats:
             delta_df = compute_plate_delta(
-                df=data,
-                feature=feat,
-                image_col=image_col,
-                plate_col=plate_col,
-                well_col=well_col,
-                early_frac=0.2,
-            )
+                # Inside run_for_compartment(), replace compute_plate_delta(...) with:
+            delta_df = compute_plate_delta_robust(
+                        df=data,
+                        feature=feat,
+                        image_col=image_col,
+                        plate_col=plate_col,
+                        well_col=well_col,
+                        early_frac=0.2,
+                        min_images_per_side=1,
+                        logger=logger,
+        )
+
+
             delta_path = hm_dir / f"{feat}.plate_delta.tsv"
             delta_df.to_csv(delta_path, sep="\t", index=False)
 
