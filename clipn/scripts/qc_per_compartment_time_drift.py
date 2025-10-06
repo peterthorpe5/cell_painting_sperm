@@ -374,13 +374,20 @@ def infer_compartment_from_name(filename: str) -> Optional[str]:
         "Cell", "Cytoplasm", or "Nuclei" if detected; otherwise None.
     """
     low = filename.lower()
-    if "nuclei" in low:
-        return "Nuclei"
-    if "cytoplasm" in low:
-        return "Cytoplasm"
-    if "cell" in low and "image" not in low:
-        return "Cell"
+    if "image" in low:
+        return None
+    for key, label in (
+        ("filterednuclei", "Nuclei"),
+        ("nuclei", "Nuclei"),
+        ("cytoplasm", "Cytoplasm"),
+        ("mitochondria", "Mitochondria"),
+        ("acrosome", "Acrosome"),
+        ("cell", "Cell"),
+    ):
+        if key in low:
+            return label
     return None
+
 
 
 def read_object_table(path: Path, logger: logging.Logger) -> pd.DataFrame:
@@ -1345,6 +1352,7 @@ def main(args: argparse.Namespace) -> None:
     """
     out_dir = Path(args.out_dir).resolve()
     logger = setup_logger(out_dir=out_dir, level=args.log_level)
+    include_glob = args.include_glob
 
     # Define input_dir first
     input_dir = Path(args.input_dir).resolve()
@@ -1366,11 +1374,9 @@ def main(args: argparse.Namespace) -> None:
         controls_wells = [w.strip() for w in args.controls_wells.split(",") if w.strip()]
 
 
-    include_glob = args.include_glob or [
-        "*Cell*.csv.gz",
-        "*Cytoplasm*.csv.gz",
-        "*Nuclei*.csv.gz",
-    ]
+
+    include_glob = args.include_glob  # default already set above
+
     files_by_comp = list_compartment_files(input_dir=input_dir, include_glob=include_glob)
     if not files_by_comp:
         logger.error("No matching compartment files found under %s with patterns: %s",
@@ -1433,12 +1439,21 @@ if __name__ == "__main__":
         default="ImageNumber",
         help="Column indicating acquisition order (default: ImageNumber).",
     )
+
     parser.add_argument(
-        "--include_glob",
-        nargs="+",
-        default=None,
-        help="Glob(s) to include (default: '*Cell*.csv.gz' '*Cytoplasm*.csv.gz' '*Nuclei*.csv.gz').",
-    )
+                "--include_glob",
+                nargs="+",
+                default=[
+                    "*[Nn]uclei*.csv.gz", "*[Nn]uclei*.tsv.gz",
+                    "*[Cc]ell*.csv.gz", "*[Cc]ell*.tsv.gz",
+                    "*[Cc]ytoplasm*.csv.gz", "*[Cc]ytoplasm*.tsv.gz",
+                    "*[Mm]itochondria*.csv.gz", "*[Mm]itochondria*.tsv.gz",
+                    "*[Aa]crosome*.csv.gz", "*[Aa]crosome*.tsv.gz",
+                ],
+                help=("Filename patterns to include. Defaults cover Cell/Cytoplasm/Nuclei/"
+                    "Mitochondria/Acrosome (csv/tsv, case-agnostic via [Aa])."),
+            )
+
     parser.add_argument(
         "--feature_list_tsv",
         default=None,
