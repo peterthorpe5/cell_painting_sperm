@@ -615,7 +615,7 @@ def plot_plate_heatmap(
     plate: str,
     well_col: str,
     value_col: str,
-    out_png: Path,
+    out_pdf: Path,
 ) -> None:
     """
     Render a plate heatmap (imshow) for the given plate.
@@ -630,8 +630,8 @@ def plot_plate_heatmap(
         Well ID column (e.g., A01).
     value_col : str
         Column in plate_df holding the value to plot (e.g., 'delta').
-    out_png : pathlib.Path
-        Output path for PNG.
+    out_pdf : pathlib.Path
+        Output path for pdf.
 
     Returns
     -------
@@ -661,7 +661,7 @@ def plot_plate_heatmap(
     ax.set_yticklabels([chr(ord("A") + i) for i in range(n_rows)])
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
-    fig.savefig(out_png, dpi=180)
+    fig.savefig(out_pdf, dpi=180)
     plt.close(fig)
 
 
@@ -711,7 +711,7 @@ def plot_feature_vs_time_hexbin(
     df: pd.DataFrame,
     image_col: str,
     feature: str,
-    out_png: Path,
+    out_pdf: Path,
     rolling_window: int = 301,
     max_points_plot: int = 200_000,
 ) -> None:
@@ -726,8 +726,8 @@ def plot_feature_vs_time_hexbin(
         Acquisition-order column.
     feature : str
         Feature to plot.
-    out_png : pathlib.Path
-        Output PNG path.
+    out_pdf : pathlib.Path
+        Output pdf path.
     rolling_window : int
         Window in samples for rolling median overlay.
     max_points_plot : int
@@ -760,11 +760,12 @@ def plot_feature_vs_time_hexbin(
     cbar = fig.colorbar(hb, ax=ax)
     cbar.set_label("Count")
     fig.tight_layout()
-    fig.savefig(out_png, dpi=180)
+    fig.savefig(out_pdf, dpi=180)
     plt.close(fig)
 
 
 # ------------------------------ Driver -------------------------------------- #
+
 
 def run_for_compartment(
     files: list[Path],
@@ -782,91 +783,127 @@ def run_for_compartment(
     image_meta: Optional[pd.DataFrame],
     logger: logging.Logger,
 ) -> None:
-
-
     """
-    Execute QC for a specific compartment across its files.
+    Execute object-level acquisition-drift QC for a single compartment.
+
+    This function loads all matching object tables for the specified compartment,
+    merges Image-level metadata (if provided), selects an informative set of
+    object-level features, computes drift statistics against acquisition order,
+    writes TSV outputs, generates scalable plots (hexbin + rolling median), and
+    renders per-plate heatmaps of early–late deltas.
 
     Parameters
     ----------
     files : list[pathlib.Path]
-        Files belonging to this compartment.
+        File paths belonging to this compartment (e.g., Cell, Cytoplasm, Nuclei).
     compartment : str
-        Compartment name ("Cell", "Cytoplasm", "Nuclei").
+        Compartment name ("Cell", "Cytoplasm", or "Nuclei").
     out_dir : pathlib.Path
-        Root output directory. Compartment subfolder will be created inside.
+        Root directory to write outputs. A subfolder named after the compartment
+        will be created inside.
     image_col : str
-        Acquisition-order column name.
+        Column indicating acquisition order (e.g., "ImageNumber").
     feature_list : Optional[list[str]]
-        If provided, the exact feature columns to evaluate; otherwise auto-pick.
+        If provided, the exact feature columns to evaluate. If None, features are
+        auto-selected from the table header using `feature_candidates(...)`.
     plot_features : Optional[list[str]]
-        Optional explicit list of features to plot; otherwise pick a small auto-panel.
+        Optional explicit list of features to plot. If None, the top drifting
+        features by FDR are used (fallback to the first few numeric features).
     bin_size : int
-        Plotting helper not used in hexbin (kept for future binned violin option).
+        Reserved for future binned-distribution plots (not used by hexbin plots).
     max_points_plot : int
-        Maximum number of points for plotting (random subsample).
+        Maximum number of randomly sampled object rows to plot per feature,
+        to control output size.
     controls_query : Optional[str]
-        Pandas query string to subset controls-only analysis.
+        Pandas query string to subset control-only analysis (e.g.,
+        '(Library == "DMSO") or (cpd_type == "DMSO")'). If None, control-only
+        stats are skipped.
+    plate_col : str
+        Column name for plate identifier (e.g., "Plate_Metadata").
+    well_col : str
+        Column name for well identifier in 'A01'..'H12' style (e.g., "Well_Metadata").
+    heatmap_features : Optional[str]
+        Comma-separated list of features to include in plate heatmaps. If None,
+        the top three drifting features by FDR are used (fallback to first three).
+    image_meta : Optional[pandas.DataFrame]
+        Image-level metadata keyed by "ImageNumber" to merge onto object rows.
+        May include columns such as Plate/Well/Library/cpd_type.
     logger : logging.Logger
-        Logger.
+        Logger instance for progress and diagnostics.
 
     Returns
     -------
     None
+        Results are written to disk under `out_dir/compartment`.
     """
     comp_dir = out_dir / compartment
     comp_dir.mkdir(parents=True, exist_ok=True)
     logger.info("=== %s: %d file(s) ===", compartment, len(files))
 
-    # Load and concatenate all files for this compartment
-    frames = []
-    for f in files:
-        df = read_object_table(f, logger=logger)
+    # Load and concatenate all object tables for this compartment
+    frames: list[pd.DataFrame] = []
+    for path in files:
+        df = read_object_table(path, logger=logger)
         if image_col not in df.columns:
-            logger.warning("[%s] missing '%s'; skipping file: %s", compartment, image_col, f)
+            logger.warning(
+                "[%s] missing '%s'; skipping file: %s",
+                compartment, image_col, path
+            )
             continue
         frames.append(df)
+
     if not frames:
         logger.warning("No valid tables for %s; skipping.", compartment)
         return
+
     data = pd.concat(frames, axis=0, ignore_index=True)
     n_rows, n_cols = data.shape
     logger.info("%s: concatenated table shape = %s", compartment, (n_rows, n_cols))
 
-        # Merge Image metadata (Plate/Well/controls) if available
+    # Merge Image-level metadata (Plate/Well/controls) if available
     if image_meta is not None:
         if "ImageNumber" not in data.columns:
-            logger.warning("%s: object table missing ImageNumber; cannot merge metadata.", compartment)
+            logger.warning(
+                "%s: object table missing ImageNumber; cannot merge metadata.",
+                compartment
+            )
         else:
-            before = data.shape[1]
-            data = data.merge(image_meta, on="ImageNumber", how="left", validate="many_to_one")
-            logger.info("%s: merged Image metadata columns: +%d cols (now %d).",
-                        compartment, data.shape[1] - before, data.shape[1])
+            before_cols = data.shape[1]
+            data = data.merge(
+                image_meta,
+                on="ImageNumber",
+                how="left",
+                validate="many_to_one"
+            )
+            logger.info(
+                "%s: merged Image metadata columns: +%d cols (now %d).",
+                compartment, data.shape[1] - before_cols, data.shape[1]
+            )
 
-
-    # Select features
+    # Select features (auto or user-provided), then keep numeric only
     if feature_list is None:
-        feats = feature_candidates(data.columns, compartment=compartment)
+        feats = feature_candidates(header=data.columns, compartment=compartment)
         logger.info("%s: auto-selected %d feature(s) for drift testing.", compartment, len(feats))
     else:
         feats = [c for c in feature_list if c in data.columns]
-        logger.info("%s: user-specified %d/%d feature(s) present.", compartment, len(feats), len(feature_list))
+        logger.info(
+            "%s: user-specified %d/%d feature(s) present.",
+            compartment, len(feats), len(feature_list)
+        )
+
     if not feats:
         logger.warning("%s: no features selected; skipping.", compartment)
         return
 
-    # Keep only numeric features to avoid dtype issues
     num_feats = [c for c in feats if pd.api.types.is_numeric_dtype(data[c])]
     if not num_feats:
         logger.warning("%s: no numeric features after filtering; skipping.", compartment)
         return
-    
-    feature_cols=num_feats
 
-    # Compute full drift stats
+    # Compute drift statistics (object-level) and write TSV
     stats = compute_drift_stats(
         df=data,
-        feature_cols=feats,
+        feature_cols=num_feats,
         image_col=image_col,
         early_frac=0.2,
         min_points=2000,
@@ -875,61 +912,82 @@ def run_for_compartment(
     stats.to_csv(stats_path, sep="\t", index=False)
     logger.info("%s: wrote drift stats -> %s", compartment, stats_path)
 
-    # Controls-only analysis (optional)
+    # Optional: control-only analysis (subset via user query)
     if controls_query:
         try:
             ctrl = data.query(controls_query)
             if ctrl.shape[0] >= 2000:
                 stats_ctrl = compute_drift_stats(
                     df=ctrl,
-                    feature_cols=feats,
+                    feature_cols=num_feats,
                     image_col=image_col,
                     early_frac=0.2,
                     min_points=500,
                 )
                 stats_ctrl_path = comp_dir / "qc_feature_drift_controls.tsv"
                 stats_ctrl.to_csv(stats_ctrl_path, sep="\t", index=False)
-                logger.info("%s: wrote control-only drift stats -> %s", compartment, stats_ctrl_path)
+                logger.info(
+                    "%s: wrote control-only drift stats -> %s",
+                    compartment, stats_ctrl_path
+                )
             else:
-                logger.warning("%s: controls subset too small (%d rows); skipping control-only stats.",
-                               compartment, ctrl.shape[0])
-        except Exception as e:
-            logger.error("%s: controls query failed (%s): %s", compartment, controls_query, e)
+                logger.warning(
+                    "%s: controls subset too small (%d rows); skipping control-only stats.",
+                    compartment, ctrl.shape[0]
+                )
+        except Exception as exc:
+            logger.error(
+                "%s: controls query failed (%s): %s",
+                compartment, controls_query, exc
+            )
 
-    # Per-image summary
-    per_img = per_image_summary(data, feature_cols=feats[:20], image_col=image_col)
+    # Per-image summary (medians/IQRs) for a compact panel, then write TSV
+    per_img = per_image_summary(
+        df=data,
+        feature_cols=num_feats[:20],
+        image_col=image_col,
+    )
     per_img_path = comp_dir / "qc_per_image_summary.tsv"
     per_img.to_csv(per_img_path, sep="\t", index=False)
     logger.info("%s: wrote per-image summary -> %s", compartment, per_img_path)
 
-    # Plots: small set (explicit or auto-pick a handful)
+    # Feature shortlist for plots
     if plot_features:
         pfeats = [c for c in plot_features if c in data.columns]
     else:
-        # Auto-pick: top 8 drifting features by q-value (or fallback to first 8)
-        if not stats.empty:
-            pfeats = stats.nsmallest(8, "spearman_q")["feature"].tolist()
-        else:
-            pfeats = feats[:8]
+        pfeats = (
+            stats.nsmallest(8, "spearman_q")["feature"].tolist()
+            if not stats.empty else num_feats[:8]
+        )
+
+    # Hexbin plots with rolling median (scalable for big N)
     plots_dir = comp_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
     for feat in pfeats:
-        out_png = plots_dir / f"{feat}.hexbin.pdf"
+        out_pdf = plots_dir / f"{feat}.hexbin.pdf"
         plot_feature_vs_time_hexbin(
             df=data,
             image_col=image_col,
             feature=feat,
-            out_png=out_png,
+            out_pdf=out_pdf,
             rolling_window=301,
             max_points_plot=max_points_plot,
         )
-        # Determine features for heatmaps
-    if heatmap_features:
-        heat_feats = [s.strip() for s in heatmap_features.split(",") if s.strip() and s.strip() in data.columns]
-    else:
-        heat_feats = stats.nsmallest(3, "spearman_q")["feature"].tolist() if not stats.empty else feats[:3]
+    logger.info("%s: wrote %d plot(s) to %s", compartment, len(pfeats), plots_dir)
 
-    # Compute and save per-plate early-late deltas + heatmaps
+    # Plate heatmaps: choose features explicitly or fall back to top three drifters
+    if heatmap_features:
+        heat_feats = [
+            s.strip() for s in heatmap_features.split(",")
+            if s.strip() and s.strip() in data.columns
+        ]
+    else:
+        heat_feats = (
+            stats.nsmallest(3, "spearman_q")["feature"].tolist()
+            if not stats.empty else num_feats[:3]
+        )
+
+    # Compute early–late deltas per well and render heatmaps (if Plate/Well present)
     if plate_col in data.columns and well_col in data.columns:
         hm_dir = comp_dir / "heatmaps"
         hm_dir.mkdir(exist_ok=True)
@@ -945,22 +1003,26 @@ def run_for_compartment(
             delta_path = hm_dir / f"{feat}.plate_delta.tsv"
             delta_df.to_csv(delta_path, sep="\t", index=False)
 
-            # One PNG per plate
+            # One heatmap per plate
             for plate_id, plate_block in delta_df.groupby(plate_col, observed=False):
-                png = hm_dir / f"{feat}.plate_{plate_id}.pdf"
+                pdf = hm_dir / f"{feat}.plate_{plate_id}.pdf"
                 plot_plate_heatmap(
                     plate_df=plate_block,
                     plate=str(plate_id),
                     well_col=well_col,
                     value_col="delta",
-                    out_png=png,
+                    out_pdf=pdf,
                 )
-        logger.info("%s: wrote plate heatmaps for %d feature(s) -> %s", compartment, len(heat_feats), hm_dir)
+        logger.info(
+            "%s: wrote plate heatmaps for %d feature(s) -> %s",
+            compartment, len(heat_feats), hm_dir
+        )
     else:
-        logger.warning("%s: plate/well columns not found (%s, %s); skipping heatmaps.",
-                       compartment, plate_col, well_col)
+        logger.warning(
+            "%s: plate/well columns not found (%s, %s); skipping heatmaps.",
+            compartment, plate_col, well_col
+        )
 
-    logger.info("%s: wrote %d plot(s) to %s", compartment, len(pfeats), plots_dir)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -979,6 +1041,13 @@ def main(args: argparse.Namespace) -> None:
     out_dir = Path(args.out_dir).resolve()
     logger = setup_logger(out_dir=out_dir, level=args.log_level)
 
+    # Define input_dir first
+    input_dir = Path(args.input_dir).resolve()
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+    # Image table discovery + load
+    image_meta = None
     image_path = find_image_table(input_dir)
     if image_path is None:
         logger.warning("No Image table found under %s. Proceeding without merged metadata.", input_dir)
@@ -986,15 +1055,9 @@ def main(args: argparse.Namespace) -> None:
         logger.info("Using Image table: %s", image_path)
         image_meta = load_image_metadata(image_path, logger=logger)
 
-
     # Normalise a bare 'DMSO' controls_query into a valid boolean expression
     if args.controls_query and args.controls_query.strip().upper() == "DMSO":
         args.controls_query = '(Library == "DMSO") or (cpd_type == "DMSO")'
-
-
-    input_dir = Path(args.input_dir).resolve()
-    if not input_dir.exists():
-        raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     include_glob = args.include_glob or [
         "*Cell*.csv.gz",
@@ -1007,7 +1070,6 @@ def main(args: argparse.Namespace) -> None:
                      input_dir, include_glob)
         return
 
-    # Optional explicit feature list (read from file)
     feature_list: Optional[list[str]] = None
     if args.feature_list_tsv:
         fl_path = Path(args.feature_list_tsv)
@@ -1016,19 +1078,6 @@ def main(args: argparse.Namespace) -> None:
     plot_features: Optional[list[str]] = None
     if args.plot_features:
         plot_features = [s.strip() for s in args.plot_features.split(",") if s.strip()]
-
-    # Plate heatmaps of early-late delta for selected features
-    # Decide which features to heatmap: explicit list, else top 3 drift features
-    heat_feats = []
-    if plot_features and (len(plot_features) > 0):
-        heat_feats = plot_features[:3]
-    elif not stats.empty:
-        heat_feats = stats.nsmallest(3, "spearman_q")["feature"].tolist()
-
-    # Allow explicit override via --heatmap_features (comma-separated)
-    # This requires passing args.heatmap_features into run_for_compartment or grabbing from closure
-
-
 
     for comp, files in files_by_comp.items():
         run_for_compartment(
@@ -1041,14 +1090,15 @@ def main(args: argparse.Namespace) -> None:
             bin_size=args.bin_size,
             max_points_plot=args.max_points_plot,
             controls_query=args.controls_query,
-            plate_col=args.plate_col,                 
-            well_col=args.well_col,                   
+            plate_col=args.plate_col,
+            well_col=args.well_col,
             heatmap_features=args.heatmap_features,
-            image_meta=image_meta if image_path else None,
+            image_meta=image_meta,        # always pass; it's None if not found
             logger=logger,
         )
 
     logger.info("Done.")
+
 
 
 if __name__ == "__main__":
