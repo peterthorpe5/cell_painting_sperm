@@ -300,48 +300,73 @@ def rolling_median(y: np.ndarray, window: int) -> np.ndarray:
 
 
 # -------------------------- Feature selection ------------------------------- #
-
 def feature_candidates(header: Iterable[str], compartment: str) -> list[str]:
     """
-    Build a conservative default feature panel for a given compartment.
+    Build a conservative default feature panel for an object table.
+
+    Notes
+    -----
+    CellProfiler object tables typically use names like:
+    - Intensity_MeanIntensity_<Channel>
+    - Intensity_MedianIntensity_<Channel>
+    - Intensity_StdIntensity_<Channel>
+    - AreaShape_Area, AreaShape_Compactness, ...
+    - Texture_*_<Channel>_<scale>_<angle>_<bins>
+    - Granularity_<k>_<Channel>
+
+    They usually do NOT have the 'Mean_<Compartment>_' prefix (that appears in
+    image-level summaries). We therefore match on object-style prefixes.
 
     Parameters
     ----------
     header : Iterable[str]
-        Column names of the table.
+        Column names in the object table.
     compartment : str
-        Compartment name ("Cell", "Cytoplasm", "Nuclei").
+        Compartment name ("Cell", "Cytoplasm", "Nuclei"); not used for filtering
+        beyond potential future compartment-specific tweaks.
 
     Returns
     -------
     list[str]
-        Shortlist of informative columns.
+        A shortlist of informative, object-level columns.
     """
-    # Prefix used in many CP exports, e.g. "Mean_Cell_Intensity_..."
-    pref = f"Mean_{compartment}_"
-    # Keep a compact, cross-channel set that captures brightness, spread, size, focus
-    wanted_substrings = [
-        "Intensity_MeanIntensity_",   # channel means (e.g., DAPI, FITC, AF594, AF647, SYTO14)
-        "Intensity_MedianIntensity_",
-        "Intensity_StdIntensity_",
-        "AreaShape_Area",
-        "Texture_Entropy_",          # rough focus/texture proxy
-        "Granularity_1_",            # coarse granularity
-    ]
+    blacklist_prefixes = (
+        "FileName_", "PathName_", "MD5Digest_", "URL_", "Location_CenterMassIntensity_",
+        "Group_", "Channel_", "ExecutionTime_", "Image_",  # Image_ are image-level aggregates
+    )
+    blacklist_exact = {
+        "ObjectNumber", "ImageNumber", "TableNumber",
+        "Plate", "Plate_Metadata", "Well", "Well_Metadata",
+        "Library", "Treatment", "cpd_id", "cpd_type",
+        "Column_Metadata", "Field_Metadata", "Row", "Column",
+        "ImageName", "ImageId", "ImageSeries",
+    }
+
+    wanted_prefixes = (
+        "Intensity_MeanIntensity_", "Intensity_MedianIntensity_", "Intensity_StdIntensity_",
+        "Intensity_MaxIntensity_", "Intensity_MinIntensity_",
+        "AreaShape_", "Texture_", "Granularity_",
+        "Neighbors_", "RadialDistribution_",  # optional but sometimes useful
+    )
+
     out: list[str] = []
     for c in header:
-        if not c.startswith(pref):
+        if c in blacklist_exact:
             continue
-        if any(sub in c for sub in wanted_substrings):
+        if any(c.startswith(bp) for bp in blacklist_prefixes):
+            continue
+        if any(c.startswith(wp) for wp in wanted_prefixes):
             out.append(c)
-    # De-duplicate while preserving order
+
+    # Keep stable order and cap size to avoid huge default runs
     seen = set()
     uniq = []
     for c in out:
         if c not in seen:
             seen.add(c)
             uniq.append(c)
-    return uniq[:120]  # guardrail: keep it modest
+    return uniq[:200]
+
 
 
 # ----------------------------- Core analysis -------------------------------- #
@@ -426,6 +451,218 @@ def compute_drift_stats(
     out["spearman_q"] = q
     out["drift_flag"] = (np.abs(out["spearman_rho"]) >= 0.10) & (out["spearman_q"] <= 0.01)
     return out.sort_values(["drift_flag", "spearman_q", "spearman_rho"], ascending=[False, True, True])
+
+
+
+def find_image_table(input_dir: Path) -> Optional[Path]:
+    """
+    Locate a single Image table (e.g., '*Image*.csv.gz') under input_dir.
+
+    Parameters
+    ----------
+    input_dir : pathlib.Path
+        Folder to search.
+
+    Returns
+    -------
+    Optional[pathlib.Path]
+        Path to the Image table if found; otherwise None.
+    """
+    candidates = sorted(input_dir.rglob("*Image*.csv.gz"))
+    if not candidates:
+        return None
+    # If multiple, pick the shortest name as a simple heuristic
+    return min(candidates, key=lambda p: len(p.name))
+
+
+def load_image_metadata(path: Path, logger: logging.Logger) -> pd.DataFrame:
+    """
+    Load the Image table and keep columns useful as metadata.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to Image.csv.gz (or .tsv.gz).
+    logger : logging.Logger
+        Logger.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Metadata keyed by ImageNumber (must exist).
+    """
+    img = read_object_table(path, logger=logger)
+    if "ImageNumber" not in img.columns:
+        raise KeyError(f"Image table missing 'ImageNumber': {path}")
+
+    # Keep likely metadata columns if present
+    keep = ["ImageNumber",
+            "Plate", "Plate_Metadata", "Well", "Well_Metadata",
+            "Library", "Treatment", "cpd_id", "cpd_type",
+            "Column_Metadata", "Field_Metadata", "Row", "Column",
+            "ImageName", "ImageId", "ImageSeries"]
+    keep = [c for c in keep if c in img.columns]
+
+    # Also keep any column that clearly encodes time/order if present
+    for extra in ("Metadata_Time", "AcqTime", "AcquisitionTime"):
+        if extra in img.columns and extra not in keep:
+            keep.append(extra)
+
+    meta = img[keep].drop_duplicates("ImageNumber", keep="first")
+    return meta
+
+
+def parse_well_id(well: str) -> tuple[int, int]:
+    """
+    Convert a well like 'A01' or 'H12' to zero-based (row, col).
+
+    Parameters
+    ----------
+    well : str
+        Well identifier.
+
+    Returns
+    -------
+    tuple[int, int]
+        (row_index, col_index) zero-based.
+    """
+    if not isinstance(well, str) or len(well) < 2:
+        return (np.nan, np.nan)
+    row_char = well[0].upper()
+    row_idx = ord(row_char) - ord("A")
+    try:
+        col_idx = int(well[1:]) - 1
+    except Exception:
+        col_idx = np.nan
+    return (row_idx, col_idx)
+
+
+def infer_plate_shape(wells: pd.Series) -> tuple[int, int]:
+    """
+    Infer plate grid size from observed wells.
+
+    Parameters
+    ----------
+    wells : pandas.Series
+        Well IDs like A01..H12.
+
+    Returns
+    -------
+    tuple[int, int]
+        (n_rows, n_cols)
+    """
+    rc = wells.dropna().astype(str).map(parse_well_id)
+    rows = [r for r, c in rc if pd.notna(r)]
+    cols = [c for r, c in rc if pd.notna(c)]
+    if not rows or not cols:
+        return (8, 12)  # sensible default
+    return (int(max(rows) + 1), int(max(cols) + 1))
+
+
+def compute_plate_delta(
+    df: pd.DataFrame,
+    feature: str,
+    image_col: str,
+    plate_col: str,
+    well_col: str,
+    early_frac: float = 0.2,
+) -> pd.DataFrame:
+    """
+    Compute per-plate, per-well early-late median delta for a feature.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table with feature, plate, well, image columns.
+    feature : str
+        Feature to summarise.
+    image_col : str
+        Acquisition-order column.
+    plate_col : str
+        Plate identifier column.
+    well_col : str
+        Well identifier column (e.g., A01).
+    early_frac : float
+        Fraction for early/late split boundaries.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: plate, well, early_median, late_median, delta
+    """
+    sub = df[[plate_col, well_col, image_col, feature]].dropna()
+    if sub.empty:
+        return pd.DataFrame(columns=[plate_col, well_col, "early_median", "late_median", "delta"])
+
+    # Split thresholds *globally* by acquisition order
+    q_low = sub[image_col].quantile(early_frac)
+    q_high = sub[image_col].quantile(1.0 - early_frac)
+
+    early = sub.loc[sub[image_col] <= q_low]
+    late = sub.loc[sub[image_col] >= q_high]
+
+    gcols = [plate_col, well_col]
+    e_med = early.groupby(gcols, observed=False)[feature].median().rename("early_median")
+    l_med = late.groupby(gcols, observed=False)[feature].median().rename("late_median")
+    out = e_med.to_frame().join(l_med, how="outer")
+    out["delta"] = out["late_median"] - out["early_median"]
+    out.reset_index(inplace=True)
+    return out
+
+
+def plot_plate_heatmap(
+    plate_df: pd.DataFrame,
+    plate: str,
+    well_col: str,
+    value_col: str,
+    out_png: Path,
+) -> None:
+    """
+    Render a plate heatmap (imshow) for the given plate.
+
+    Parameters
+    ----------
+    plate_df : pandas.DataFrame
+        Rows for a single plate with well IDs and value column.
+    plate : str
+        Plate identifier (used in title/filename).
+    well_col : str
+        Well ID column (e.g., A01).
+    value_col : str
+        Column in plate_df holding the value to plot (e.g., 'delta').
+    out_png : pathlib.Path
+        Output path for PNG.
+
+    Returns
+    -------
+    None
+    """
+    if plate_df.empty:
+        return
+
+    n_rows, n_cols = infer_plate_shape(plate_df[well_col])
+    grid = np.full((n_rows, n_cols), np.nan, dtype=float)
+
+    for _, row in plate_df.iterrows():
+        r, c = parse_well_id(str(row[well_col]))
+        if pd.isna(r) or pd.isna(c) or r >= n_rows or c >= n_cols:
+            continue
+        grid[int(r), int(c)] = row[value_col]
+
+    fig = plt.figure(figsize=(max(6, n_cols * 0.4), max(4, n_rows * 0.4)))
+    ax = fig.add_subplot(111)
+    im = ax.imshow(grid, aspect="auto")  # use default colormap
+    ax.set_title(f"Plate {plate}: {value_col} per well")
+    ax.set_xlabel("Column")
+    ax.set_ylabel("Row")
+    ax.set_xticks(range(n_cols))
+    ax.set_xticklabels([str(i + 1) for i in range(n_cols)], rotation=0)
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels([chr(ord("A") + i) for i in range(n_rows)])
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
 
 
 def per_image_summary(
@@ -539,8 +776,14 @@ def run_for_compartment(
     bin_size: int,
     max_points_plot: int,
     controls_query: Optional[str],
+    plate_col: str,
+    well_col: str,
+    heatmap_features: Optional[str],
+    image_meta: Optional[pd.DataFrame],
     logger: logging.Logger,
 ) -> None:
+
+
     """
     Execute QC for a specific compartment across its files.
 
@@ -590,6 +833,17 @@ def run_for_compartment(
     n_rows, n_cols = data.shape
     logger.info("%s: concatenated table shape = %s", compartment, (n_rows, n_cols))
 
+        # Merge Image metadata (Plate/Well/controls) if available
+    if image_meta is not None:
+        if "ImageNumber" not in data.columns:
+            logger.warning("%s: object table missing ImageNumber; cannot merge metadata.", compartment)
+        else:
+            before = data.shape[1]
+            data = data.merge(image_meta, on="ImageNumber", how="left", validate="many_to_one")
+            logger.info("%s: merged Image metadata columns: +%d cols (now %d).",
+                        compartment, data.shape[1] - before, data.shape[1])
+
+
     # Select features
     if feature_list is None:
         feats = feature_candidates(data.columns, compartment=compartment)
@@ -600,6 +854,14 @@ def run_for_compartment(
     if not feats:
         logger.warning("%s: no features selected; skipping.", compartment)
         return
+
+    # Keep only numeric features to avoid dtype issues
+    num_feats = [c for c in feats if pd.api.types.is_numeric_dtype(data[c])]
+    if not num_feats:
+        logger.warning("%s: no numeric features after filtering; skipping.", compartment)
+        return
+    
+    feature_cols=num_feats
 
     # Compute full drift stats
     stats = compute_drift_stats(
@@ -652,7 +914,7 @@ def run_for_compartment(
     plots_dir = comp_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
     for feat in pfeats:
-        out_png = plots_dir / f"{feat}.hexbin.png"
+        out_png = plots_dir / f"{feat}.hexbin.pdf"
         plot_feature_vs_time_hexbin(
             df=data,
             image_col=image_col,
@@ -661,6 +923,43 @@ def run_for_compartment(
             rolling_window=301,
             max_points_plot=max_points_plot,
         )
+        # Determine features for heatmaps
+    if heatmap_features:
+        heat_feats = [s.strip() for s in heatmap_features.split(",") if s.strip() and s.strip() in data.columns]
+    else:
+        heat_feats = stats.nsmallest(3, "spearman_q")["feature"].tolist() if not stats.empty else feats[:3]
+
+    # Compute and save per-plate early-late deltas + heatmaps
+    if plate_col in data.columns and well_col in data.columns:
+        hm_dir = comp_dir / "heatmaps"
+        hm_dir.mkdir(exist_ok=True)
+        for feat in heat_feats:
+            delta_df = compute_plate_delta(
+                df=data,
+                feature=feat,
+                image_col=image_col,
+                plate_col=plate_col,
+                well_col=well_col,
+                early_frac=0.2,
+            )
+            delta_path = hm_dir / f"{feat}.plate_delta.tsv"
+            delta_df.to_csv(delta_path, sep="\t", index=False)
+
+            # One PNG per plate
+            for plate_id, plate_block in delta_df.groupby(plate_col, observed=False):
+                png = hm_dir / f"{feat}.plate_{plate_id}.pdf"
+                plot_plate_heatmap(
+                    plate_df=plate_block,
+                    plate=str(plate_id),
+                    well_col=well_col,
+                    value_col="delta",
+                    out_png=png,
+                )
+        logger.info("%s: wrote plate heatmaps for %d feature(s) -> %s", compartment, len(heat_feats), hm_dir)
+    else:
+        logger.warning("%s: plate/well columns not found (%s, %s); skipping heatmaps.",
+                       compartment, plate_col, well_col)
+
     logger.info("%s: wrote %d plot(s) to %s", compartment, len(pfeats), plots_dir)
 
 
@@ -679,6 +978,19 @@ def main(args: argparse.Namespace) -> None:
     """
     out_dir = Path(args.out_dir).resolve()
     logger = setup_logger(out_dir=out_dir, level=args.log_level)
+
+    image_path = find_image_table(input_dir)
+    if image_path is None:
+        logger.warning("No Image table found under %s. Proceeding without merged metadata.", input_dir)
+    else:
+        logger.info("Using Image table: %s", image_path)
+        image_meta = load_image_metadata(image_path, logger=logger)
+
+
+    # Normalise a bare 'DMSO' controls_query into a valid boolean expression
+    if args.controls_query and args.controls_query.strip().upper() == "DMSO":
+        args.controls_query = '(Library == "DMSO") or (cpd_type == "DMSO")'
+
 
     input_dir = Path(args.input_dir).resolve()
     if not input_dir.exists():
@@ -705,6 +1017,19 @@ def main(args: argparse.Namespace) -> None:
     if args.plot_features:
         plot_features = [s.strip() for s in args.plot_features.split(",") if s.strip()]
 
+    # Plate heatmaps of early-late delta for selected features
+    # Decide which features to heatmap: explicit list, else top 3 drift features
+    heat_feats = []
+    if plot_features and (len(plot_features) > 0):
+        heat_feats = plot_features[:3]
+    elif not stats.empty:
+        heat_feats = stats.nsmallest(3, "spearman_q")["feature"].tolist()
+
+    # Allow explicit override via --heatmap_features (comma-separated)
+    # This requires passing args.heatmap_features into run_for_compartment or grabbing from closure
+
+
+
     for comp, files in files_by_comp.items():
         run_for_compartment(
             files=files,
@@ -716,6 +1041,10 @@ def main(args: argparse.Namespace) -> None:
             bin_size=args.bin_size,
             max_points_plot=args.max_points_plot,
             controls_query=args.controls_query,
+            plate_col=args.plate_col,                 
+            well_col=args.well_col,                   
+            heatmap_features=args.heatmap_features,
+            image_meta=image_meta if image_path else None,
             logger=logger,
         )
 
@@ -773,6 +1102,23 @@ if __name__ == "__main__":
         "--controls_query",
         default='(Library == "DMSO") or (cpd_type == "DMSO")',
         help="Pandas query string to subset control objects (e.g., 'Library == \"DMSO\"').",
+    )
+
+
+    parser.add_argument(
+        "--plate_col",
+        default="Plate_Metadata",
+        help="Column holding plate identifier (default: Plate_Metadata).",
+    )
+    parser.add_argument(
+        "--well_col",
+        default="Well_Metadata",
+        help="Column holding well ID like A01, H12 (default: Well_Metadata).",
+    )
+    parser.add_argument(
+        "--heatmap_features",
+        default=None,
+        help="Comma-separated list of features to plot as plate heatmaps (early-late median delta).",
     )
     parser.add_argument(
         "--log_level",
