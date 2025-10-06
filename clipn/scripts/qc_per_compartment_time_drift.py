@@ -1352,6 +1352,9 @@ def main(args: argparse.Namespace) -> None:
     """
     out_dir = Path(args.out_dir).resolve()
     logger = setup_logger(out_dir=out_dir, level=args.log_level)
+
+    logger.info("Python Version: %s", sys.version_info)
+    logger.info("Command-line Arguments: %s", " ".join(sys.argv))
     include_glob = args.include_glob
 
     # Define input_dir first
