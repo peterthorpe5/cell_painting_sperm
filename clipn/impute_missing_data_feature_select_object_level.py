@@ -778,21 +778,25 @@ def prefix_feature_columns(
     logger: Optional[logging.Logger] = None,
 ) -> pd.DataFrame:
     """
-    Prefix feature columns with '<prefix><sep>' while protecting metadata-like columns.
+    Prefix only *feature* columns with '<prefix><sep>' while protecting metadata.
 
     Protected (never prefixed)
     --------------------------
-    - 'ImageNumber', 'ObjectNumber'
-    - Plate/Well variants: 'Plate', 'Well', 'Plate_Metadata', 'Well_Metadata',
-      'Metadata_Plate', 'Metadata_Well', 'Image_Metadata_Plate', 'Image_Metadata_Well'
-    - Any column starting with 'Metadata_', 'FileName_', 'PathName_', or 'URL_'
+    - Core indices/IDs: 'ImageNumber', 'ObjectNumber'
+    - Canonical metadata/IDs used downstream: 'Plate_Metadata', 'Well_Metadata',
+      'cpd_id', 'cpd_type', 'Library', 'Dataset', 'Sample'
+    - Common CP variants: 'Plate', 'Well', 'Metadata_Plate', 'Metadata_Well',
+      'Image_Metadata_Plate', 'Image_Metadata_Well'
+    - Any column starting with: 'Metadata_', 'Image_', 'FileName_', 'PathName_',
+      'URL_', 'Series_', 'Image_Metadata_'
+    - Idempotent: if a column is already prefixed with '<prefix><sep>', it is skipped.
 
     Parameters
     ----------
     df : pandas.DataFrame
         DataFrame just read from a CellProfiler object CSV.
     prefix : str
-        Prefix derived from the filename (e.g., 'Nuclei', 'Acrosome').
+        Compartment/source name derived from the filename (e.g., 'Nuclei', 'Cytoplasm').
     sep : str, optional
         Separator between prefix and original column name (default: '__').
     logger : logging.Logger, optional
@@ -801,40 +805,51 @@ def prefix_feature_columns(
     Returns
     -------
     pandas.DataFrame
-        DataFrame with feature columns renamed.
+        DataFrame with feature columns renamed (metadata untouched).
     """
     logger = logger or logging.getLogger("prefix_cols")
-    protected_exact = {
+
+    protected_exact: set[str] = {
+        # Core indices
         "ImageNumber", "ObjectNumber",
-        "Plate", "Well", "Plate_Metadata", "Well_Metadata",
-        "Metadata_Plate", "Metadata_Well",
+        # Canonical metadata used later
+        "Plate_Metadata", "Well_Metadata",
+        "cpd_id", "cpd_type", "Library", "Dataset", "Sample",
+        # Common CP metadata variants
+        "Plate", "Well", "Metadata_Plate", "Metadata_Well",
         "Image_Metadata_Plate", "Image_Metadata_Well",
     }
-    protected_prefixes = ("Metadata_", "FileName_", "PathName_", "URL_")
+    protected_prefixes: tuple[str, ...] = (
+        "Metadata_", "Image_", "FileName_", "PathName_", "URL_", "Series_", "Image_Metadata_"
+    )
 
-    # If some columns are already prefixed with this prefix + sep, avoid double-prefixing.
     already_prefixed = f"{prefix}{sep}"
     rename_map: dict[str, str] = {}
+
+    protected_count = 0
     for col in df.columns:
-        if (
-            (col in protected_exact)
-            or col.startswith(protected_prefixes)
-            or col.startswith(already_prefixed)
-        ):
+        # Skip if already prefixed with this compartment
+        if col.startswith(already_prefixed):
+            protected_count += 1
             continue
-        rename_map[col] = f"{prefix}{sep}{col}"
+        # Skip if explicitly protected or looks like metadata/pathing
+        if (col in protected_exact) or col.startswith(protected_prefixes):
+            protected_count += 1
+            continue
+        # Otherwise, treat as a feature column to prefix
+        rename_map[col] = f"{already_prefixed}{col}"
 
     if rename_map:
         df = df.rename(columns=rename_map)
         logger.info(
-            "Prefixed %d columns with '%s%s' (protected %d).",
-            len(rename_map),
-            prefix,
-            sep,
-            len(df.columns) - len(rename_map),
+            "Prefixed %d columns with '%s%s' (protected/skipped %d).",
+            len(rename_map), prefix, sep, protected_count
         )
     else:
-        logger.info("No columns needed prefixing for prefix '%s'.", prefix)
+        logger.info(
+            "No columns needed prefixing for prefix '%s' (protected/skipped %d).",
+            prefix, protected_count
+        )
 
     return df
 
@@ -899,6 +914,8 @@ def attach_plate_well_with_fallback(
             base = base[: -len(suff)]
             break
     sibling_candidates = [input_dir / f"{base}_Image.csv.gz", input_dir / f"{base}_Image.csv"]
+    # Drop hidden/sidecar image candidates (e.g., ._HepG2CP_Image.csv.gz)
+    sibling_candidates = [p for p in sibling_candidates if not p.name.startswith((".", "_"))]
 
     image_path = next((p for p in sibling_candidates if p.exists()), None)
 
@@ -911,6 +928,9 @@ def attach_plate_well_with_fallback(
                 image_files.extend(sorted(input_dir.glob(pat)))
             # Deduplicate
             seen = set()
+            # MAC ._ names causing issues.
+            image_files = [f for f in image_files if not f.name.startswith((".", "_"))]
+
             uniq = [p for p in image_files if not (p in seen or seen.add(p))]
             if len(uniq) == 1:
                 logger.info("Using single-folder image table as fallback: %s", uniq[0].name)
@@ -2509,6 +2529,8 @@ def main():
 
 
     # 2. Harmonise plate/well columns
+
+    
     merge_keys = [k.strip() for k in args.merge_keys.split(",")]
 
     plate_candidates = _uniq([
