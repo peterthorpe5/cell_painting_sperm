@@ -2773,9 +2773,9 @@ if __name__ == "__main__":
     hm.add_argument(
         "--min_wells_for_delta",
         type=int,
-        default=10,
+        default=5,
         help=("Minimum number of wells with valid early/late medians to accept "
-              "delta heatmaps before falling back (default: 10)."),
+              "delta heatmaps before falling back (default: 5)."),
     )
     hm.add_argument(
         "--resid_window",
