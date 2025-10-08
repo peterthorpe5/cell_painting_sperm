@@ -54,7 +54,7 @@ import os
 import numpy as np
 import pandas as pd
 from collections import Counter
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Iterable
 
 import matplotlib
 matplotlib.use("Agg")
@@ -976,7 +976,8 @@ def find_image_table(input_dir: Path) -> Optional[Path]:
     Optional[pathlib.Path]
         Path to the Image table if found; otherwise None.
     """
-    candidates = sorted(input_dir.rglob("*Image*.csv.gz"))
+    candidates = sorted(list(input_dir.rglob("*Image*.csv.gz")) +
+                    list(input_dir.rglob("*Image*.tsv.gz")))
     if not candidates:
         return None
     # If multiple, pick the shortest name as a simple heuristic
@@ -1298,9 +1299,6 @@ def per_image_summary(
 
 
 # ----------------------------- Plotting ------------------------------------- #
-
-from collections import Counter
-from typing import List, Tuple, Optional, Dict
 
 
 def per_image_iqr_series(
@@ -2245,6 +2243,12 @@ def run_for_compartment(
     plots_dir = comp_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
     for feat in pfeats:
+        stats_row = None
+        if 'feature' in stats.columns:
+            hit = stats.loc[stats['feature'] == feat]
+            if not hit.empty:
+                stats_row = hit.iloc[0]
+
         out_pdf = plots_dir / f"{feat}.hexbin.pdf"
         plot_feature_vs_time_hexbin_with_trend(
             df=data,
@@ -2253,13 +2257,10 @@ def run_for_compartment(
             out_pdf=out_pdf,
             rolling_window=301,
             max_points_plot=max_points_plot,
-            stats_row=row,
+            stats_row=stats_row,
             early_frac=0.2,
         )
-
     logger.info("%s: wrote %d plot(s) to %s", compartment, len(pfeats), plots_dir)
-
-
     # Boxpanel plots (FastQC-style)
     box_dir = comp_dir / "boxpanels"
     box_dir.mkdir(exist_ok=True)
