@@ -2250,8 +2250,8 @@ def run_for_compartment(
     if plot_features:
         pfeats = [c for c in plot_features if (c in data.columns) and (c in num_feats)]
     else:
-        pfeats = (stats.nsmallest(8, "spearman_q")["feature"].tolist()
-                  if not stats.empty else num_feats[:8])
+        pfeats = (stats.nsmallest(12, "spearman_q")["feature"].tolist()
+                  if not stats.empty else num_feats[:12])
 
     # ---- Hexbin + trend (all data) ----
     plots_dir = comp_dir / "plots"
