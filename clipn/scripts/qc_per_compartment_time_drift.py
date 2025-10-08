@@ -452,16 +452,30 @@ def benjamini_hochberg(pvals: np.ndarray, alpha: float = 0.05) -> tuple[np.ndarr
         (reject_flags, q_values)
     """
     pvals = np.asarray(pvals, dtype=float)
-    n = pvals.size
-    order = np.argsort(pvals)
+    q = np.full_like(pvals, np.nan, dtype=float)
+
+    mask = np.isfinite(pvals)
+    if mask.sum() == 0:
+        return np.zeros_like(pvals, dtype=bool), q  # nothing to do
+
+    p = pvals[mask]
+    n = p.size
+
+    order = np.argsort(p)
     ranks = np.empty_like(order)
     ranks[order] = np.arange(1, n + 1)
-    q_raw = (pvals * n) / ranks
+
+    q_raw = (p * n) / ranks
     q_sorted = q_raw[order]
+    # monotone non-increasing when moving from smallest p to largest
     q_mon = np.minimum.accumulate(q_sorted[::-1])[::-1]
-    q = np.empty_like(q_mon)
-    q[order] = q_mon
-    reject = q <= alpha
+
+    q_mask = np.empty_like(p, dtype=float)
+    q_mask[order] = q_mon
+    q[mask] = q_mask
+
+    reject = np.zeros_like(pvals, dtype=bool)
+    reject[mask] = q_mask <= alpha
     return reject, q
 
 
