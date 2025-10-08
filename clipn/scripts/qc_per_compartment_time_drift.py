@@ -2599,7 +2599,7 @@ def main(args: argparse.Namespace) -> None:
             min_images_per_side=args.min_images_per_side,
             min_wells_for_delta=args.min_wells_for_delta,
             resid_window=args.resid_window,
-            plot_controls=args.plot_controls
+            plot_controls=args.plot_controls,
             logger=logger,
         )
 
