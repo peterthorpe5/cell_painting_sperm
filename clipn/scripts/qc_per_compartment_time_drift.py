@@ -49,11 +49,12 @@ import warnings
 import argparse
 import logging
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
 import sys 
 import os
 import numpy as np
 import pandas as pd
+from collections import Counter
+from typing import List, Tuple, Optional, Dict
 
 import matplotlib
 matplotlib.use("Agg")
@@ -1300,6 +1301,657 @@ def per_image_summary(
 
 # ----------------------------- Plotting ------------------------------------- #
 
+from collections import Counter
+from typing import List, Tuple, Optional, Dict
+
+
+def per_image_iqr_series(
+    df: pd.DataFrame,
+    feature: str,
+    image_col: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute per-image IQR (Q3 - Q1) for a given feature.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table containing the feature and `image_col`.
+    feature : str
+        Feature for which to compute the per-image IQR.
+    image_col : str
+        Column indicating acquisition order (e.g., 'ImageNumber').
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        (x_img, iqr_img), where x_img are sorted unique image indices and
+        iqr_img are the corresponding per-image IQR values. NaNs are dropped.
+    """
+    sub = df[[image_col, feature]].copy()
+    sub[image_col] = ensure_numeric(sub[image_col])
+    sub[feature] = ensure_numeric(sub[feature])
+    sub = sub.dropna()
+    if sub.empty:
+        return np.array([]), np.array([])
+
+    grouped = sub.groupby(image_col, observed=False)[feature]
+    q1 = grouped.quantile(0.25)
+    q3 = grouped.quantile(0.75)
+    iqr = (q3 - q1).dropna()
+    if iqr.empty:
+        return np.array([]), np.array([])
+
+    x = iqr.index.to_numpy(dtype=float)
+    y = iqr.to_numpy(dtype=float)
+    order = np.argsort(x)
+    return x[order], y[order]
+
+
+def make_equal_count_bins(
+    x: np.ndarray,
+    target_per_bin: int = 100,
+    min_per_bin: int = 8,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Create equal-count time bins on a 1D array of image indices.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Array of image indices (float or int), typically sorted `ImageNumber`s.
+    target_per_bin : int
+        Target number of images per bin.
+    min_per_bin : int
+        Minimum number of images allowed in a bin; small tail bins are merged.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+        (bin_ids, bin_edges, bin_counts)
+        bin_ids : integer bin assignment for each x element (1..K).
+        bin_edges : edges in x-units (length K+1).
+        bin_counts : number of images per bin (length K).
+    """
+    if x.size == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    # Determine initial number of bins
+    n_bins = max(1, int(np.ceil(x.size / float(target_per_bin))))
+    n_bins = min(n_bins, max(1, x.size // max(min_per_bin, 1)))
+
+    # Quantile edges (equal-count by construction)
+    qs = np.linspace(0.0, 1.0, n_bins + 1)
+    edges = np.quantile(x, qs)
+
+    # Assign, guarding inclusivity at the top edge
+    bin_ids = np.searchsorted(edges, x, side="right")
+    bin_ids = np.clip(bin_ids, 1, n_bins)
+
+    # Merge tiny bins with neighbours
+    counts = np.array([np.sum(bin_ids == k) for k in range(1, n_bins + 1)])
+    # Sweep from left to right, merging bins with < min_per_bin into the previous
+    for k in range(1, n_bins + 1):
+        if counts[k - 1] < min_per_bin and n_bins > 1:
+            # Merge k into k-1 if possible, else into k+1
+            if k > 1:
+                bin_ids[bin_ids == k] = k - 1
+                counts[k - 2] += counts[k - 1]
+                counts[k - 1] = 0
+            elif k < n_bins:
+                bin_ids[bin_ids == k] = k + 1
+                counts[k] += counts[k - 1]
+                counts[k - 1] = 0
+
+    # Re-label bins to be consecutive 1..K after merges
+    unique_bins = sorted(set(bin_ids.tolist()))
+    remap = {b: i + 1 for i, b in enumerate(unique_bins)}
+    bin_ids = np.array([remap[b] for b in bin_ids], dtype=int)
+    K = len(unique_bins)
+    bin_counts = np.array([np.sum(bin_ids == k) for k in range(1, K + 1)])
+
+    # Recompute edges for pretty labelling (min..max of x in each final bin)
+    edges = np.zeros(K + 1, dtype=float)
+    edges[0] = float(x.min())
+    for k in range(1, K):
+        # boundary between k and k+1
+        left = x[bin_ids == k]
+        right = x[bin_ids == (k + 1)]
+        if left.size and right.size:
+            edges[k] = 0.5 * (left.max() + right.min())
+        else:
+            edges[k] = edges[k - 1]
+    edges[K] = float(x.max())
+
+    return bin_ids, edges, bin_counts
+
+
+def plot_time_binned_boxpanel_feature(
+    df: pd.DataFrame,
+    image_col: str,
+    feature: str,
+    out_pdf: Path,
+    target_images_per_bin: int = 100,
+    min_images_per_bin: int = 8,
+    stats_row: Optional[pd.Series] = None,
+    plate_col: Optional[str] = None,
+    early_frac: float = 0.2,
+    show_iqr_panel: bool = True,
+) -> None:
+    """
+    FastQC-style time-binned boxplot panel for a single feature.
+
+    Top row: boxplots of per-image medians across equal-count acquisition bins,
+    with a line through bin medians (trend), early/late horizontal guides,
+    and plate boundary markers.
+
+    Bottom row (optional): boxplots of per-image IQRs across the same bins,
+    showing how within-image variability evolves over time.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table for this compartment. Must contain `image_col`
+        and the specified `feature`. If `plate_col` is provided, it should be
+        present per object (the function aggregates per image).
+    image_col : str
+        Column indicating acquisition order (e.g., 'ImageNumber').
+    feature : str
+        Feature to summarise and plot.
+    out_pdf : pathlib.Path
+        Output PDF path for the figure.
+    target_images_per_bin : int
+        Target number of images per time bin (default: 100).
+    min_images_per_bin : int
+        Minimum number of images allowed in any bin; tiny bins are merged.
+    stats_row : Optional[pandas.Series]
+        Optional per-feature stats to annotate (keys: 'spearman_rho',
+        'spearman_q', 'early_median', 'late_median', 'cliffs_delta').
+        If absent, early/late lines are computed from per-image medians.
+    plate_col : Optional[str]
+        Optional plate identifier column; if given, plate boundary markers and
+        labels are drawn based on the dominant plate per bin.
+    early_frac : float
+        Fraction for early/late split of images (for guides) if stats are not provided.
+    show_iqr_panel : bool
+        Whether to include the IQR boxplot row (default: True).
+
+    Returns
+    -------
+    None
+        Saves a PDF to `out_pdf`.
+    """
+    # --- Build per-image summaries ---
+    x_med, y_med = per_image_median_series(df=df, feature=feature, image_col=image_col)
+    x_iqr, y_iqr = per_image_iqr_series(df=df, feature=feature, image_col=image_col)
+
+    if x_med.size < 5:
+        return  # too few images to make a useful panel
+
+    # --- Create equal-count bins based on images available for medians ---
+    bin_ids, edges, bin_counts = make_equal_count_bins(
+        x=x_med,
+        target_per_bin=target_images_per_bin,
+        min_per_bin=min_images_per_bin,
+    )
+    K = int(bin_ids.max()) if bin_ids.size else 0
+    positions = np.arange(1, K + 1, dtype=float)
+
+    # Group per-image medians by bin
+    bins_med: List[np.ndarray] = [y_med[bin_ids == k] for k in range(1, K + 1)]
+    # Bin medians (for the thin trend line)
+    bin_meds = np.array([np.median(v) if v.size else np.nan for v in bins_med])
+
+    # Build matching bins for IQRs using the same edges (map x_iqr to bin via edges)
+    bins_iqr: List[np.ndarray] = []
+    if show_iqr_panel and x_iqr.size:
+        # Assign iqr images to bins by edges
+        iqr_ids = np.searchsorted(edges, x_iqr, side="right")
+        iqr_ids = np.clip(iqr_ids, 1, K)
+        bins_iqr = [y_iqr[iqr_ids == k] for k in range(1, K + 1)]
+
+    # --- Early/Late guides (prefer object-level stats if provided) ---
+    early_line = np.nan
+    late_line = np.nan
+    rho = np.nan
+    qval = np.nan
+    cliffs = np.nan
+
+    if stats_row is not None:
+        rho = float(stats_row.get("spearman_rho", np.nan))
+        qval = float(stats_row.get("spearman_q", np.nan))
+        cliffs = float(stats_row.get("cliffs_delta", np.nan))
+        early_line = float(stats_row.get("early_median", np.nan))
+        late_line = float(stats_row.get("late_median", np.nan))
+
+    if not np.isfinite(early_line) or not np.isfinite(late_line):
+        # Fallback: compute from per-image medians
+        q_low = np.quantile(x_med, early_frac)
+        q_high = np.quantile(x_med, 1.0 - early_frac)
+        early_vals = y_med[x_med <= q_low]
+        late_vals = y_med[x_med >= q_high]
+        if early_vals.size:
+            early_line = float(np.median(early_vals))
+        if late_vals.size:
+            late_line = float(np.median(late_vals))
+
+    # --- Plate boundary detection (optional) ---
+    plate_boundaries: List[int] = []
+    plate_labels: Dict[int, str] = {}
+    if plate_col is not None and plate_col in df.columns:
+        # Map each image to a plate label
+        img_plate = (
+            df[[image_col, plate_col]]
+            .dropna()
+            .groupby(image_col, observed=False)[plate_col]
+            .agg(lambda s: s.iloc[0])
+        )
+        # Dominant plate per bin
+        bin_plates: List[Optional[str]] = []
+        for k in range(1, K + 1):
+            imgs_k = x_med[bin_ids == k]
+            if imgs_k.size == 0:
+                bin_plates.append(None)
+                continue
+            plate_vals = img_plate.reindex(imgs_k).astype(str).tolist()
+            if len(plate_vals) == 0:
+                bin_plates.append(None)
+            else:
+                most = Counter(plate_vals).most_common(1)[0][0]
+                bin_plates.append(most)
+        # Boundaries where dominant plate changes between bins
+        for k in range(1, K):
+            if bin_plates[k - 1] != bin_plates[k]:
+                plate_boundaries.append(k + 0)  # vertical line at k + 0.5 later
+        # Labels centred over contiguous runs
+        start = 1
+        current = bin_plates[0] if bin_plates else None
+        for k in range(2, K + 2):
+            nxt = bin_plates[k - 1] if (k - 1) < K else None
+            if nxt != current:
+                mid = (start + (k - 1)) / 2.0
+                if current is not None:
+                    plate_labels[int(np.round(mid * 10))] = str(current)  # keyed by rough position
+                start = k
+                current = nxt
+
+    # --- Plot ---
+    nrows = 2 if show_iqr_panel else 1
+    fig = plt.figure(figsize=(max(8.0, K * 0.25), 3.8 * nrows))
+    axes = fig.subplots(nrows=nrows, ncols=1, sharex=True)
+
+    if nrows == 1:
+        axes = [axes]  # make iterable
+
+    # Top: per-image medians
+    ax0 = axes[0]
+    ax0.boxplot(
+        x=bins_med,
+        positions=positions,
+        widths=0.7,
+        manage_ticks=False,
+        showfliers=False,
+    )
+    # Thin line through bin medians
+    ax0.plot(positions, bin_meds, linewidth=1.5)
+
+    # Early/Late horizontal guides
+    if np.isfinite(early_line):
+        ax0.axhline(y=early_line, linestyle="--", linewidth=1)
+    if np.isfinite(late_line):
+        ax0.axhline(y=late_line, linestyle="--", linewidth=1)
+
+    ax0.set_ylabel(f"{feature}\n(per-image median)")
+    ax0.set_title("Time-binned boxplots (equal-count bins)")
+
+    # Plate boundaries
+    for k in plate_boundaries:
+        ax0.axvline(x=k + 0.5, linestyle=":", linewidth=1)
+
+    # Bottom: per-image IQRs
+    if show_iqr_panel:
+        ax1 = axes[1]
+        ax1.boxplot(
+            x=bins_iqr,
+            positions=positions,
+            widths=0.7,
+            manage_ticks=False,
+            showfliers=False,
+        )
+        ax1.set_ylabel(f"{feature}\n(per-image IQR)")
+
+        # Carry plate boundaries to lower panel too
+        for k in plate_boundaries:
+            ax1.axvline(x=k + 0.5, linestyle=":", linewidth=1)
+
+    # X axis: bin indices + n per bin
+    axes[-1].set_xlabel("Acquisition (binned by ImageNumber)")
+    axes[-1].set_xticks(positions)
+    # Show bin counts as labels: e.g., 'n=98'
+    xticklabels = [f"n={int(n)}" for n in bin_counts]
+    axes[-1].set_xticklabels(xticklabels, rotation=90)
+
+    # Add a compact annotation (ρ, q, Δmedian from early/late lines, δ)
+    delta_median = np.nan
+    if np.isfinite(early_line) and np.isfinite(late_line):
+        delta_median = late_line - early_line
+
+    annot = _format_drift_annotation(
+        rho=rho,
+        q=qval,
+        slope=np.nan,  # not shown here (this panel is non-parametric)
+        delta_median=delta_median,
+        cliffs_delta=cliffs,
+    )
+    if annot:
+        axes[0].text(
+            0.01,
+            0.99,
+            annot,
+            transform=axes[0].transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.6, linewidth=0.0),
+        )
+
+    # Plate labels over spans (if any)
+    if plate_labels:
+        for key, lab in plate_labels.items():
+            x_pos = key / 10.0
+            axes[0].text(
+                x_pos,
+                1.02,
+                lab,
+                transform=axes[0].get_xaxis_transform(),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+    fig.tight_layout()
+    fig.savefig(out_pdf, dpi=180)
+    plt.close(fig)
+
+
+def plot_feature_vs_time_hexbin_with_trend(
+    df: pd.DataFrame,
+    image_col: str,
+    feature: str,
+    out_pdf: Path,
+    rolling_window: int = 301,
+    max_points_plot: int = 200_000,
+    stats_row: Optional[pd.Series] = None,
+    early_frac: float = 0.2,
+) -> None:
+    """
+    Plot object-level values vs acquisition order as a hexbin, with a rolling
+    median (non-linear shape), a linear trend line fitted on per-image medians,
+    a light 95% CI ribbon on the trend slope, early/late horizontal guides, and
+    a compact annotation of key drift metrics (rho, q, slope, median delta, delta).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Object-level table containing `image_col` and `feature`.
+    image_col : str
+        Column indicating acquisition order (e.g., "ImageNumber").
+    feature : str
+        Feature to plot on the y-axis.
+    out_pdf : pathlib.Path
+        Output path for the PDF figure.
+    rolling_window : int
+        Window (in samples) for the rolling median overlay on object values.
+    max_points_plot : int
+        Maximum number of object rows to sample for the hexbin (to keep files light).
+    stats_row : Optional[pandas.Series]
+        Optional row from the per-feature stats table providing:
+        'spearman_rho', 'spearman_q', 'slope_binned', 'slope_ci_low',
+        'slope_ci_high', 'early_median', 'late_median', 'cliffs_delta'.
+        If absent, the function computes reasonable fallbacks for plotting.
+    early_frac : float
+        Fraction defining the early/late split for horizontal guides (default 0.2).
+
+    Returns
+    -------
+    None
+        Saves a PDF to `out_pdf`.
+    """
+    # ---- Prepare object-level subsample for hexbin + rolling median ----
+    sub = df[[image_col, feature]].dropna()
+    if sub.empty:
+        return
+    if sub.shape[0] > max_points_plot:
+        sub = sub.sample(n=max_points_plot, random_state=0)
+
+    x = ensure_numeric(sub[image_col]).to_numpy()
+    y = ensure_numeric(sub[feature]).to_numpy()
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+
+    # Rolling median over object values for shape (non-linear drift visible)
+    y_roll = rolling_median(y=y, window=min(rolling_window, max(3, len(y) // 50)))
+
+    # ---- Build per-image medians series for trend line anchor ----
+    # Use just the two columns for speed/memory
+    x_img, y_img = per_image_median_series(
+        df=sub[[image_col, feature]],
+        feature=feature,
+        image_col=image_col,
+    )
+
+    # If too few images, plotting a trend adds no value
+    have_trend = x_img.size >= 5
+
+    # Prepare trend slope and CI (prefer the stats table if supplied)
+    slope = np.nan
+    lo = np.nan
+    hi = np.nan
+    rho = np.nan
+    qval = np.nan
+    early_med = np.nan
+    late_med = np.nan
+    cliffs = np.nan
+
+    if stats_row is not None:
+        slope = float(stats_row.get("slope_binned", np.nan))
+        lo = float(stats_row.get("slope_ci_low", np.nan))
+        hi = float(stats_row.get("slope_ci_high", np.nan))
+        rho = float(stats_row.get("spearman_rho", np.nan))
+        qval = float(stats_row.get("spearman_q", np.nan))
+        early_med = float(stats_row.get("early_median", np.nan))
+        late_med = float(stats_row.get("late_median", np.nan))
+        cliffs = float(stats_row.get("cliffs_delta", np.nan))
+
+    # Fallback: estimate slope quickly if missing
+    if have_trend and (not np.isfinite(slope)):
+        xb, yb = bin_by_count(x=x_img, y=y_img, n_bins=400, min_per_bin=20)
+        if xb.size >= 5:
+            # Centre x to keep intercept stable; fit OLS for plotting
+            x0 = xb - np.median(xb)
+            coef = np.polyfit(x=x0, y=yb, deg=1)
+            slope = float(coef[0])
+
+    # Anchor the line at the median of per-image medians (robust, interpretable)
+    x_c = np.median(x_img) if have_trend else np.median(x)
+    y_c = np.median(y_img) if have_trend else np.median(y)
+
+    # Build line coordinates across the observed x-range
+    x_line = np.linspace(float(x.min()), float(x.max()), num=200)
+    y_line = None
+    y_lo = None
+    y_hi = None
+    if np.isfinite(slope):
+        y_line = y_c + slope * (x_line - x_c)
+        # CI ribbon from slope bounds if available
+        if np.isfinite(lo) and np.isfinite(hi):
+            y_lo = y_c + lo * (x_line - x_c)
+            y_hi = y_c + hi * (x_line - x_c)
+
+    # If early/late medians are missing, estimate them for guides
+    if not np.isfinite(early_med) or not np.isfinite(late_med):
+        q_low = np.quantile(x, early_frac)
+        q_high = np.quantile(x, 1.0 - early_frac)
+        early_vals = y[x <= q_low]
+        late_vals = y[x >= q_high]
+        if early_vals.size > 0:
+            early_med = float(np.median(early_vals))
+        if late_vals.size > 0:
+            late_med = float(np.median(late_vals))
+
+    # ---- Plot ----
+    fig = plt.figure(figsize=(8, 4.8))
+    ax = fig.add_subplot(111)
+
+    hb = ax.hexbin(x, y, gridsize=80, mincnt=1)  # default colormap; no explicit colours
+    ax.plot(x, y_roll, linewidth=2, label="Rolling median")
+
+    # Trend line and its CI ribbon
+    if y_line is not None:
+        ax.plot(x_line, y_line, linewidth=2, linestyle="-", label="Linear trend (per-image medians)")
+        if (y_lo is not None) and (y_hi is not None):
+            ax.fill_between(x_line, y_lo, y_hi, alpha=0.2, label="Trend 95% CI")
+
+    # Early / Late horizontal guides
+    if np.isfinite(early_med):
+        ax.axhline(y=early_med, linestyle="--", linewidth=1, label="Early median")
+    if np.isfinite(late_med):
+        ax.axhline(y=late_med, linestyle="--", linewidth=1, label="Late median")
+
+    ax.set_xlabel(image_col)
+    ax.set_ylabel(feature)
+    ax.set_title("Acquisition drift: hexbin + rolling median + trend")
+
+    cbar = fig.colorbar(hb, ax=ax)
+    cbar.set_label("Object count")
+
+    # Compact metrics annotation
+    annot = _format_drift_annotation(
+        rho=rho,
+        q=qval,
+        slope=slope,
+        delta_median=(late_med - early_med) if (np.isfinite(late_med) and np.isfinite(early_med)) else np.nan,
+        cliffs_delta=cliffs,
+    )
+    if annot:
+        ax.text(
+            0.01,
+            0.99,
+            annot,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.6, linewidth=0.0),
+        )
+
+    # Keep legend compact; avoid duplicate labels
+    handles, labels = ax.get_legend_handles_labels()
+    if labels:
+        # Deduplicate by label while preserving order
+        seen = set()
+        keep = []
+        for h, l in zip(handles, labels):
+            if l not in seen:
+                seen.add(l)
+                keep.append((h, l))
+        ax.legend(
+            handles=[h for h, _ in keep],
+            labels=[l for _, l in keep],
+            loc="lower right",
+            fontsize=8,
+            frameon=True,
+        )
+
+    fig.tight_layout()
+    fig.savefig(out_pdf, dpi=180)
+    plt.close(fig)
+
+
+def _format_drift_annotation(
+    rho: float,
+    q: float,
+    slope: float,
+    delta_median: float,
+    cliffs_delta: float,
+) -> str:
+    """
+    Format a compact, readable annotation of drift metrics.
+
+    Parameters
+    ----------
+    rho : float
+        Spearman rank correlation (per-image medians vs ImageNumber).
+    q : float
+        FDR-adjusted q-value (Benjamini–Hochberg) for the Spearman test.
+    slope : float
+        Linear slope per unit of ImageNumber (per-image medians, binned fit).
+    delta_median : float
+        Late - Early median difference (object-level).
+    cliffs_delta : float
+        Cliff's delta effect size (object-level), in [-1, 1].
+
+    Returns
+    -------
+    str
+        Multi-token string like 'ρ = -0.21; q = 3×10⁻⁵; slope = -8.8e-5 / img; Δmedian = -0.36; δ = -0.22'.
+        Empty string if all metrics are NaN.
+    """
+    parts = []
+
+    if np.isfinite(rho):
+        parts.append(f"ρ = {rho:.2f}")
+
+    if np.isfinite(q):
+        parts.append(f"q = {format_sci(q)}")
+
+    if np.isfinite(slope):
+        parts.append(f"slope = {slope:.3g} / img")
+
+    if np.isfinite(delta_median):
+        parts.append(f"Δmedian = {delta_median:.3g}")
+
+    if np.isfinite(cliffs_delta):
+        parts.append(f"δ = {cliffs_delta:.2f}")
+
+    return "; ".join(parts)
+
+
+def format_sci(x: float, sigfigs: int = 1) -> str:
+    """
+    Format a small p/q-value in scientific notation using a multiplication sign
+    and superscript exponent (e.g., 3×10⁻⁵), falling back to fixed-point when
+    appropriate.
+
+    Parameters
+    ----------
+    x : float
+        Value to format.
+    sigfigs : int
+        Number of significant figures for the mantissa (default 1 → '3×10⁻⁵').
+
+    Returns
+    -------
+    str
+        Nicely formatted value, or 'NA' if not finite.
+    """
+    if not np.isfinite(x):
+        return "NA"
+    if x == 0.0:
+        return "0"
+    exp = int(np.floor(np.log10(abs(x))))
+    mant = x / (10 ** exp)
+    # Use a thin space around the multiplication sign for readability
+    if abs(exp) >= 3:  # scientific format
+        mant_str = f"{mant:.{sigfigs}g}"
+        exp_str = str(exp).replace("-", "⁻").translate(str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹"))
+        return f"{mant_str}×10{exp_str}"
+    # Otherwise show in fixed or compact
+    return f"{x:.3g}"
+
+
+
 def plot_feature_vs_time_hexbin(
     df: pd.DataFrame,
     image_col: str,
@@ -1589,19 +2241,48 @@ def run_for_compartment(
             if not stats.empty else num_feats[:8]
         )
 
+# Boxpanel plots (FastQC-style)
+box_dir = comp_dir / "boxpanels"
+box_dir.mkdir(exist_ok=True)
+
+for feat in pfeats:
+    row = None
+    if 'feature' in stats.columns:
+        hit = stats.loc[stats['feature'] == feat]
+        if not hit.empty:
+            row = hit.iloc[0]
+
+    out_pdf = box_dir / f"{feat}.time_binned_boxpanel.pdf"
+    plot_time_binned_boxpanel_feature(
+        df=data,
+        image_col=image_col,
+        feature=feat,
+        out_pdf=out_pdf,
+        target_images_per_bin=100,
+        min_images_per_bin=8,
+        stats_row=row,
+        plate_col=plate_col if plate_col in data.columns else None,
+        early_frac=0.2,
+        show_iqr_panel=True,
+    )
+
+
     # Hexbin plots with rolling median (scalable for big N)
     plots_dir = comp_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
     for feat in pfeats:
         out_pdf = plots_dir / f"{feat}.hexbin.pdf"
-        plot_feature_vs_time_hexbin(
+        plot_feature_vs_time_hexbin_with_trend(
             df=data,
             image_col=image_col,
             feature=feat,
             out_pdf=out_pdf,
             rolling_window=301,
             max_points_plot=max_points_plot,
+            stats_row=row,
+            early_frac=0.2,
         )
+
     logger.info("%s: wrote %d plot(s) to %s", compartment, len(pfeats), plots_dir)
 
     # Plate heatmaps: choose features explicitly or fall back to top three drifters
