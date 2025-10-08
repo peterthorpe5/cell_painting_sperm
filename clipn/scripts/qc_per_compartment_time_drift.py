@@ -376,18 +376,16 @@ def infer_compartment_from_name(filename: str) -> Optional[str]:
         "Cell", "Cytoplasm", or "Nuclei" if detected; otherwise None.
     """
     low = filename.lower()
-    if "image" in low:
-        return None
-    for key, label in (
-        ("filterednuclei", "Nuclei"),
-        ("nuclei", "Nuclei"),
-        ("cytoplasm", "Cytoplasm"),
-        ("mitochondria", "Mitochondria"),
-        ("acrosome", "Acrosome"),
-        ("cell", "Cell"),
-    ):
-        if key in low:
-            return label
+    if "nuclei" in low:
+        return "Nuclei"
+    if "cytoplasm" in low:
+        return "Cytoplasm"
+    if "cell" in low and "image" not in low:
+        return "Cell"
+    if "mitochondria" in low:
+        return "Mitochondria"
+    if "acrosome" in low:
+        return "Acrosome"
     return None
 
 
@@ -2241,30 +2239,6 @@ def run_for_compartment(
             if not stats.empty else num_feats[:8]
         )
 
-# Boxpanel plots (FastQC-style)
-box_dir = comp_dir / "boxpanels"
-box_dir.mkdir(exist_ok=True)
-
-for feat in pfeats:
-    row = None
-    if 'feature' in stats.columns:
-        hit = stats.loc[stats['feature'] == feat]
-        if not hit.empty:
-            row = hit.iloc[0]
-
-    out_pdf = box_dir / f"{feat}.time_binned_boxpanel.pdf"
-    plot_time_binned_boxpanel_feature(
-        df=data,
-        image_col=image_col,
-        feature=feat,
-        out_pdf=out_pdf,
-        target_images_per_bin=100,
-        min_images_per_bin=8,
-        stats_row=row,
-        plate_col=plate_col if plate_col in data.columns else None,
-        early_frac=0.2,
-        show_iqr_panel=True,
-    )
 
 
     # Hexbin plots with rolling median (scalable for big N)
@@ -2284,6 +2258,33 @@ for feat in pfeats:
         )
 
     logger.info("%s: wrote %d plot(s) to %s", compartment, len(pfeats), plots_dir)
+
+
+    # Boxpanel plots (FastQC-style)
+    box_dir = comp_dir / "boxpanels"
+    box_dir.mkdir(exist_ok=True)
+
+    for feat in pfeats:
+        row = None
+        if 'feature' in stats.columns:
+            hit = stats.loc[stats['feature'] == feat]
+            if not hit.empty:
+                row = hit.iloc[0]
+
+        out_pdf = box_dir / f"{feat}.time_binned_boxpanel.pdf"
+        plot_time_binned_boxpanel_feature(
+            df=data,
+            image_col=image_col,
+            feature=feat,
+            out_pdf=out_pdf,
+            target_images_per_bin=100,
+            min_images_per_bin=8,
+            stats_row=row,
+            plate_col=plate_col if plate_col in data.columns else None,
+            early_frac=0.2,
+            show_iqr_panel=True,
+        )
+    logger.info("%s: wrote %d boxpanel plot(s) to %s", compartment, len(pfeats), box_dir)
 
     # Plate heatmaps: choose features explicitly or fall back to top three drifters
     if heatmap_features:
