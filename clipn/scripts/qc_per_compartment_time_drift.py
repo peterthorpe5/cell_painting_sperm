@@ -105,6 +105,30 @@ def setup_logger(out_dir: Path, level: str = "INFO") -> logging.Logger:
     return logger
 
 
+
+# Features to always exclude (positional, bounding boxes, or flagged as ordinal)
+BLOCKED_FEATURES_DEFAULT = {
+    "AreaShape_BoundingBoxMinimum_Y",
+    "AreaShape_BoundingBoxMinimum_X",
+    "AreaShape_MaximumRadius",
+    "AreaShape_ConvexArea",
+    "AreaShape_EquivalentDiameter",
+    "AreaShape_BoundingBoxArea",
+    "AreaShape_Perimeter",
+    "Location_MaxIntensity_Y_Cy5",
+    "Location_MaxIntensity_X_DAPI",
+    "Intensity_MaxIntensityEdge_DAPI",
+    "Intensity_MinIntensityEdge_DAPI",
+    "Intensity_MinIntensityEdge_Cy5",
+    "Intensity_MinIntensity_Cy5",
+    "Intensity_LowerQuartileIntensity_Cy5",
+    "Intensity_MedianIntensity_Cy5",
+    "Intensity_UpperQuartileIntensity_Cy5",
+    "Intensity_MaxIntensityEdge_Cy5",
+    "Intensity_MaxIntensity_Cy5",
+}
+
+
 # ----------------------------- Helpers ------------------------------------- #
 
 def list_compartment_files(
@@ -2165,6 +2189,24 @@ def run_for_compartment(
     if not num_feats:
         logger.warning("%s: no numeric features after filtering; skipping.", compartment)
         return
+
+    before = len(num_feats)
+    num_feats = [c for c in num_feats if c not in exclude_features]
+    logger.info("%s: excluded %d feature(s) via deny-list; %d remain.",
+                compartment, before - len(num_feats), len(num_feats))
+    if not num_feats:
+        logger.warning("%s: all features excluded; skipping.", compartment)
+        return
+
+    # Also filter plot shortlist and heatmap feature lists
+    if plot_features:
+        pfeats = [c for c in plot_features if c in data.columns and c not in exclude_features]
+    else:
+        pfeats = (stats.nsmallest(8, "spearman_q")["feature"].tolist() if not stats.empty else num_feats[:8])
+        pfeats = [c for c in pfeats if c not in exclude_features]
+
+    # When deriving heat_feats later:
+    heat_feats = [f for f in heat_feats if f not in exclude_features]
 
     # Compute drift statistics (object-level) and write TSV
     stats = compute_drift_stats(
