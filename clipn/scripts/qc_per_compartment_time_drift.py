@@ -128,7 +128,7 @@ BLOCKED_FEATURES_DEFAULT = {
     "Intensity_MaxIntensity_Cy5",
 }
 
-
+exclude_features = BLOCKED_FEATURES_DEFAULT
 # ----------------------------- Helpers ------------------------------------- #
 
 def list_compartment_files(
