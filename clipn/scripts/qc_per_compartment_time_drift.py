@@ -2071,6 +2071,7 @@ def run_for_compartment(
     min_images_per_side: int,
     min_wells_for_delta: int,
     resid_window: int,
+    plot_controls: bool,
     logger: logging.Logger,
 ) -> None:
     """
@@ -2135,10 +2136,7 @@ def run_for_compartment(
     for path in files:
         df = read_object_table(path, logger=logger)
         if image_col not in df.columns:
-            logger.warning(
-                "[%s] missing '%s'; skipping file: %s",
-                compartment, image_col, path
-            )
+            logger.warning("[%s] missing '%s'; skipping file: %s", compartment, image_col, path)
             continue
         frames.append(df)
 
@@ -2147,28 +2145,17 @@ def run_for_compartment(
         return
 
     data = pd.concat(frames, axis=0, ignore_index=True)
-    n_rows, n_cols = data.shape
-    logger.info("%s: concatenated table shape = %s", compartment, (n_rows, n_cols))
+    logger.info("%s: concatenated table shape = %s", compartment, data.shape)
 
     # Merge Image-level metadata (Plate/Well/controls) if available
     if image_meta is not None:
         if "ImageNumber" not in data.columns:
-            logger.warning(
-                "%s: object table missing ImageNumber; cannot merge metadata.",
-                compartment
-            )
+            logger.warning("%s: object table missing ImageNumber; cannot merge metadata.", compartment)
         else:
             before_cols = data.shape[1]
-            data = data.merge(
-                image_meta,
-                on="ImageNumber",
-                how="left",
-                validate="many_to_one"
-            )
-            logger.info(
-                "%s: merged Image metadata columns: +%d cols (now %d).",
-                compartment, data.shape[1] - before_cols, data.shape[1]
-            )
+            data = data.merge(image_meta, on="ImageNumber", how="left", validate="many_to_one")
+            logger.info("%s: merged Image metadata columns: +%d cols (now %d).",
+                        compartment, data.shape[1] - before_cols, data.shape[1])
 
     # Select features (auto or user-provided), then keep numeric only
     if feature_list is None:
@@ -2176,10 +2163,7 @@ def run_for_compartment(
         logger.info("%s: auto-selected %d feature(s) for drift testing.", compartment, len(feats))
     else:
         feats = [c for c in feature_list if c in data.columns]
-        logger.info(
-            "%s: user-specified %d/%d feature(s) present.",
-            compartment, len(feats), len(feature_list)
-        )
+        logger.info("%s: user-specified %d/%d feature(s) present.", compartment, len(feats), len(feature_list))
 
     if not feats:
         logger.warning("%s: no features selected; skipping.", compartment)
@@ -2190,6 +2174,7 @@ def run_for_compartment(
         logger.warning("%s: no numeric features after filtering; skipping.", compartment)
         return
 
+    # Deny-list filter (assumes exclude_features is defined globally)
     before = len(num_feats)
     num_feats = [c for c in num_feats if c not in exclude_features]
     logger.info("%s: excluded %d feature(s) via deny-list; %d remain.",
@@ -2198,17 +2183,7 @@ def run_for_compartment(
         logger.warning("%s: all features excluded; skipping.", compartment)
         return
 
-    # Also filter plot shortlist and heatmap feature lists
-    if plot_features:
-        pfeats = [c for c in plot_features if c in data.columns and c not in exclude_features]
-    else:
-        pfeats = (stats.nsmallest(8, "spearman_q")["feature"].tolist() if not stats.empty else num_feats[:8])
-        pfeats = [c for c in pfeats if c not in exclude_features]
-
-    # When deriving heat_feats later:
-    heat_feats = [f for f in heat_feats if f not in exclude_features]
-
-    # Compute drift statistics (object-level) and write TSV
+    # ---- Compute drift statistics (object-level) and write TSV ----
     stats = compute_drift_stats(
         df=data,
         feature_cols=num_feats,
@@ -2221,39 +2196,31 @@ def run_for_compartment(
         spearman_mode=spearman_mode,
         spearman_max_objects=spearman_max_objects,
     )
-
     stats_path = comp_dir / "qc_feature_drift_raw.tsv"
     stats.to_csv(stats_path, sep="\t", index=False)
     logger.info("%s: wrote drift stats -> %s", compartment, stats_path)
 
-
-    # Optional: control-only analysis (query first, then wells fallback)
+    # ---- Build (possibly sparse) control subset: query first, then wells fallback ----
     ctrl_df = None
     if controls_query and all(c in data.columns for c in ["Library", "cpd_type"]):
         try:
             tmp = data.query(controls_query)
-            if tmp.shape[0] >= 2000:
+            if tmp.shape[0] >= 1:
                 ctrl_df = tmp
             else:
-                logger.warning(
-                    "%s: controls query returned %d rows (<2000); will try wells fallback.",
-                    compartment, tmp.shape[0]
-                )
+                logger.warning("%s: controls query returned %d rows; will try wells fallback.",
+                               compartment, tmp.shape[0])
         except Exception as exc:
             logger.error("%s: controls query failed (%s). Falling back to wells list. Error: %s",
                          compartment, controls_query, exc)
-    # fallback by wells as you already had
-
-
 
     if ctrl_df is None:
         ctrl_df = get_controls_subset_by_wells(
-            df=data,
-            well_col=well_col,
-            controls_wells=controls_wells,
-            logger=logger,
+            df=data, well_col=well_col, controls_wells=controls_wells, logger=logger
         )
 
+    # If we have a reasonably big control subset, also write a stats table
+    stats_ctrl = None
     if ctrl_df is not None and ctrl_df.shape[0] >= 2000:
         stats_ctrl = compute_drift_stats(
             df=ctrl_df,
@@ -2271,31 +2238,22 @@ def run_for_compartment(
         stats_ctrl.to_csv(stats_ctrl_path, sep="\t", index=False)
         logger.info("%s: wrote control-only drift stats -> %s", compartment, stats_ctrl_path)
     else:
-        logger.warning("%s: no adequate control subset available; skipping control-only stats.", compartment)
+        logger.warning("%s: no adequate control subset available for a full stats table.", compartment)
 
-
-    # Per-image summary (medians/IQRs) for a compact panel, then write TSV
-    per_img = per_image_summary(
-        df=data,
-        feature_cols=num_feats[:20],
-        image_col=image_col,
-    )
+    # ---- Per-image summary for a compact panel, then write TSV ----
+    per_img = per_image_summary(df=data, feature_cols=num_feats[:20], image_col=image_col)
     per_img_path = comp_dir / "qc_per_image_summary.tsv"
     per_img.to_csv(per_img_path, sep="\t", index=False)
     logger.info("%s: wrote per-image summary -> %s", compartment, per_img_path)
 
-    # Feature shortlist for plots
+    # ---- Feature shortlist for plots (deny-list applied) ----
     if plot_features:
-        pfeats = [c for c in plot_features if c in data.columns]
+        pfeats = [c for c in plot_features if (c in data.columns) and (c in num_feats)]
     else:
-        pfeats = (
-            stats.nsmallest(8, "spearman_q")["feature"].tolist()
-            if not stats.empty else num_feats[:8]
-        )
+        pfeats = (stats.nsmallest(8, "spearman_q")["feature"].tolist()
+                  if not stats.empty else num_feats[:8])
 
-
-
-    # Hexbin plots with rolling median (scalable for big N)
+    # ---- Hexbin + trend (all data) ----
     plots_dir = comp_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
     for feat in pfeats:
@@ -2317,10 +2275,10 @@ def run_for_compartment(
             early_frac=0.2,
         )
     logger.info("%s: wrote %d plot(s) to %s", compartment, len(pfeats), plots_dir)
-    # Boxpanel plots (FastQC-style)
+
+    # ---- Boxpanel (FastQC-style, all data) ----
     box_dir = comp_dir / "boxpanels"
     box_dir.mkdir(exist_ok=True)
-
     for feat in pfeats:
         row = None
         if 'feature' in stats.columns:
@@ -2343,19 +2301,14 @@ def run_for_compartment(
         )
     logger.info("%s: wrote %d boxpanel plot(s) to %s", compartment, len(pfeats), box_dir)
 
-    # Plate heatmaps: choose features explicitly or fall back to top three drifters
+    # ---- Plate heatmaps (all data) ----
     if heatmap_features:
-        heat_feats = [
-            s.strip() for s in heatmap_features.split(",")
-            if s.strip() and s.strip() in data.columns
-        ]
+        heat_feats = [s.strip() for s in heatmap_features.split(",")
+                      if s.strip() and s.strip() in data.columns and s.strip() in num_feats]
     else:
-        heat_feats = (
-            stats.nsmallest(3, "spearman_q")["feature"].tolist()
-            if not stats.empty else num_feats[:3]
-        )
+        heat_feats = (stats.nsmallest(3, "spearman_q")["feature"].tolist()
+                      if not stats.empty else num_feats[:3])
 
-    # Compute maps and render heatmaps (if Plate/Well present)
     if plate_col in data.columns and well_col in data.columns:
         hm_dir = comp_dir / "heatmaps"
         hm_dir.mkdir(exist_ok=True)
@@ -2413,53 +2366,152 @@ def run_for_compartment(
                     )
                     made_any += 1
 
-            # 3) Diagnostics if still nothing (or explicitly requested)
-            if made_any == 0 and heatmap_mode in ("time_quantile", "well_median_z", "auto"):
-                tq_df = per_well_time_quantile(
-                    df=data,
-                    image_col=image_col,
-                    plate_col=plate_col,
-                    well_col=well_col,
-                )
-                for plate_id, plate_block in tq_df.groupby(plate_col, observed=False):
-                    pdf = hm_dir / f"{feat}.plate_{plate_id}.acq_time_quantile.pdf"
-                    plot_plate_heatmap(
-                        plate_df=plate_block.rename(columns={"acq_q": "delta"}),
-                        plate=str(plate_id),
-                        well_col=well_col,
-                        value_col="delta",
-                        out_pdf=pdf,
-                    )
-                    made_any += 1
-
-                wz_df = per_well_feature_median_z(
-                    df=data,
-                    feature=feat,
-                    plate_col=plate_col,
-                    well_col=well_col,
-                )
-                for plate_id, plate_block in wz_df.groupby(plate_col, observed=False):
-                    pdf = hm_dir / f"{feat}.plate_{plate_id}.well_median_z.pdf"
-                    plot_plate_heatmap(
-                        plate_df=plate_block.rename(columns={"feat_z": "delta"}),
-                        plate=str(plate_id),
-                        well_col=well_col,
-                        value_col="delta",
-                        out_pdf=pdf,
-                    )
-                    made_any += 1
-
-            pdf_count += made_any
-
-        logger.info(
-            "%s: plate heatmap PDFs created: %d (mode=%s). Output -> %s",
-            compartment, pdf_count, heatmap_mode, hm_dir
-        )
+        logger.info("%s: plate heatmap PDFs created (all data) -> %s", compartment, hm_dir)
     else:
-        logger.warning(
-            "%s: plate/well columns not found (%s, %s); skipping heatmaps.",
-            compartment, plate_col, well_col
-        )
+        logger.warning("%s: plate/well columns not found (%s, %s); skipping heatmaps.",
+                       compartment, plate_col, well_col)
+
+    # ============================================================
+    # ===============  CONTROLS-ONLY PLOTTING  ===================
+    # ============================================================
+    if plot_controls:
+        if ctrl_df is None or ctrl_df.empty:
+            logger.warning("%s: controls plotting requested but no control rows found.", compartment)
+            return
+
+        # Pick features for controls: prefer control stats if we have them,
+        # else fall back to overall stats or first few numeric features.
+        if isinstance(stats_ctrl, pd.DataFrame) and not stats_ctrl.empty:
+            pfeats_ctrl = stats_ctrl.nsmallest(8, "spearman_q")["feature"].tolist()
+            stats_for_ann = stats_ctrl
+        elif not stats.empty:
+            pfeats_ctrl = stats.nsmallest(8, "spearman_q")["feature"].tolist()
+            stats_for_ann = stats
+        else:
+            pfeats_ctrl = num_feats[:8]
+            stats_for_ann = None
+
+        # If no stats to annotate (sparse controls), compute a light-weight table
+        if stats_for_ann is None:
+            try:
+                stats_ctrl_light = compute_drift_stats(
+                    df=ctrl_df,
+                    feature_cols=num_feats,
+                    image_col=image_col,
+                    early_frac=0.2,
+                    min_points=200,  # permissive so sparse controls still annotate
+                    slope_method=slope_method,
+                    n_bins_slope=n_bins_slope,
+                    min_per_bin=min_per_bin,
+                    spearman_mode=spearman_mode,
+                    spearman_max_objects=spearman_max_objects,
+                )
+                if not stats_ctrl_light.empty:
+                    stats_for_ann = stats_ctrl_light
+            except Exception:
+                stats_for_ann = None
+
+        # Directories for controls-only outputs
+        plots_c_dir = comp_dir / "plots_controls"
+        box_c_dir   = comp_dir / "boxpanels_controls"
+        hm_c_dir    = comp_dir / "heatmaps_controls"
+        plots_c_dir.mkdir(exist_ok=True)
+        box_c_dir.mkdir(exist_ok=True)
+        hm_c_dir.mkdir(exist_ok=True)
+
+        # Plot per-feature (controls-only)
+        for feat in pfeats_ctrl:
+            # Pick annotation row for this feature if available
+            row_ann = None
+            if (stats_for_ann is not None) and ('feature' in stats_for_ann.columns):
+                hit = stats_for_ann.loc[stats_for_ann['feature'] == feat]
+                if not hit.empty:
+                    row_ann = hit.iloc[0]
+
+            # Hexbin + trend (controls)
+            plot_feature_vs_time_hexbin_with_trend(
+                df=ctrl_df,
+                image_col=image_col,
+                feature=feat,
+                out_pdf=plots_c_dir / f"{feat}.hexbin.controls.pdf",
+                rolling_window=301,
+                max_points_plot=max_points_plot,
+                stats_row=row_ann,
+                early_frac=0.2,
+            )
+
+            # Time-binned boxpanel (controls)
+            plot_time_binned_boxpanel_feature(
+                df=ctrl_df,
+                image_col=image_col,
+                feature=feat,
+                out_pdf=box_c_dir / f"{feat}.time_binned_boxpanel.controls.pdf",
+                target_images_per_bin=100,
+                min_images_per_bin=6,  # a bit more permissive for sparse controls
+                stats_row=row_ann,
+                plate_col=plate_col if plate_col in ctrl_df.columns else None,
+                early_frac=0.2,
+                show_iqr_panel=True,
+            )
+
+            # Heatmaps (controls-only) — be permissive so we always produce something
+            if (plate_col in ctrl_df.columns) and (well_col in ctrl_df.columns):
+                made_any = 0
+                # 1) Delta (plot if at least one non-null per plate)
+                try:
+                    delta_df = compute_plate_delta_robust(
+                        df=ctrl_df,
+                        feature=feat,
+                        image_col=image_col,
+                        plate_col=plate_col,
+                        well_col=well_col,
+                        early_frac=early_frac,
+                        min_images_per_side=1,  # permissive for controls
+                        logger=logger,
+                    )
+                    delta_df.to_csv(hm_c_dir / f"{feat}.plate_delta.controls.tsv", sep="\t", index=False)
+                    for plate_id, plate_block in delta_df.groupby(plate_col, observed=False):
+                        if "delta" in plate_block.columns and plate_block["delta"].notna().any():
+                            pdf = hm_c_dir / f"{feat}.plate_{plate_id}.delta.controls.pdf"
+                            plot_plate_heatmap(
+                                plate_df=plate_block,
+                                plate=str(plate_id),
+                                well_col=well_col,
+                                value_col="delta",
+                                out_pdf=pdf,
+                            )
+                            made_any += 1
+                except Exception:
+                    pass
+
+                # 2) Residual fallback if delta produced nothing usable
+                if made_any == 0:
+                    try:
+                        resid_df = compute_plate_residual_map(
+                            df=ctrl_df,
+                            feature=feat,
+                            image_col=image_col,
+                            plate_col=plate_col,
+                            well_col=well_col,
+                            window=resid_window,
+                            logger=logger,
+                        )
+                        resid_df.to_csv(hm_c_dir / f"{feat}.plate_residual.controls.tsv", sep="\t", index=False)
+                        for plate_id, plate_block in resid_df.groupby(plate_col, observed=False):
+                            if "residual" in plate_block.columns and plate_block["residual"].notna().any():
+                                pdf = hm_c_dir / f"{feat}.plate_{plate_id}.residual.controls.pdf"
+                                plot_plate_heatmap(
+                                    plate_df=plate_block.rename(columns={"residual": "delta"}),
+                                    plate=str(plate_id),
+                                    well_col=well_col,
+                                    value_col="delta",
+                                    out_pdf=pdf,
+                                )
+                    except Exception:
+                        pass
+
+        logger.info("%s: controls-only plots written to %s / %s / %s",
+                    compartment, plots_c_dir, box_c_dir, hm_c_dir)
 
 
 
@@ -2547,6 +2599,7 @@ def main(args: argparse.Namespace) -> None:
             min_images_per_side=args.min_images_per_side,
             min_wells_for_delta=args.min_wells_for_delta,
             resid_window=args.resid_window,
+            plot_controls=args.plot_controls
             logger=logger,
         )
 
@@ -2668,6 +2721,12 @@ if __name__ == "__main__":
     )
 
     # Controls handling
+    controls.add_argument(
+        "--plot_controls",
+        action="store_true",
+        help="Also plot hexbin/boxpanels/heatmaps using the control-only subset (by query or wells), even if sparse.",
+)
+
     controls = parser.add_argument_group("Controls handling")
     controls.add_argument(
         "--controls_query",
