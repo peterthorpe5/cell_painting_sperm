@@ -2721,11 +2721,7 @@ if __name__ == "__main__":
     )
 
     # Controls handling
-    controls.add_argument(
-        "--plot_controls",
-        action="store_true",
-        help="Also plot hexbin/boxpanels/heatmaps using the control-only subset (by query or wells), even if sparse.",
-)
+
 
     controls = parser.add_argument_group("Controls handling")
     controls.add_argument(
@@ -2747,6 +2743,11 @@ if __name__ == "__main__":
               "Overrides --controls_wells if provided."),
     )
 
+    controls.add_argument(
+        "--plot_controls",
+        action="store_true",
+        help="Also plot hexbin/boxpanels/heatmaps using the control-only subset (by query or wells), even if sparse.",
+)
     # Heatmap modes & robustness
     hm = parser.add_argument_group("Heatmap modes and robustness")
     hm.add_argument(
