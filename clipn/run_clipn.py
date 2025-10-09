@@ -1261,133 +1261,119 @@ def _mean_within_group_cosine(
     random_seed: int = 0,
 ) -> pd.DataFrame:
     """
-    Compute per-group within-replicate cosine similarity statistics without
-    forming an all-pairs similarity matrix.
+    Compute within-replicate cosine similarity statistics per group, without
+    constructing a full similarity matrix.
 
-    This returns the exact mean pairwise cosine for each group using:
-        mean = (||sum(v)||^2 - n) / (n * (n - 1))
-    where rows v are L2-normalised feature vectors in X.
+    The exact mean pairwise cosine for a group of L2-normalised rows {v_i} is:
+        mean = (||Σ v_i||^2 - n) / (n * (n - 1))
 
-    Optionally, it estimates dispersion (median and selected quantiles) by
-    sampling a bounded number of pairs per group.
+    Optionally, dispersion (q05, q25, q50, q75, q95) is estimated by sampling
+    up to `sample_pairs_per_group` unordered pairs per group.
 
     Parameters
     ----------
-    X : pd.DataFrame
-        Feature matrix with rows aligned to `group`. Must be L2-normalised.
-    group : pd.Series
-        Group labels (e.g., replicate compound ID) aligned to X.
+    X : pandas.DataFrame
+        Feature matrix with rows aligned to `group`. Rows must be L2-normalised.
+    group : pandas.Series
+        Group labels aligned to X (e.g., replicate compound IDs).
     sample_pairs_per_group : int | None, optional
-        Maximum number of pairs to sample per group to estimate quantiles.
-        If None or 0, dispersion is skipped. Default is 20000.
+        Maximum number of pairs to sample per group for quantiles. If None or 0,
+        quantiles are skipped. Default is 20000.
     random_seed : int, optional
-        Random seed for the pair sampling, by default 0.
+        Seed for the pair-sampling RNG. Default is 0.
 
     Returns
     -------
-    pd.DataFrame
+    pandas.DataFrame
         Columns:
-            ['group', 'n', 'mean_within_cosine',
-             'q05', 'q25', 'q50', 'q75', 'q95']  (quantiles only if sampled)
+        ['group', 'n', 'mean_within_cosine'] and, if sampled,
+        ['q05', 'q25', 'q50', 'q75', 'q95'].
     """
     import numpy as np
     import pandas as pd
 
     rng = np.random.default_rng(random_seed)
-    # Ensure numpy array, no copy unless needed; X must be float and L2-normalised already.
+
+    # Ensure positional alignment between labels and X
     Xv = X.reset_index(drop=True).to_numpy(copy=False)
     labels = pd.Series(group).reset_index(drop=True)
-    # Pre-flight normalisation check (cheap): norms≈1
-    # Skip strict assertion to avoid overhead; rely on your pipeline’s L2-normalise step.
 
-    out_rows: list[dict[str, float | int | str]] = []
-    # dict: {group_value -> array of POSitional indices}
+    # Map group -> positional index array
     groups = labels.groupby(labels, dropna=False).indices
 
     out_rows: list[dict[str, float | int | str]] = []
 
     for gid, idx in groups.items():
-            idx = np.asarray(idx, dtype=np.int64)
+        idx = np.asarray(idx, dtype=np.int64)
+        n = int(idx.size)
+
+        if n <= 1:
+            row = {"group": str(gid), "n": n, "mean_within_cosine": float("nan")}
+            if sample_pairs_per_group:
+                row.update({"q05": np.nan, "q25": np.nan, "q50": np.nan, "q75": np.nan, "q95": np.nan})
+            out_rows.append(row)
+            continue
+
+        # Defensive guard (should never trigger now, but keeps this robust)
+        if idx.max(initial=-1) >= Xv.shape[0]:
+            idx = idx[idx < Xv.shape[0]]
             n = int(idx.size)
             if n <= 1:
-                out_rows.append({
-                    "group": str(gid),
-                    "n": n,
-                    "mean_within_cosine": float("nan"),
-                    **({"q05": float("nan"), "q25": float("nan"), "q50": float("nan"),
-                        "q75": float("nan"), "q95": float("nan")} if sample_pairs_per_group else {})
-                })
+                row = {"group": str(gid), "n": n, "mean_within_cosine": float("nan")}
+                if sample_pairs_per_group:
+                    row.update({"q05": np.nan, "q25": np.nan, "q50": np.nan, "q75": np.nan, "q95": np.nan})
+                out_rows.append(row)
                 continue
 
-            # Defensive guard — should never trigger now, but keeps this robust:
-            if idx.max(initial=-1) >= Xv.shape[0]:
-                # Skip this group rather than crash; you’ll still get a log row.
-                n_bad = int((idx >= Xv.shape[0]).sum())
-                # You can log a warning here if you like.
-                idx = idx[idx < Xv.shape[0]]
-                n = int(idx.size)
-                if n <= 1:
-                    out_rows.append({
-                        "group": str(gid),
-                        "n": n,
-                        "mean_within_cosine": float("nan"),
-                        **({"q05": float("nan"), "q25": float("nan"), "q50": float("nan"),
-                            "q75": float("nan"), "q95": float("nan")} if sample_pairs_per_group else {})
-                    })
-                    continue
-
         Xi = Xv[idx, :]
 
-        Xi = Xv[idx, :]
-        # Exact mean pairwise cosine via vector sum identity
+        # Exact mean pairwise cosine via vector-sum identity
         s = Xi.sum(axis=0, dtype=np.float64)
         ss = float(np.dot(s, s))
         mean_cos = (ss - n) / (n * (n - 1))
 
-        row = {"group": str(gid), "n": n, "mean_within_cosine": float(mean_cos)}
+        row: dict[str, float | int | str] = {
+            "group": str(gid),
+            "n": n,
+            "mean_within_cosine": float(mean_cos),
+        }
 
-        # Optional dispersion by bounded pair sampling (approximate)
+        # Optional dispersion by bounded pair sampling
         if sample_pairs_per_group and sample_pairs_per_group > 0:
-            # Total possible pairs
             total_pairs = n * (n - 1) // 2
             m = int(min(sample_pairs_per_group, total_pairs))
-            # Sample m unordered pairs (i < j) without replacement (approx):
-            # Efficient approach: sample m distinct flat indices in [0, total_pairs)
-            # then map to (i, j). For very large n, do this in chunks.
-            # Mapping from flat k to (i, j): i = floor((2n-1 - sqrt((2n-1)^2 - 8k))/2), j computed from offset.
-            ks = rng.choice(total_pairs, size=m, replace=False)
-            # Vectorised mapping
-            # Derivation: triangular numbers T(i) = i*(2n - i - 1)/2
-            # Find i s.t. T(i) <= k < T(i+1)
-            # Use quadratic inverse approximation then fix with while loops (rare).
-            n_f = float(n)
-            a = (2 * n_f - 1.0)
-            # initial guess for i
-            i_guess = np.floor((a - np.sqrt(a * a - 8.0 * ks)) / 2.0).astype(np.int64)
-            # compute T(i)
-            Ti = (i_guess * (2 * n - i_guess - 1)) // 2
-            # adjust where needed
-            mask = ks < Ti
-            while np.any(mask):
-                i_guess[mask] -= 1
+
+            if m > 0:
+                ks = rng.choice(total_pairs, size=m, replace=False).astype(np.int64)
+
+                # Vectorised mapping from flat index to (i, j) for upper triangle (i < j)
+                # Triangular numbers: T(i) = i*(2n - i - 1)/2
+                n_f = float(n)
+                a = 2.0 * n_f - 1.0
+                i_guess = np.floor((a - np.sqrt(a * a - 8.0 * ks)) / 2.0).astype(np.int64)
                 Ti = (i_guess * (2 * n - i_guess - 1)) // 2
+                # Correct occasional overshoot
                 mask = ks < Ti
-            # j offset
-            j = (ks - Ti + i_guess + 1).astype(np.int64)
-            i = i_guess.astype(np.int64)
+                while np.any(mask):
+                    i_guess[mask] -= 1
+                    Ti = (i_guess * (2 * n - i_guess - 1)) // 2
+                    mask = ks < Ti
+                j = (ks - Ti + i_guess + 1).astype(np.int64)
+                i = i_guess
 
-            # Compute cosines for sampled pairs in small batches to limit RAM
-            batch = 50000
-            cos_vals = np.empty(shape=m, dtype=np.float32)
-            for start in range(0, m, batch):
-                end = min(start + batch, m)
-                ii = i[start:end]
-                jj = j[start:end]
-                # Cosine is dot product because Xi rows are L2-normalised
-                cos_vals[start:end] = np.einsum("ij,ij->i", Xi[ii, :], Xi[jj, :], optimize=True)
+                # Compute sampled cosines in batches
+                batch = 50000
+                cos_vals = np.empty(shape=m, dtype=np.float32)
+                for start in range(0, m, batch):
+                    end = min(start + batch, m)
+                    ii = i[start:end]
+                    jj = j[start:end]
+                    cos_vals[start:end] = np.einsum("ij,ij->i", Xi[ii, :], Xi[jj, :], optimize=True)
 
-            qs = np.nanpercentile(cos_vals, [5, 25, 50, 75, 95]).astype(float)
-            row.update({"q05": qs[0], "q25": qs[1], "q50": qs[2], "q75": qs[3], "q95": qs[4]})
+                q = np.nanpercentile(cos_vals, [5, 25, 50, 75, 95]).astype(float)
+                row.update({"q05": q[0], "q25": q[1], "q50": q[2], "q75": q[3], "q95": q[4]})
+            else:
+                row.update({"q05": np.nan, "q25": np.nan, "q50": np.nan, "q75": np.nan, "q95": np.nan})
 
         out_rows.append(row)
 
@@ -1395,7 +1381,6 @@ def _mean_within_group_cosine(
     if sample_pairs_per_group and sample_pairs_per_group > 0:
         cols += ["q05", "q25", "q50", "q75", "q95"]
     return pd.DataFrame(out_rows, columns=cols)
-
 
 
 def run_replicate_similarity_qc(
