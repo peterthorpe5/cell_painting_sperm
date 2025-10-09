@@ -649,6 +649,91 @@ def add_fdr(
     return out
 
 
+def dmso_robust_normalise(
+    *,
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    dmso_mask: pd.Series,
+    by_plate: Optional[pd.Series] = None,
+) -> pd.DataFrame:
+    """
+    Robustly normalise features relative to DMSO using median/MAD.
+    If 'by_plate' is provided, normalise within each plate independently.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Data containing metadata and feature columns.
+    feature_cols : list[str]
+        Names of feature columns to normalise.
+    dmso_mask : pandas.Series[bool]
+        Boolean mask selecting DMSO control rows.
+    by_plate : pandas.Series or None, optional
+        Optional plate identifier to normalise within (e.g., df['Plate_Metadata']).
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy of df with the specified feature columns normalised.
+    """
+    X = df.copy()
+    if by_plate is None:
+        dmso_df = X.loc[dmso_mask, feature_cols]
+        med = dmso_df.median(axis=0)
+        mad = (dmso_df.subtract(med, axis=1)).abs().median(axis=0)
+        mad = mad.replace(0.0, np.nan)
+        X.loc[:, feature_cols] = X.loc[:, feature_cols].subtract(med, axis=1).divide(mad, axis=1)
+    else:
+        # groupwise normalisation
+        for plate, idx in X.groupby(by_plate).groups.items():
+            idx = list(idx)
+            dmso_idx = [i for i in idx if dmso_mask.iloc[i]]
+            if not dmso_idx:
+                continue  # skip if no DMSO on this plate
+            dmso_block = X.loc[dmso_idx, feature_cols]
+            med = dmso_block.median(axis=0)
+            mad = (dmso_block.subtract(med, axis=1)).abs().median(axis=0)
+            mad = mad.replace(0.0, np.nan)
+            X.loc[idx, feature_cols] = X.loc[idx, feature_cols].subtract(med, axis=1).divide(mad, axis=1)
+    return X
+
+
+def filter_feature_columns_by_prefix(
+    *,
+    df: pd.DataFrame,
+    prefixes: list[str],
+    protected: set[str],
+) -> pd.DataFrame:
+    """
+    Keep only columns that are either protected metadata or start with one of the given prefixes.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table with metadata + features.
+    prefixes : list[str]
+        Feature prefixes to keep (e.g. ["Acrosome__"]).
+    protected : set[str]
+        Metadata columns to keep regardless of prefix (e.g. Plate/Well/cpd_id).
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame restricted to protected + prefixed feature columns.
+    """
+    keep_cols: list[str] = []
+    for c in df.columns:
+        if c in protected:
+            keep_cols.append(c)
+            continue
+        for px in prefixes:
+            if c.startswith(px):
+                keep_cols.append(c)
+                break
+    return df.loc[:, keep_cols]
+
+
+
 def group_feature_stats(
     feat_stats: pd.DataFrame,
     group_map: Dict[str, List[str]],
@@ -715,6 +800,22 @@ def main() -> None:
     parser.add_argument("--top_features", type=int, default=10, help="Number of top features to report.")
     parser.add_argument("--fdr_alpha", type=float, default=0.05, help="FDR threshold.")
     parser.add_argument("--test", choices=["mw", "ks"], default="mw", help="Non-parametric test to use.")
+    parser.add_argument(
+                "--feature_prefix",
+                action="append",
+                default="Acrosome__",
+                help="Restrict analysis to feature columns starting with this prefix. "
+                    "Repeat for multiple prefixes. Example: --feature_prefix Acrosome__",
+            )
+
+    parser.add_argument(
+        "--normalise",
+        choices=["none", "dmso_robust", "dmso_robust_per_plate"],
+        default="none",
+        help="Optional robust normalisation: centre by DMSO median and scale by DMSO MAD "
+            "(globally or per-plate). MW/KS are rank-based, but normalising helps interpretability.",
+    )
+
     parser.add_argument("--log_file", default="acrosome_vs_dmso.log", help="Log file name.")
     args = parser.parse_args()
 
@@ -731,6 +832,16 @@ def main() -> None:
     id_cols = [args.cpd_id_col, args.cpd_type_col]
     feature_cols = select_feature_columns(df, id_cols=id_cols, logger=logger)
 
+    protected = {"cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library", "Sample"}
+    if args.feature_prefix:
+        df = filter_feature_columns_by_prefix(
+            df=df,
+            prefixes=args.feature_prefix,
+            protected=protected,
+        )
+        logger.info("After --feature_prefix: %d columns kept.", df.shape[1])
+
+
     # Acrosome subsets / groups
     acrosome_feats = infer_acrosome_features(feature_cols, logger)
     group_map = infer_compartments(feature_cols, logger)
@@ -746,6 +857,20 @@ def main() -> None:
 
     dmso_df = df[dmso_mask]
     logger.info("Found %d DMSO wells.", dmso_df.shape[0])
+
+
+    feature_cols = [c for c in df.columns if c not in protected]
+    if args.normalise != "none":
+        logger.info("Applying %s normalisation.", args.normalise)
+        by_plate = df["Plate_Metadata"] if args.normalise == "dmso_robust_per_plate" else None
+        df = dmso_robust_normalise(
+            df=df,
+            feature_cols=feature_cols,
+            dmso_mask=dmso_mask,
+            by_plate=by_plate,
+        )
+        logger.info("Applied %s normalisation to %d features.", args.normalise, len(feature_cols))
+    
 
     # Non-DMSO compound ids
     compounds = df.loc[~dmso_mask, args.cpd_id_col].dropna().astype(str).unique().tolist()
