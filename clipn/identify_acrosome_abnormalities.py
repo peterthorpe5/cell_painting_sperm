@@ -45,6 +45,7 @@ import logging
 import os
 from collections import defaultdict
 from typing import Dict, List, Tuple
+import sys
 import re
 import numpy as np
 import pandas as pd
@@ -698,6 +699,7 @@ def dmso_robust_normalise(
     return X
 
 
+
 def filter_feature_columns_by_prefix(
     *,
     df: pd.DataFrame,
@@ -705,7 +707,9 @@ def filter_feature_columns_by_prefix(
     protected: set[str],
 ) -> pd.DataFrame:
     """
-    Keep only columns that are either protected metadata or start with one of the given prefixes.
+    Keep only columns that are either protected metadata or start with one of
+    the given prefixes (case-insensitive). Designed for preprocessed names like
+    'Acrosome__AreaShape_Area'.
 
     Parameters
     ----------
@@ -721,15 +725,15 @@ def filter_feature_columns_by_prefix(
     pandas.DataFrame
         DataFrame restricted to protected + prefixed feature columns.
     """
+    px_lower = [p.lower() for p in prefixes if isinstance(p, str)]
     keep_cols: list[str] = []
     for c in df.columns:
         if c in protected:
             keep_cols.append(c)
             continue
-        for px in prefixes:
-            if c.startswith(px):
-                keep_cols.append(c)
-                break
+        cl = str(c).lower()
+        if any(cl.startswith(p) for p in px_lower):
+            keep_cols.append(c)
     return df.loc[:, keep_cols]
 
 
@@ -828,21 +832,32 @@ def main() -> None:
     logger.info("Starting batch analysis: all compounds vs. DMSO.")
 
     # Load & select features
+
+
     df = load_ungrouped_files(args.ungrouped_list, logger)
     id_cols = [args.cpd_id_col, args.cpd_type_col]
-    feature_cols = select_feature_columns(df, id_cols=id_cols, logger=logger)
 
     protected = {"cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library", "Sample"}
+
+    # Apply optional column prefix filter FIRST
     if args.feature_prefix:
         df = filter_feature_columns_by_prefix(
             df=df,
-            prefixes=args.feature_prefix,
+            prefixes=[args.feature_prefix] if isinstance(args.feature_prefix, str) else args.feature_prefix,
             protected=protected,
         )
         logger.info("After --feature_prefix: %d columns kept.", df.shape[1])
 
+    # Now select numeric feature columns from the possibly-filtered DF
+    feature_cols = select_feature_columns(df, id_cols=id_cols, logger=logger)
 
-    # Acrosome subsets / groups
+    # Hard guard: do not continue if nothing to test
+    if len(feature_cols) == 0:
+        logger.error("After --feature_prefix and feature selection, no feature columns remain. "
+                    "Check your prefix (e.g., use --feature_prefix Acrosome__) or remove the flag.")
+        sys.exit(2)
+
+    # Acrosome subsets / groups (computed on the FINAL feature set)
     acrosome_feats = infer_acrosome_features(feature_cols, logger)
     group_map = infer_compartments(feature_cols, logger)
 
@@ -857,9 +872,14 @@ def main() -> None:
 
     dmso_df = df[dmso_mask]
     logger.info("Found %d DMSO wells.", dmso_df.shape[0])
+    logger.info("Proceeding with %d feature columns after filtering.", len(feature_cols))
+    if not acrosome_feats:
+        logger.warning("No acrosome features detected in the selected feature set. "
+                    "If you expected columns like 'Acrosome__...', check --feature_prefix.")
 
 
-    feature_cols = [c for c in df.columns if c not in protected]
+
+
     if args.normalise != "none":
         logger.info("Applying %s normalisation.", args.normalise)
         by_plate = df["Plate_Metadata"] if args.normalise == "dmso_robust_per_plate" else None
