@@ -1295,24 +1295,48 @@ def _mean_within_group_cosine(
 
     rng = np.random.default_rng(random_seed)
     # Ensure numpy array, no copy unless needed; X must be float and L2-normalised already.
-    Xv = X.to_numpy(copy=False)
+    Xv = X.reset_index(drop=True).to_numpy(copy=False)
+    labels = pd.Series(group).reset_index(drop=True)
     # Pre-flight normalisation check (cheap): norms≈1
     # Skip strict assertion to avoid overhead; rely on your pipeline’s L2-normalise step.
 
     out_rows: list[dict[str, float | int | str]] = []
+    # dict: {group_value -> array of POSitional indices}
+    groups = labels.groupby(labels, dropna=False).indices
 
-    for gid, idx in pd.Series(group).groupby(group).groups.items():
-        idx = np.asarray(list(idx), dtype=int)
-        n = int(idx.size)
-        if n <= 1:
-            out_rows.append({
-                "group": str(gid),
-                "n": n,
-                "mean_within_cosine": float("nan"),
-                **({"q05": float("nan"), "q25": float("nan"), "q50": float("nan"),
-                    "q75": float("nan"), "q95": float("nan")} if sample_pairs_per_group else {})
-            })
-            continue
+    out_rows: list[dict[str, float | int | str]] = []
+
+    for gid, idx in groups.items():
+            idx = np.asarray(idx, dtype=np.int64)
+            n = int(idx.size)
+            if n <= 1:
+                out_rows.append({
+                    "group": str(gid),
+                    "n": n,
+                    "mean_within_cosine": float("nan"),
+                    **({"q05": float("nan"), "q25": float("nan"), "q50": float("nan"),
+                        "q75": float("nan"), "q95": float("nan")} if sample_pairs_per_group else {})
+                })
+                continue
+
+            # Defensive guard — should never trigger now, but keeps this robust:
+            if idx.max(initial=-1) >= Xv.shape[0]:
+                # Skip this group rather than crash; you’ll still get a log row.
+                n_bad = int((idx >= Xv.shape[0]).sum())
+                # You can log a warning here if you like.
+                idx = idx[idx < Xv.shape[0]]
+                n = int(idx.size)
+                if n <= 1:
+                    out_rows.append({
+                        "group": str(gid),
+                        "n": n,
+                        "mean_within_cosine": float("nan"),
+                        **({"q05": float("nan"), "q25": float("nan"), "q50": float("nan"),
+                            "q75": float("nan"), "q95": float("nan")} if sample_pairs_per_group else {})
+                    })
+                    continue
+
+        Xi = Xv[idx, :]
 
         Xi = Xv[idx, :]
         # Exact mean pairwise cosine via vector sum identity
