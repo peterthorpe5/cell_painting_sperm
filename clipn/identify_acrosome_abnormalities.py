@@ -507,6 +507,187 @@ def dmso_mask_from_column(
     return mask, f"matched {mask.sum()} rows in column '{col}'"
 
 
+def select_single_plate_well(df: pd.DataFrame, logger: logging.Logger | None = None) -> pd.DataFrame:
+    """
+    Coerce plate/well columns to the canonical pair 'Plate_Metadata' and 'Well_Metadata'.
+
+    This harmonises common variants (Plate, Well, Metadata_Plate, Metadata_Well, etc.)
+    and zero-pads well coordinates (e.g. A1 → A01). If none are found, the frame is
+    returned unchanged.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table.
+    logger : logging.Logger, optional
+        Logger for messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with standardised 'Plate_Metadata' and 'Well_Metadata' if detected.
+    """
+    logger = logger or logging.getLogger("plate_well_std")
+    plate_cands = ["Plate_Metadata", "Metadata_Plate", "Plate", "plate", "Image_Metadata_Plate"]
+    well_cands = ["Well_Metadata", "Metadata_Well", "Well", "well", "Image_Metadata_Well"]
+
+    plate_col = next((c for c in plate_cands if c in df.columns), None)
+    well_col = next((c for c in well_cands if c in df.columns), None)
+
+    out = df.copy()
+    if plate_col and "Plate_Metadata" not in out.columns:
+        out = out.rename(columns={plate_col: "Plate_Metadata"})
+    if well_col and "Well_Metadata" not in out.columns:
+        out = out.rename(columns={well_col: "Well_Metadata"})
+
+    # Zero-pad wells like A1 → A01
+    if "Well_Metadata" in out.columns:
+        out["Well_Metadata"] = out["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
+        def _pad(w):
+            m = re.match(r"^([A-Ha-h])(\d{1,2})$", str(w))
+            if not m:
+                return w
+            return f"{m.group(1).upper()}{int(m.group(2)):02d}"
+        out["Well_Metadata"] = out["Well_Metadata"].map(_pad)
+
+    return out
+
+
+def attach_plate_well_with_fallback_single(
+    *,
+    obj_df: pd.DataFrame,
+    input_dir: str | os.PathLike,
+    obj_filename: str,
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    """
+    Attach Plate/Well using a sibling or folder-wide *Image.csv[.gz]* if missing.
+
+    Parameters
+    ----------
+    obj_df : pandas.DataFrame
+        Object-level CP table (must contain ImageNumber for merging).
+    input_dir : str or PathLike
+        Directory containing object and image CSVs.
+    obj_filename : str
+        Basename of the object CSV file.
+    logger : logging.Logger
+        Logger for status.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with Plate_Metadata and Well_Metadata if resolvable; else original.
+    """
+    df = obj_df.copy()
+    if {"Plate_Metadata", "Well_Metadata"}.issubset(df.columns):
+        return df
+
+    if "ImageNumber" not in df.columns:
+        logger.warning("No ImageNumber column; cannot attach Plate/Well from image table.")
+        return select_single_plate_well(df, logger=logger)
+
+    input_dir = Path(input_dir)
+    base = obj_filename[:-7] if obj_filename.endswith(".csv.gz") else obj_filename[:-4] if obj_filename.endswith(".csv") else obj_filename
+    candidates = [input_dir / f"{base}_Image.csv.gz", input_dir / f"{base}_Image.csv"]
+    candidates = [p for p in candidates if p.exists() and not p.name.startswith((".", "_"))]
+
+    image_path = next(iter(candidates), None)
+    if image_path is None:
+        # Fallback: unique folder-wide image table
+        images = []
+        for pat in ("*Image.csv.gz", "*_Image.csv.gz", "*Image.csv", "*_Image.csv"):
+            images += list(input_dir.glob(pat))
+        images = [p for p in images if not p.name.startswith((".", "_"))]
+        if len(images) != 1:
+            logger.warning("Could not uniquely identify an image table; skipping Plate/Well attach.")
+            return select_single_plate_well(df, logger=logger)
+        image_path = images[0]
+
+    try:
+        head = pd.read_csv(image_path, nrows=5, low_memory=False)
+        plate_col = next((c for c in ["Plate_Metadata", "Metadata_Plate", "Plate", "Image_Metadata_Plate"] if c in head.columns), None)
+        well_col = next((c for c in ["Well_Metadata", "Metadata_Well", "Well", "Image_Metadata_Well"] if c in head.columns), None)
+        usecols = ["ImageNumber"] + [c for c in (plate_col, well_col) if c]
+        img = pd.read_csv(image_path, usecols=usecols, low_memory=False)
+    except Exception as exc:
+        logger.warning("Failed to read image table %s: %s", image_path.name, exc)
+        return select_single_plate_well(df, logger=logger)
+
+    merged = df.merge(img, on="ImageNumber", how="left", suffixes=("", "_img"))
+    merged = select_single_plate_well(merged, logger=logger)
+    return merged
+
+
+def load_single_acrosome_csv(
+    path: str,
+    *,
+    metadata_file: str | None,
+    merge_keys: str = "Plate,Well",
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    """
+    Load a single CellProfiler object CSV (Acrosome table), optionally attach Plate/Well
+    from an Image table and merge a plate map to obtain labels.
+
+    Parameters
+    ----------
+    path : str
+        Path to the Acrosome object CSV.
+    metadata_file : str or None
+        Optional plate map CSV/TSV with at least Plate/Well → cpd_id/cpd_type (and optionally Library).
+    merge_keys : str
+        Comma-separated Plate,Well header names to prefer in the plate map (default: 'Plate,Well').
+    logger : logging.Logger
+        Logger.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Well-level table ready for feature selection and DMSO labelling.
+    """
+    sep = detect_delimiter(path)
+    df = pd.read_csv(path, sep=sep, low_memory=False)
+    df.columns = df.columns.map(str)
+
+    # Attach Plate/Well if missing
+    df = attach_plate_well_with_fallback_single(
+        obj_df=df,
+        input_dir=os.path.dirname(path) or ".",
+        obj_filename=os.path.basename(path),
+        logger=logger,
+    )
+    df = select_single_plate_well(df, logger=logger)
+
+    # If present, aggregate to well medians (object-level → well-level)
+    meta_like = {"Plate_Metadata", "Well_Metadata", "ImageNumber", "ObjectNumber"}
+    feature_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in meta_like]
+    if {"Plate_Metadata", "Well_Metadata"}.issubset(df.columns) and feature_cols:
+        grouped = df.groupby(["Plate_Metadata", "Well_Metadata"], observed=False, sort=False)[feature_cols].median()
+        out = grouped.reset_index()
+    else:
+        out = df.copy()
+
+    # Merge plate map
+    if metadata_file:
+        msep = detect_delimiter(metadata_file)
+        meta = pd.read_csv(metadata_file, sep=msep, low_memory=False)
+        mk = [k.strip() for k in merge_keys.split(",")]
+        # Standardise keys
+        meta = meta.rename(columns={mk[0]: "Plate_Metadata", mk[1]: "Well_Metadata"})
+        # Zero-pad wells
+        meta["Well_Metadata"] = meta["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
+        meta["Well_Metadata"] = meta["Well_Metadata"].str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
+        out = out.merge(meta, on=["Plate_Metadata", "Well_Metadata"], how="left", validate="m:1")
+
+    # Ensure expected ID columns exist for downstream
+    for col in ("cpd_id", "cpd_type"):
+        if col not in out.columns:
+            out[col] = "missing"
+
+    return out
+
+
 def dmso_mask_fallback_scan(df: pd.DataFrame, label: str) -> pd.Series:
     """
     Fallback: mark a row as DMSO if ANY text-like column contains the label.
@@ -795,7 +976,15 @@ def main() -> None:
         description="Batch compare all compounds to DMSO for acrosome features.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--ungrouped_list", required=True, help="CSV/TSV with column 'path' of well-level files.")
+
+    mx = parser.add_mutually_exclusive_group(required=True)
+    mx.add_argument("--ungrouped_list", help="CSV/TSV with column 'path' of well-level files.")
+    mx.add_argument("--acrosome_csv", help="Single CellProfiler Acrosome object CSV (per-object).")
+
+    parser.add_argument("--metadata_file", default=None, help="Optional plate map to add cpd_id/cpd_type/Library.")
+    parser.add_argument("--merge_keys", default="Plate,Well", help="Comma-separated keys in metadata_file (default: Plate,Well).")
+
+
     parser.add_argument("--cpd_id_col", default="cpd_id", help="Compound ID column.")
     parser.add_argument("--cpd_type_col", default="cpd_type", help="Compound type column (metadata).")
     parser.add_argument("--dmso_label", default="DMSO", help="Label used for DMSO rows.")
@@ -833,8 +1022,18 @@ def main() -> None:
 
     # Load & select features
 
+    if args.acrosome_csv:
+        logger.info("Reading single Acrosome CSV: %s", args.acrosome_csv)
+        df = load_single_acrosome_csv(
+            args.acrosome_csv,
+            metadata_file=args.metadata_file,
+            merge_keys=args.merge_keys,
+            logger=logger,
+        )
+    else:
+        df = load_ungrouped_files(args.ungrouped_list, logger)  
 
-    df = load_ungrouped_files(args.ungrouped_list, logger)
+
     id_cols = [args.cpd_id_col, args.cpd_type_col]
 
     protected = {"cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library", "Sample"}
