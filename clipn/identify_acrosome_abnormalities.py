@@ -809,13 +809,20 @@ def load_single_acrosome_csv(
     -------
     pandas.DataFrame
         Well-level table ready for feature selection and DMSO labelling.
+
+    Load a single CellProfiler Acrosome object CSV, try to attach Plate/Well via Image table,
+    aggregate to well medians if possible, and (optionally) merge a plate map to add cpd_id/cpd_type.
+
+    Returns a well-level table with at least: Plate_Metadata, Well_Metadata (if resolvable),
+    cpd_id, cpd_type (filled as 'missing' if not merged), plus numeric features.
     """
+    # 1) Read the object table (auto delimiter/compression)
     df = read_table_auto(path, logger)
     if drop_all_na:
         df = drop_all_na_columns(df, logger=logger)
     df.columns = df.columns.map(str)
 
-    # Attach Plate/Well if missing
+    # 2) Attach Plate/Well via *_Image.csv if needed/possible, then standardise names
     df = attach_plate_well_with_fallback_single(
         obj_df=df,
         input_dir=os.path.dirname(path) or ".",
@@ -824,83 +831,93 @@ def load_single_acrosome_csv(
     )
     df = select_single_plate_well(df, logger=logger)
 
-    # If present, aggregate to well medians (object-level → well-level)
+    # 3) If we have Plate/Well and numeric features, aggregate object-level → well-level (median)
     meta_like = {"Plate_Metadata", "Well_Metadata", "ImageNumber", "ObjectNumber"}
     feature_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in meta_like]
     if {"Plate_Metadata", "Well_Metadata"}.issubset(df.columns) and feature_cols:
-        grouped = df.groupby(["Plate_Metadata", "Well_Metadata"], observed=False, sort=False)[feature_cols].median()
-        out = grouped.reset_index()
+        out = (
+            df.groupby(["Plate_Metadata", "Well_Metadata"], observed=False, sort=False)[feature_cols]
+              .median()
+              .reset_index()
+        )
     else:
         out = df.copy()
 
-    # Merge plate map
+    # 4) Optional: merge a plate map to add cpd_id / cpd_type (only if we can key on Plate/Well)
     if metadata_file:
         meta = read_table_auto(metadata_file, logger)
-        # Resolve actual plate/well column names in the metadata (case/variant tolerant)
+
+        # Resolve which columns in the plate map are Plate/Well
         plate_key, well_key = find_plate_well_in_meta(meta, merge_keys, logger)
 
-        # Standardise keys
+        # Standardise plate map key names
         meta = meta.rename(columns={plate_key: "Plate_Metadata", well_key: "Well_Metadata"})
-
-        # Zero-pad wells
+        # Zero-pad wells like A1 -> A01 for consistent matching
         meta["Well_Metadata"] = (
             meta["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
             .str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
         )
 
-        # --- ensure 'out' has Plate_Metadata/Well_Metadata before merging ---
+        # Ensure LEFT frame has Plate/Well; try a best-effort rename if not
         if not {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
             rename_map = {}
-            for cand in ["Plate_Metadata","Metadata_Plate","Plate","plate","Image_Metadata_Plate"]:
+            for cand in ["Plate_Metadata", "Metadata_Plate", "Plate", "plate", "Image_Metadata_Plate"]:
                 if cand in out.columns:
                     rename_map[cand] = "Plate_Metadata"
                     break
-            for cand in ["Well_Metadata","Metadata_Well","Well","well","Image_Metadata_Well","wellposition","well_name"]:
+            for cand in [
+                "Well_Metadata", "Metadata_Well", "Well", "well", "Image_Metadata_Well",
+                "wellposition", "well_name"
+            ]:
                 if cand in out.columns:
                     rename_map[cand] = "Well_Metadata"
                     break
             if rename_map:
                 out = out.rename(columns=rename_map)
+                # Zero-pad if we just created Well_Metadata
+                if "Well_Metadata" in rename_map.values():
+                    out["Well_Metadata"] = (
+                        out["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
+                        .str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
+                    )
 
-        if not {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
-            logger.error(
-                "Input %s lacks Plate/Well; cannot merge metadata. "
-                "Either provide an Image table (so we can attach Plate/Well via ImageNumber) "
-                "or include Plate/Well columns in the acrosome CSV.", path
-            )
-            # Continue without merging; downstream will fill cpd_id/cpd_type='missing'
-            metadata_file = None
-
-
-
-        out = out.merge(meta, on=["Plate_Metadata", "Well_Metadata"], how="left", validate="m:1")
-        logger.info("Merged plate map %s (%d rows) on Plate/Well.", metadata_file, meta.shape[0])   
-        logger.info(
-        "Merged plate map %s (%d rows) on Plate/Well. Post-merge rows: %d",
-        metadata_file, meta.shape[0], out.shape[0]
-        )
-        for col in ("cpd_id", "cpd_type"):
-            miss = out[col].isna().sum() if col in out.columns else out.shape[0]
-            logger.info("Post-merge: missing %s in %d rows.", col, miss)
-
+        # Merge only if keys exist on the LEFT
         if {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
-            logger.info(
-                "Example mappings: %s",
-                out[["Plate_Metadata", "Well_Metadata", "cpd_id", "cpd_type"]]
-                .drop_duplicates()
-                .head(5)
-                .to_dict(orient="records")
-            )
+            out = out.merge(meta, on=["Plate_Metadata", "Well_Metadata"], how="left", validate="m:1")
+            logger.info("Merged plate map %s (%d rows) on Plate/Well.", metadata_file, meta.shape[0])
+            logger.info("Post-merge rows: %d", out.shape[0])
+
+            # Quick diagnostics
+            for col in ("cpd_id", "cpd_type"):
+                miss = out[col].isna().sum() if col in out.columns else out.shape[0]
+                logger.info("Post-merge: missing %s in %d rows.", col, miss)
+
+            if {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
+                try:
+                    logger.info(
+                        "Example mappings: %s",
+                        out[["Plate_Metadata", "Well_Metadata", "cpd_id", "cpd_type"]]
+                        .drop_duplicates()
+                        .head(5)
+                        .to_dict(orient="records")
+                    )
+                except Exception:
+                    pass
         else:
-            logger.warning("Plate/Well still missing after attempted attach + merge.")
+            logger.warning(
+                "Input %s lacks Plate/Well; skipping metadata merge. "
+                "Provide an Image table or Plate/Well columns in the Acrosome CSV to enable merging.",
+                path,
+            )
 
-
-    # Ensure expected ID columns exist for downstream
+    # 5) Ensure expected ID columns exist for downstream
     for col in ("cpd_id", "cpd_type"):
         if col not in out.columns:
             out[col] = "missing"
 
     return out
+
+
 
 
 def dmso_mask_fallback_scan(df: pd.DataFrame, label: str) -> pd.Series:
