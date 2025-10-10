@@ -1148,18 +1148,15 @@ def main() -> None:
 
     id_cols = [args.cpd_id_col, args.cpd_type_col]
 
-    protected = {"cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library", "Sample"}
+    protected = {args.cpd_id_col, args.cpd_type_col, "Plate_Metadata", "Well_Metadata", "Library", "Sample"}
 
-
-    # Now select numeric feature columns from the possibly-filtered DF
-    feature_cols = select_feature_columns(df, id_cols=id_cols, logger=logger)
 
     # Use normalised prefixes (lower-case)
     prefixes = (args.feature_prefix or ["Acrosome__"])
     df = filter_feature_columns_by_prefix(
         df=df,
         prefixes=prefixes,
-        protected={"cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library", "Sample"},
+        protected=protected
     )
     logger.info("After --feature_prefix: %d columns kept.", df.shape[1])
 
