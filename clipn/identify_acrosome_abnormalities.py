@@ -51,6 +51,9 @@ import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp, mannwhitneyu, wasserstein_distance
 from statsmodels.stats.multitest import multipletests
+from pathlib import Path
+from typing import Optional
+
 
 
 # -------------------
@@ -143,7 +146,6 @@ def read_table_auto(path: str, logger: logging.Logger) -> pd.DataFrame:
         raise
 
 
-import re
 
 # Columns to always treat as metadata (never as features)
 BANNED_FEATURES_EXACT = {
@@ -687,12 +689,14 @@ def drop_all_na_columns(
     return out
 
 
+
 def load_single_acrosome_csv(
     path: str,
     *,
     metadata_file: str | None,
     merge_keys: str = "Plate,Well",
     logger: logging.Logger,
+    drop_all_na: bool = False,
 ) -> pd.DataFrame:
     """
     Load a single CellProfiler object CSV (Acrosome table), optionally attach Plate/Well
@@ -950,6 +954,31 @@ def dmso_robust_normalise(
     return X
 
 
+def infer_prefix_groups(
+    feature_cols: list[str],
+    *,
+    prefixes: list[str],
+    logger: logging.Logger,
+) -> dict[str, list[str]]:
+    """
+    Group features by the double-underscore style channel prefix (e.g. 'Acrosome__').
+
+    Returns a dict keyed by normalised, lower-cased prefix without underscores,
+    e.g. 'acrosome' -> [list of feature names].
+    """
+    px = [p.lower() for p in prefixes]
+    groups: dict[str, list[str]] = defaultdict(list)
+    for f in feature_cols:
+        fl = f.lower()
+        for p in px:
+            if fl.startswith(p.lower()):
+                key = p.strip("_").lower()
+                groups[key].append(f)
+                break
+    logger.info("Built %d prefix groups from %d features.", len(groups), len(feature_cols))
+    return dict(groups)
+
+
 
 def filter_feature_columns_by_prefix(
     *,
@@ -1064,12 +1093,13 @@ def main() -> None:
     parser.add_argument("--fdr_alpha", type=float, default=0.05, help="FDR threshold.")
     parser.add_argument("--test", choices=["mw", "ks"], default="mw", help="Non-parametric test to use.")
     parser.add_argument(
-                "--feature_prefix",
-                action="append",
-                default="Acrosome__",
-                help="Restrict analysis to feature columns starting with this prefix. "
-                    "Repeat for multiple prefixes. Example: --feature_prefix Acrosome__",
-            )
+        "--feature_prefix",
+        action="append",
+        default=None,
+        help=("Restrict analysis to columns starting with this prefix (case-insensitive). "
+            "Repeat for multiple prefixes, e.g. --feature_prefix Acrosome__")
+    )
+
 
     parser.add_argument(
         "--normalise",
@@ -1101,12 +1131,14 @@ def main() -> None:
 
     if args.acrosome_csv:
         logger.info("Reading single Acrosome CSV: %s", args.acrosome_csv)
+
         df = load_single_acrosome_csv(
-            args.acrosome_csv,
-            metadata_file=args.metadata_file,
-            merge_keys=args.merge_keys,
-            logger=logger,
-        )
+                args.acrosome_csv,
+                metadata_file=args.metadata_file,
+                merge_keys=args.merge_keys,
+                logger=logger,
+                drop_all_na=args.drop_all_na,
+            )
     else:
         df = load_ungrouped_files(
                     list_file=args.ungrouped_list,
@@ -1131,6 +1163,27 @@ def main() -> None:
 
     # Now select numeric feature columns from the possibly-filtered DF
     feature_cols = select_feature_columns(df, id_cols=id_cols, logger=logger)
+
+    # Use normalised prefixes (lower-case)
+    prefixes = (args.feature_prefix or ["Acrosome__"])
+    df = filter_feature_columns_by_prefix(
+        df=df,
+        prefixes=prefixes,
+        protected={"cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library", "Sample"},
+    )
+    logger.info("After --feature_prefix: %d columns kept.", df.shape[1])
+
+    feature_cols = select_feature_columns(df, id_cols=[args.cpd_id_col, args.cpd_type_col], logger=logger)
+    if not feature_cols:
+        logger.error("No feature columns remain after filtering.")
+        sys.exit(2)
+
+    # Build prefix-based group map so we definitely have an 'acrosome' group
+    group_map = infer_prefix_groups(feature_cols, prefixes=prefixes, logger=logger)
+    acrosome_feats = group_map.get("acrosome", [])
+    if not acrosome_feats:
+        logger.warning("No acrosome-prefixed features detected. Check your --feature_prefix.")
+
 
     # Hard guard: do not continue if nothing to test
     if len(feature_cols) == 0:
