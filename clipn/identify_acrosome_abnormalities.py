@@ -108,17 +108,14 @@ def detect_delimiter(path: str) -> str:
     str
         Detected delimiter: '\\t' or ','.
     """
-    with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-        sample = fh.read(4096)
-    has_tab = "\t" in sample
-    has_comma = "," in sample
-    if has_tab and has_comma:
-        return "\t"
-    if has_tab:
-        return "\t"
-    if has_comma:
-        return ","
-    return "\t"
+    for sep in ("\t", ","):
+        try:
+            pd.read_csv(path, sep=sep, nrows=50, compression="infer")
+            return sep
+        except Exception:
+            continue
+    return "\t"  # safe default
+
 
 
 def read_table_auto(path: str, logger: logging.Logger) -> pd.DataFrame:
@@ -140,7 +137,7 @@ def read_table_auto(path: str, logger: logging.Logger) -> pd.DataFrame:
     sep = detect_delimiter(path)
     logger.debug("Reading table %s (sep=%r)", path, sep)
     try:
-        return pd.read_csv(path, sep=sep)
+        return pd.read_csv(path, sep=sep, compression="infer")
     except Exception as exc:
         logger.error("Failed to read %s: %s", path, exc)
         raise
@@ -531,8 +528,9 @@ def dmso_mask_from_column(
     if col not in df.columns:
         return pd.Series(False, index=df.index), f"column '{col}' missing"
 
-    col_vals = df[col].astype(str).str.upper().fillna("")
-    mask = col_vals.eq(label.upper())
+    col_vals = df[col].astype(str).str.strip().str.upper()
+    mask = col_vals.eq(label.strip().upper())
+
     return mask, f"matched {mask.sum()} rows in column '{col}'"
 
 
@@ -720,7 +718,7 @@ def load_single_acrosome_csv(
     """
     sep = detect_delimiter(path)
     df = pd.read_csv(path, sep=sep, low_memory=False)
-    if args.drop_all_na:
+    if drop_all_na:
         df = drop_all_na_columns(df, logger=logger)
     df.columns = df.columns.map(str)
 
@@ -1152,14 +1150,6 @@ def main() -> None:
 
     protected = {"cpd_id", "cpd_type", "Plate_Metadata", "Well_Metadata", "Library", "Sample"}
 
-    # Apply optional column prefix filter FIRST
-    if args.feature_prefix:
-        df = filter_feature_columns_by_prefix(
-            df=df,
-            prefixes=[args.feature_prefix] if isinstance(args.feature_prefix, str) else args.feature_prefix,
-            protected=protected,
-        )
-        logger.info("After --feature_prefix: %d columns kept.", df.shape[1])
 
     # Now select numeric feature columns from the possibly-filtered DF
     feature_cols = select_feature_columns(df, id_cols=id_cols, logger=logger)
@@ -1191,9 +1181,6 @@ def main() -> None:
                     "Check your prefix (e.g., use --feature_prefix Acrosome__) or remove the flag.")
         sys.exit(2)
 
-    # Acrosome subsets / groups (computed on the FINAL feature set)
-    acrosome_feats = infer_acrosome_features(feature_cols, logger)
-    group_map = infer_compartments(feature_cols, logger)
 
     # DMSO mask
     dmso_mask, reason = dmso_mask_from_column(df, args.dmso_label, args.dmso_col, logger)
