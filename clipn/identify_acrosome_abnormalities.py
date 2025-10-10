@@ -810,8 +810,7 @@ def load_single_acrosome_csv(
     pandas.DataFrame
         Well-level table ready for feature selection and DMSO labelling.
     """
-    sep = detect_delimiter(path)
-    df = pd.read_csv(path, sep=sep, low_memory=False)
+    df = read_table_auto(path, logger)
     if drop_all_na:
         df = drop_all_na_columns(df, logger=logger)
     df.columns = df.columns.map(str)
@@ -836,12 +835,7 @@ def load_single_acrosome_csv(
 
     # Merge plate map
     if metadata_file:
-        msep = detect_delimiter(metadata_file)
-        if msep is None:
-            meta = pd.read_csv(metadata_file, sep=None, engine="python", low_memory=False, compression="infer")
-        else:
-            meta = pd.read_csv(metadata_file, sep=msep, low_memory=False, compression="infer")
-
+        meta = read_table_auto(metadata_file, logger)
         # Resolve actual plate/well column names in the metadata (case/variant tolerant)
         plate_key, well_key = find_plate_well_in_meta(meta, merge_keys, logger)
 
