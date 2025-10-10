@@ -94,6 +94,56 @@ def setup_logger(log_file: str) -> logging.Logger:
     return logger
 
 
+def find_plate_well_in_meta(
+    meta: pd.DataFrame,
+    requested_keys: str,
+    logger: logging.Logger,
+) -> tuple[str, str]:
+    """
+    Resolve Plate and Well column names in a metadata frame.
+
+    Tries the user-provided --merge_keys first (case-insensitive), then falls
+    back to common variants. Returns the *actual* column names found.
+
+    Examples tried for plate: Plate, metadata_plate, plate_id, platebarcode
+    Examples tried for well:  Well, well_id, wellposition, well_name
+
+    Raises ValueError if not found.
+    """
+    req = [k.strip() for k in str(requested_keys).split(",") if k.strip()]
+    meta_lc = {c.lower(): c for c in meta.columns}
+
+    # First: exact (case-insensitive) match of requested keys
+    cand_plate = meta_lc.get(req[0].lower()) if len(req) >= 2 else None
+    cand_well  = meta_lc.get(req[1].lower()) if len(req) >= 2 else None
+
+    plate_aliases = ["plate", "metadata_plate", "plate_id", "platebarcode", "plate_name"]
+    well_aliases  = ["well", "metadata_well", "well_id", "wellposition", "well_name", "well_address"]
+
+    if not cand_plate:
+        for k in plate_aliases:
+            if k in meta_lc:
+                cand_plate = meta_lc[k]
+                break
+    if not cand_well:
+        for k in well_aliases:
+            if k in meta_lc:
+                cand_well = meta_lc[k]
+                break
+
+    if not cand_plate or not cand_well:
+        logger.error(
+            "Could not find Plate/Well columns in metadata. "
+            "Requested keys=%r. Available columns: %s",
+            requested_keys, ", ".join(map(str, meta.columns))
+        )
+        raise ValueError("Metadata must contain Plate and Well columns. Use --merge_keys PLATE,WELL to point at them.")
+
+    logger.info("Metadata Plate/Well resolved to: %r / %r", cand_plate, cand_well)
+    return cand_plate, cand_well
+
+
+
 def detect_delimiter(path: str) -> str:
     """
     Detect delimiter in a small text file; prefer tab if both appear.
@@ -108,13 +158,19 @@ def detect_delimiter(path: str) -> str:
     str
         Detected delimiter: '\\t' or ','.
     """
-    for sep in ("\t", ","):
+   candidates = ("\t", ",", ";", "|")
+    for sep in candidates:
         try:
             pd.read_csv(path, sep=sep, nrows=50, compression="infer")
             return sep
         except Exception:
             continue
-    return "\t"  # safe default
+    # Final fallback: let pandas infer with the Python engine
+    try:
+        pd.read_csv(path, sep=None, nrows=50, engine="python", compression="infer")
+        return None  # signal "let pandas infer"
+    except Exception:
+        return "\t"  # safe default
 
 
 
@@ -135,8 +191,10 @@ def read_table_auto(path: str, logger: logging.Logger) -> pd.DataFrame:
         Loaded table.
     """
     sep = detect_delimiter(path)
-    logger.debug("Reading table %s (sep=%r)", path, sep)
+    logger.debug("Reading table %s (sep=%r)", path, sep if sep is not None else "infer")
     try:
+        if sep is None:
+            return pd.read_csv(path, sep=None, engine="python", compression="infer")
         return pd.read_csv(path, sep=sep, compression="infer")
     except Exception as exc:
         logger.error("Failed to read %s: %s", path, exc)
@@ -743,14 +801,26 @@ def load_single_acrosome_csv(
     # Merge plate map
     if metadata_file:
         msep = detect_delimiter(metadata_file)
-        meta = pd.read_csv(metadata_file, sep=msep, low_memory=False)
-        mk = [k.strip() for k in merge_keys.split(",")]
+        if msep is None:
+            meta = pd.read_csv(metadata_file, sep=None, engine="python", low_memory=False, compression="infer")
+        else:
+            meta = pd.read_csv(metadata_file, sep=msep, low_memory=False, compression="infer")
+
+        # Resolve actual plate/well column names in the metadata (case/variant tolerant)
+        plate_key, well_key = find_plate_well_in_meta(meta, merge_keys, logger)
+
         # Standardise keys
-        meta = meta.rename(columns={mk[0]: "Plate_Metadata", mk[1]: "Well_Metadata"})
+        meta = meta.rename(columns={plate_key: "Plate_Metadata", well_key: "Well_Metadata"})
+
         # Zero-pad wells
-        meta["Well_Metadata"] = meta["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
-        meta["Well_Metadata"] = meta["Well_Metadata"].str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
+        meta["Well_Metadata"] = (
+            meta["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
+            .str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
+        )
+
         out = out.merge(meta, on=["Plate_Metadata", "Well_Metadata"], how="left", validate="m:1")
+        logger.info("Merged plate map %s (%d rows) on Plate/Well.", metadata_file, meta.shape[0])   
+
 
     # Ensure expected ID columns exist for downstream
     for col in ("cpd_id", "cpd_type"):
