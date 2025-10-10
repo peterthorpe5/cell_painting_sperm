@@ -300,24 +300,42 @@ def reorder_and_write(
 def load_ungrouped_files(
     list_file: str,
     logger: logging.Logger,
-    required_cols: List[str] | None = None,
+    required_cols: list[str] | None = None,
+    *,
+    drop_all_na: bool = False,
 ) -> pd.DataFrame:
     """
     Load and vertically concatenate all well-level tables listed in a file.
+
+    This reader is used for the multi-file mode (file-of-files with a 'path'
+    column). It reads each table with automatic delimiter detection, optionally
+    drops columns that are entirely missing, enforces the presence of required
+    identifier columns, and harmonises the inputs by taking the intersection
+    of columns (to guard against schema drift).
 
     Parameters
     ----------
     list_file : str
         CSV/TSV with a column 'path' of file paths.
     logger : logging.Logger
-        Logger.
+        Logger for status messages.
     required_cols : list[str] | None
-        Columns to ensure exist in each table.
+        Columns to ensure exist in each table. Missing ones are created and
+        filled with the string 'missing'. Default: ['cpd_id', 'cpd_type'].
+    drop_all_na : bool
+        If True, drop columns that are entirely NA in each input table
+        immediately after reading.
 
     Returns
     -------
-    pd.DataFrame
+    pandas.DataFrame
         Combined well-level table (harmonised by column intersection).
+
+    Raises
+    ------
+    ValueError
+        If the list file lacks a 'path' column, if no files are read, or if
+        there are no common columns across inputs.
     """
     if required_cols is None:
         required_cols = ["cpd_id", "cpd_type"]
@@ -328,29 +346,38 @@ def load_ungrouped_files(
         logger.error("Input list must have a column named 'path'.")
         raise ValueError("Missing 'path' column in file-of-files.")
 
-    dfs = []
-    for path in df_list["path"]:
-        logger.info("Reading well-level data: %s", path)
-        tmp = read_table_auto(path, logger)
+    dfs: list[pd.DataFrame] = []
+    for p in df_list["path"]:
+        logger.info("Reading well-level data: %s", p)
+        tmp = read_table_auto(p, logger)
+
+        if drop_all_na:
+            tmp = drop_all_na_columns(tmp, logger=logger)
+
+        # Ensure required ID/label columns exist
         tmp = ensure_columns(tmp, required_cols, fill_value="missing")
+
         dfs.append(tmp)
 
     if not dfs:
         raise ValueError("No input files were read.")
 
-    # Harmonise by intersection of columns
-    common_cols = set(dfs[0].columns)
+    # Harmonise by intersection of columns while preserving a stable order
+    common_cols = list(dfs[0].columns)
     for d in dfs[1:]:
-        common_cols &= set(d.columns)
+        common_cols = [c for c in common_cols if c in d.columns]
+
     if not common_cols:
         logger.error("No common columns across input files.")
         raise ValueError("No common columns in well-level files.")
+
     logger.info("%d columns are common to all files.", len(common_cols))
 
-    dfs = [d[list(common_cols)] for d in dfs]
-    combined = pd.concat(dfs, ignore_index=True)
+    combined = pd.concat([d[common_cols] for d in dfs], ignore_index=True)
     logger.info("Combined well-level data shape: %s", combined.shape)
     return combined
+
+
 
 
 def select_feature_columns(
@@ -619,6 +646,47 @@ def attach_plate_well_with_fallback_single(
     return merged
 
 
+
+def drop_all_na_columns(
+    df: pd.DataFrame,
+    *,
+    logger: Optional[logging.Logger] = None
+) -> pd.DataFrame:
+    """
+    Drop columns that are entirely NA (all missing values).
+
+    This is handy for raw CellProfiler exports where some feature columns are
+    present for schema consistency but contain no data on a given plate. The
+    function logs which columns were removed and returns a copy.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table.
+    logger : logging.Logger, optional
+        Logger for status messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with all-NA columns removed.
+    """
+    logger = logger or logging.getLogger("drop_all_na_columns")
+    before = df.shape[1]
+    out = df.dropna(axis=1, how="all").copy()
+    removed = [c for c in df.columns if c not in out.columns]
+    if removed:
+        logger.info(
+            "Removed %d all-NA columns: %s",
+            len(removed),
+            ", ".join(removed[:10]) + (" …" if len(removed) > 10 else "")
+        )
+    else:
+        logger.info("No all-NA columns found.")
+    logger.info("Columns: %d → %d after cleaning.", before, out.shape[1])
+    return out
+
+
 def load_single_acrosome_csv(
     path: str,
     *,
@@ -648,6 +716,8 @@ def load_single_acrosome_csv(
     """
     sep = detect_delimiter(path)
     df = pd.read_csv(path, sep=sep, low_memory=False)
+    if args.drop_all_na:
+        df = drop_all_na_columns(df, logger=logger)
     df.columns = df.columns.map(str)
 
     # Attach Plate/Well if missing
@@ -1009,6 +1079,13 @@ def main() -> None:
             "(globally or per-plate). MW/KS are rank-based, but normalising helps interpretability.",
     )
 
+    parser.add_argument(
+        "--drop_all_na",
+        action="store_true",
+        help="If set, drop columns that are entirely NA immediately after reading input tables."
+    )
+
+
     parser.add_argument("--log_file", default="acrosome_vs_dmso.log", help="Log file name.")
     args = parser.parse_args()
 
@@ -1031,7 +1108,12 @@ def main() -> None:
             logger=logger,
         )
     else:
-        df = load_ungrouped_files(args.ungrouped_list, logger)  
+        df = load_ungrouped_files(
+                    list_file=args.ungrouped_list,
+                    logger=logger,
+                    required_cols=["cpd_id", "cpd_type"],
+                    drop_all_na=args.drop_all_na,
+                )
 
 
     id_cols = [args.cpd_id_col, args.cpd_type_col]
