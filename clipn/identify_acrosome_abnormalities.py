@@ -848,6 +848,31 @@ def load_single_acrosome_csv(
             .str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
         )
 
+        # --- ensure 'out' has Plate_Metadata/Well_Metadata before merging ---
+        if not {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
+            rename_map = {}
+            for cand in ["Plate_Metadata","Metadata_Plate","Plate","plate","Image_Metadata_Plate"]:
+                if cand in out.columns:
+                    rename_map[cand] = "Plate_Metadata"
+                    break
+            for cand in ["Well_Metadata","Metadata_Well","Well","well","Image_Metadata_Well","wellposition","well_name"]:
+                if cand in out.columns:
+                    rename_map[cand] = "Well_Metadata"
+                    break
+            if rename_map:
+                out = out.rename(columns=rename_map)
+
+        if not {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
+            logger.error(
+                "Input %s lacks Plate/Well; cannot merge metadata. "
+                "Either provide an Image table (so we can attach Plate/Well via ImageNumber) "
+                "or include Plate/Well columns in the acrosome CSV.", path
+            )
+            # Continue without merging; downstream will fill cpd_id/cpd_type='missing'
+            metadata_file = None
+
+
+
         out = out.merge(meta, on=["Plate_Metadata", "Well_Metadata"], how="left", validate="m:1")
         logger.info("Merged plate map %s (%d rows) on Plate/Well.", metadata_file, meta.shape[0])   
         logger.info(
