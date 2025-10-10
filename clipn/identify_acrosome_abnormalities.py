@@ -144,7 +144,7 @@ def find_plate_well_in_meta(
 
 
 
-def detect_delimiter(path: str) -> str:
+def detect_delimiter(path: str) -> str | None:
     """
     Detect delimiter in a small text file; prefer tab if both appear.
 
@@ -190,16 +190,52 @@ def read_table_auto(path: str, logger: logging.Logger) -> pd.DataFrame:
     pd.DataFrame
         Loaded table.
     """
-    sep = detect_delimiter(path)
-    logger.debug("Reading table %s (sep=%r)", path, sep if sep is not None else "infer")
+    sep, comp = _io_hints(path)
+    logger.debug(
+        "Reading table %s (sep=%r, compression=%r)",
+        path, sep if sep is not None else "infer", comp,
+    )
     try:
         if sep is None:
-            return pd.read_csv(path, sep=None, engine="python", compression="infer")
-        return pd.read_csv(path, sep=sep, compression="infer")
+            df = pd.read_csv(path, sep=None, engine="python", compression=comp)
+        else:
+            df = pd.read_csv(path, sep=sep, compression=comp)
     except Exception as exc:
         logger.error("Failed to read %s: %s", path, exc)
         raise
 
+    # sanity check: if we *thought* we knew the sep but got 1 column, warn loudly
+    if sep is not None and df.shape[1] == 1:
+        logger.warning(
+            "File read as a single column (cols=%s). "
+            "Check that the extension matches the real delimiter for: %s",
+            list(df.columns), path,
+        )
+    return df
+
+
+
+def _io_hints(path: str) -> tuple[str | None, str | None]:
+    """
+    Decide delimiter and compression strictly from the filename.
+    - *.csv           -> comma
+    - *.tsv           -> tab
+    - *.csv.gz        -> comma + gzip
+    - *.tsv.gz        -> tab   + gzip
+    Otherwise: sep=None (let pandas infer), compression="infer".
+    """
+    p = Path(str(path).lower())
+    compression = "gzip" if p.suffix == ".gz" or p.suffixes[-1:] == [".gz"] else None
+
+    # handle double suffixes like .csv.gz / .tsv.gz
+    suffixes = "".join(p.suffixes)
+    if suffixes.endswith(".csv.gz") or suffixes.endswith(".csv"):
+        return ",", compression or None
+    if suffixes.endswith(".tsv.gz") or suffixes.endswith(".tsv"):
+        return "\t", compression or None
+
+    # fallback: let pandas infer
+    return None, "infer"
 
 
 # Columns to always treat as metadata (never as features)
@@ -820,6 +856,24 @@ def load_single_acrosome_csv(
 
         out = out.merge(meta, on=["Plate_Metadata", "Well_Metadata"], how="left", validate="m:1")
         logger.info("Merged plate map %s (%d rows) on Plate/Well.", metadata_file, meta.shape[0])   
+        logger.info(
+        "Merged plate map %s (%d rows) on Plate/Well. Post-merge rows: %d",
+        metadata_file, meta.shape[0], out.shape[0]
+        )
+        for col in ("cpd_id", "cpd_type"):
+            miss = out[col].isna().sum() if col in out.columns else out.shape[0]
+            logger.info("Post-merge: missing %s in %d rows.", col, miss)
+
+        if {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
+            logger.info(
+                "Example mappings: %s",
+                out[["Plate_Metadata", "Well_Metadata", "cpd_id", "cpd_type"]]
+                .drop_duplicates()
+                .head(5)
+                .to_dict(orient="records")
+            )
+        else:
+            logger.warning("Plate/Well still missing after attempted attach + merge.")
 
 
     # Ensure expected ID columns exist for downstream
