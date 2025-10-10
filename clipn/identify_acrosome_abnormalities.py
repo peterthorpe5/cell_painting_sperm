@@ -158,7 +158,7 @@ def detect_delimiter(path: str) -> str:
     str
         Detected delimiter: '\\t' or ','.
     """
-   candidates = ("\t", ",", ";", "|")
+    candidates = ("\t", ",", ";", "|")
     for sep in candidates:
         try:
             pd.read_csv(path, sep=sep, nrows=50, compression="infer")
