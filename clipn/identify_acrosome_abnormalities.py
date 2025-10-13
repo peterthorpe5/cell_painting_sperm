@@ -117,8 +117,11 @@ def find_plate_well_in_meta(
     cand_plate = meta_lc.get(req[0].lower()) if len(req) >= 2 else None
     cand_well  = meta_lc.get(req[1].lower()) if len(req) >= 2 else None
 
-    plate_aliases = ["plate", "metadata_plate", "plate_id", "platebarcode", "plate_name"]
-    well_aliases  = ["well", "metadata_well", "well_id", "wellposition", "well_name", "well_address"]
+    plate_aliases = ["plate", "metadata_plate", "plate_id", "platebarcode", 
+                     "plate_name", "plate_metadata"]
+    well_aliases  = ["well", "metadata_well", "well_id", 
+                     "wellposition", "well_name", "well_address",
+                     "well_metadata"]
 
     if not cand_plate:
         for k in plate_aliases:
