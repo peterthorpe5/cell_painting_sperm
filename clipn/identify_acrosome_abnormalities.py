@@ -1324,7 +1324,7 @@ def main() -> None:
     parser.add_argument("--agg_func", choices=["median","mean"], default="median",
         help="Aggregation function when --aggregate is used.")
 
-        parser.add_argument(
+    parser.add_argument(
             "--drop_all_na",
             action="store_true",
             help="If set, drop columns that are entirely NA immediately after reading input tables."
