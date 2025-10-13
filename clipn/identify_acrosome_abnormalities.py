@@ -782,13 +782,16 @@ def drop_all_na_columns(
 
 
 
-def load_single_acrosome_csv(
+def load_single_data_csv(
     path: str,
     *,
+    image_table: str | None,
     metadata_file: str | None,
     merge_keys: str = "Plate,Well",
     logger: logging.Logger,
     drop_all_na: bool = False,
+    aggregate: str = "none",          # "none" | "well" | "image"
+    agg_func: str = "median",         # "median" | "mean"
 ) -> pd.DataFrame:
     """
     Load a single CellProfiler object CSV (Acrosome table), optionally attach Plate/Well
@@ -816,102 +819,144 @@ def load_single_acrosome_csv(
     Returns a well-level table with at least: Plate_Metadata, Well_Metadata (if resolvable),
     cpd_id, cpd_type (filled as 'missing' if not merged), plus numeric features.
     """
-    # 1) Read the object table (auto delimiter/compression)
     df = read_table_auto(path, logger)
     if drop_all_na:
         df = drop_all_na_columns(df, logger=logger)
     df.columns = df.columns.map(str)
 
-    # 2) Attach Plate/Well via *_Image.csv if needed/possible, then standardise names
-    df = attach_plate_well_with_fallback_single(
-        obj_df=df,
-        input_dir=os.path.dirname(path) or ".",
-        obj_filename=os.path.basename(path),
-        logger=logger,
-    )
-    df = select_single_plate_well(df, logger=logger)
+    # ---- helpers ----
+    def _standardise_plate_well(d: pd.DataFrame) -> pd.DataFrame:
+        d = d.copy()
+        plate_cands = [
+            "Plate_Metadata","Metadata_Plate","Image_Metadata_Plate",
+            "Plate","plate","plate_id","platebarcode","plate_name"
+        ]
+        well_cands = [
+            "Well_Metadata","Metadata_Well","Image_Metadata_Well",
+            "Well","well","well_id","wellposition","well_name","well_address"
+        ]
+        if "Plate_Metadata" not in d.columns:
+            pc = next((c for c in plate_cands if c in d.columns), None)
+            if pc: d = d.rename(columns={pc: "Plate_Metadata"})
+        if "Well_Metadata" not in d.columns:
+            wc = next((c for c in well_cands if c in d.columns), None)
+            if wc: d = d.rename(columns={wc: "Well_Metadata"})
+        if "Well_Metadata" in d.columns:
+            def _pad(w):
+                m = re.match(r"^([A-Ha-h])(\d{1,2})$", str(w).strip())
+                return f"{m.group(1).upper()}{int(m.group(2)):02d}" if m else w
+            d["Well_Metadata"] = (
+                d["Well_Metadata"].astype(str)
+                .str.replace(r"\s+", "", regex=True)
+                .map(_pad)
+            )
+        return d
 
-    # 3) If we have Plate/Well and numeric features, aggregate object-level → well-level (median)
-    meta_like = {"Plate_Metadata", "Well_Metadata", "ImageNumber", "ObjectNumber"}
-    feature_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in meta_like]
-    if {"Plate_Metadata", "Well_Metadata"}.issubset(df.columns) and feature_cols:
-        out = (
-            df.groupby(["Plate_Metadata", "Well_Metadata"], observed=False, sort=False)[feature_cols]
-              .median()
-              .reset_index()
-        )
+    def _attach_from_image(obj_df: pd.DataFrame) -> pd.DataFrame:
+        if "ImageNumber" not in obj_df.columns:
+            return obj_df
+
+        img_path = None
+        if image_table and Path(image_table).exists():
+            img_path = Path(image_table)
+            logger.info("Using explicit --image_table: %s", img_path.name)
+        else:
+            base = os.path.basename(path)
+            base = base[:-7] if base.endswith(".csv.gz") else base[:-4] if base.endswith(".csv") else base
+            sibs = [Path(os.path.dirname(path)) / f"{base}_Image.csv.gz",
+                    Path(os.path.dirname(path)) / f"{base}_Image.csv"]
+            sibs = [p for p in sibs if p.exists() and not p.name.startswith((".", "_"))]
+            if sibs:
+                img_path = sibs[0]
+            else:
+                folder = Path(os.path.dirname(path))
+                imgs = []
+                for pat in ("*Image.csv.gz","*_Image.csv.gz","*Image.csv","*_Image.csv"):
+                    imgs += [p for p in folder.glob(pat) if not p.name.startswith((".", "_"))]
+                if len(imgs) == 1:
+                    img_path = imgs[0]
+                    logger.info("Using unique folder Image table fallback: %s", img_path.name)
+                elif len(imgs) > 1:
+                    logger.warning("Multiple Image tables detected; cannot choose uniquely. Skipping image attach.")
+                    return obj_df
+                else:
+                    logger.warning("No Image table found. Skipping image attach.")
+                    return obj_df
+
+        try:
+            head = pd.read_csv(img_path, nrows=5, low_memory=False)
+            plate_col = next((c for c in ["Plate_Metadata","Metadata_Plate","Plate","Image_Metadata_Plate","plate_id","plate_name"] if c in head.columns), None)
+            well_col  = next((c for c in ["Well_Metadata","Metadata_Well","Well","Image_Metadata_Well","wellposition","well_name","well_address"] if c in head.columns), None)
+            usecols   = ["ImageNumber"] + [c for c in (plate_col, well_col) if c]
+            if len(usecols) == 1:
+                logger.warning("Image file %s lacks Plate/Well columns; skipping attach.", img_path.name)
+                return obj_df
+            img = pd.read_csv(img_path, usecols=usecols, low_memory=False)
+        except Exception as exc:
+            logger.warning("Failed to read Image table %s: %s", img_path.name, exc)
+            return obj_df
+
+        merged = obj_df.merge(img, on="ImageNumber", how="left", suffixes=("", "_img"))
+        return merged
+
+    # ---- detect mode & standardize only (no aggregation yet) ----
+    has_plate = any(k in df.columns for k in
+        ["Plate_Metadata","Metadata_Plate","Image_Metadata_Plate","Plate","plate","plate_id","plate_name"])
+    has_well = any(k in df.columns for k in
+        ["Well_Metadata","Metadata_Well","Image_Metadata_Well","Well","well","well_id","wellposition","well_name","well_address"])
+    has_imnum = "ImageNumber" in df.columns
+
+    if has_plate and has_well:
+        logger.info("Detected well-level data (Plate/Well present). No aggregation requested.")
+        out = _standardise_plate_well(df)
+    elif has_imnum:
+        logger.info("Detected object/image-level data (ImageNumber present). Attaching Plate/Well if possible.")
+        out = _standardise_plate_well(_attach_from_image(df))
     else:
+        logger.warning("No Plate/Well and no ImageNumber in file. Proceeding without annotation merge.")
         out = df.copy()
 
-    # 4) Optional: merge a plate map to add cpd_id / cpd_type (only if we can key on Plate/Well)
+    # ---- optional aggregation (only if explicitly requested) ----
+    agg_fn = np.median if agg_func == "median" else np.mean
+    meta_like = {"Plate_Metadata","Well_Metadata","ImageNumber","ObjectNumber"}
+    feat_cols = [c for c in out.columns if pd.api.types.is_numeric_dtype(out[c]) and c not in meta_like]
+
+    if aggregate == "well" and {"Plate_Metadata","Well_Metadata"}.issubset(out.columns):
+        if feat_cols:
+            logger.info("Aggregating to well (%s) on %d features by %s.", agg_func, len(feat_cols), aggregate)
+            out = (
+                out.groupby(["Plate_Metadata","Well_Metadata"], observed=False, sort=False)[feat_cols]
+                   .aggregate(agg_fn)
+                   .reset_index()
+            )
+    elif aggregate == "image" and {"Plate_Metadata","Well_Metadata","ImageNumber"}.issubset(out.columns):
+        if feat_cols:
+            logger.info("Aggregating to image (%s) on %d features by %s.", agg_func, len(feat_cols), aggregate)
+            out = (
+                out.groupby(["Plate_Metadata","Well_Metadata","ImageNumber"], observed=False, sort=False)[feat_cols]
+                   .aggregate(agg_fn)
+                   .reset_index()
+            )
+    else:
+        logger.info("No aggregation performed (--aggregate=%s).", aggregate)
+
+    # ---- merge plate-map / annotations if possible ----
     if metadata_file:
         meta = read_table_auto(metadata_file, logger)
-
-        # Resolve which columns in the plate map are Plate/Well
         plate_key, well_key = find_plate_well_in_meta(meta, merge_keys, logger)
-
-        # Standardise plate map key names
         meta = meta.rename(columns={plate_key: "Plate_Metadata", well_key: "Well_Metadata"})
-        # Zero-pad wells like A1 -> A01 for consistent matching
         meta["Well_Metadata"] = (
             meta["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
             .str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
         )
-
-        # Ensure LEFT frame has Plate/Well; try a best-effort rename if not
-        if not {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
-            rename_map = {}
-            for cand in ["Plate_Metadata", "Metadata_Plate", "Plate", "plate", "Image_Metadata_Plate"]:
-                if cand in out.columns:
-                    rename_map[cand] = "Plate_Metadata"
-                    break
-            for cand in [
-                "Well_Metadata", "Metadata_Well", "Well", "well", "Image_Metadata_Well",
-                "wellposition", "well_name"
-            ]:
-                if cand in out.columns:
-                    rename_map[cand] = "Well_Metadata"
-                    break
-            if rename_map:
-                out = out.rename(columns=rename_map)
-                # Zero-pad if we just created Well_Metadata
-                if "Well_Metadata" in rename_map.values():
-                    out["Well_Metadata"] = (
-                        out["Well_Metadata"].astype(str).str.replace(r"\s+", "", regex=True)
-                        .str.replace(r"^([A-Ha-h])(\d{1,2})$", lambda m: f"{m.group(1).upper()}{int(m.group(2)):02d}", regex=True)
-                    )
-
-        # Merge only if keys exist on the LEFT
-        if {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
-            out = out.merge(meta, on=["Plate_Metadata", "Well_Metadata"], how="left", validate="m:1")
-            logger.info("Merged plate map %s (%d rows) on Plate/Well.", metadata_file, meta.shape[0])
-            logger.info("Post-merge rows: %d", out.shape[0])
-
-            # Quick diagnostics
-            for col in ("cpd_id", "cpd_type"):
-                miss = out[col].isna().sum() if col in out.columns else out.shape[0]
-                logger.info("Post-merge: missing %s in %d rows.", col, miss)
-
-            if {"Plate_Metadata", "Well_Metadata"}.issubset(out.columns):
-                try:
-                    logger.info(
-                        "Example mappings: %s",
-                        out[["Plate_Metadata", "Well_Metadata", "cpd_id", "cpd_type"]]
-                        .drop_duplicates()
-                        .head(5)
-                        .to_dict(orient="records")
-                    )
-                except Exception:
-                    pass
+        if {"Plate_Metadata","Well_Metadata"}.issubset(out.columns):
+            out = out.merge(meta, on=["Plate_Metadata","Well_Metadata"], how="left", validate="m:1")
+            logger.info("Merged metadata on Plate/Well. Post-merge rows: %d", out.shape[0])
         else:
-            logger.warning(
-                "Input %s lacks Plate/Well; skipping metadata merge. "
-                "Provide an Image table or Plate/Well columns in the Acrosome CSV to enable merging.",
-                path,
-            )
+            logger.warning("Plate/Well not present after loading; skipping metadata merge.")
 
-    # 5) Ensure expected ID columns exist for downstream
-    for col in ("cpd_id", "cpd_type"):
+    # Ensure expected ID columns exist
+    for col in ("cpd_id","cpd_type"):
         if col not in out.columns:
             out[col] = "missing"
 
@@ -1237,6 +1282,13 @@ def main() -> None:
     mx = parser.add_mutually_exclusive_group(required=True)
     mx.add_argument("--ungrouped_list", help="CSV/TSV with column 'path' of well-level files.")
     mx.add_argument("--acrosome_csv", help="Single CellProfiler Acrosome object CSV (per-object).")
+    parser.add_argument(
+            "--image_table",
+            default=None,
+            help="Explicit path to the Image table (…_Image.csv[.gz]) to attach Plate/Well via ImageNumber. "
+                "If not provided, the script will try a sibling or unique folder Image table."
+        )
+
 
     parser.add_argument("--metadata_file", default=None, help="Optional plate map to add cpd_id/cpd_type/Library.")
     parser.add_argument("--merge_keys", default="Plate,Well", help="Comma-separated keys in metadata_file (default: Plate,Well).")
@@ -1267,11 +1319,16 @@ def main() -> None:
             "(globally or per-plate). MW/KS are rank-based, but normalising helps interpretability.",
     )
 
-    parser.add_argument(
-        "--drop_all_na",
-        action="store_true",
-        help="If set, drop columns that are entirely NA immediately after reading input tables."
-    )
+    parser.add_argument("--aggregate", choices=["none","well","image"], default="none",
+        help="Aggregate rows only if requested. Default: none.")
+    parser.add_argument("--agg_func", choices=["median","mean"], default="median",
+        help="Aggregation function when --aggregate is used.")
+
+        parser.add_argument(
+            "--drop_all_na",
+            action="store_true",
+            help="If set, drop columns that are entirely NA immediately after reading input tables."
+        )
 
 
     parser.add_argument("--log_file", default="acrosome_vs_dmso.log", help="Log file name.")
@@ -1290,13 +1347,18 @@ def main() -> None:
     if args.acrosome_csv:
         logger.info("Reading single Acrosome CSV: %s", args.acrosome_csv)
 
-        df = load_single_acrosome_csv(
+        df = load_single_data_csv(
                 args.acrosome_csv,
+                image_table=args.image_table,
                 metadata_file=args.metadata_file,
                 merge_keys=args.merge_keys,
                 logger=logger,
                 drop_all_na=args.drop_all_na,
+                aggregate=args.aggregate,   # default "none"
+                agg_func=args.agg_func,     # default "median"
             )
+
+
     else:
         df = load_ungrouped_files(
                     list_file=args.ungrouped_list,
