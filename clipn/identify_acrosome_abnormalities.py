@@ -1374,7 +1374,7 @@ def main() -> None:
 
 
     # Use normalised prefixes (lower-case)
-    prefixes = (args.feature_prefix or ["Acrosome__"])
+    prefixes = (args.feature_prefix)
     df = filter_feature_columns_by_prefix(
         df=df,
         prefixes=prefixes,
