@@ -398,9 +398,11 @@ def _draw_compound_feature_heatmap(
     ax.set_xlabel("Features")
     ax.set_ylabel("Compounds (grouped by phenotype)")
     ax.set_title("Compound × feature heatmap (selected subset)")
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
+    fig = plt.gcf()
+    fig.set_constrained_layout(True)
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
 
 
 def _write_compound_upset(
@@ -447,9 +449,12 @@ def _write_compound_upset(
         sort_by="cardinality",
         intersection_plot_elements=int(max_sets),
     ).plot()
-    plt.tight_layout()
-    plt.savefig(out_png)
-    plt.close()
+
+    fig = plt.gcf()
+    fig.set_constrained_layout(True)
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
 
 
 
@@ -661,10 +666,12 @@ def run(
                     sort_by="cardinality",
                     intersection_plot_elements=int(max_upset_sets),
                 ).plot()
-                plt.tight_layout()
-                # Save as PDF for vector quality
-                plt.savefig(plots_dir / "upset_phenotype_features.pdf")
-                plt.close()
+                fig = plt.gcf()
+                fig.set_constrained_layout(True)
+                plt.savefig(plots_dir / "upset_phenotype_features.pdf", bbox_inches="tight")
+                plt.close(fig)
+
+
 
     # Enrichment tests (one-sided Fisher, 'greater')
     rows: List[Dict[str, float | int | str]] = []
