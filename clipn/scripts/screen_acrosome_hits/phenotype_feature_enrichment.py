@@ -84,6 +84,12 @@ try:
 except Exception:  # pragma: no cover
     HAS_MPL = False
 
+try:
+    from upsetplot import UpSet, from_indicators
+    HAS_UPSETPLOT = True
+except Exception:  # pragma: no cover
+    HAS_UPSETPLOT = False
+
 
 def _bh_fdr(pvals: np.ndarray) -> np.ndarray:
     """
@@ -216,6 +222,80 @@ def _explode_phenotypes(df: pd.DataFrame, name_col: str, phenotype_col: str) -> 
     return out
 
 
+def _prepare_features_by_phenotype(
+    *,
+    ph_feat: pd.DataFrame,
+    phenotypes_keep: List[str] | None,
+    min_feature_phenotypes: int,
+) -> pd.DataFrame:
+    """
+    Build a features × phenotypes boolean matrix and filter it.
+
+    Parameters
+    ----------
+    ph_feat : pandas.DataFrame
+        Phenotype × feature 0/1 matrix as written earlier in the script.
+    phenotypes_keep : list[str] or None
+        Optional explicit subset of phenotype names to include.
+    min_feature_phenotypes : int
+        Keep only features present in at least this many phenotypes.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Boolean DataFrame with rows = features, columns = phenotypes.
+    """
+    if phenotypes_keep:
+        present = [p for p in phenotypes_keep if p in ph_feat.index]
+        missing = [p for p in phenotypes_keep if p not in ph_feat.index]
+        if missing:
+            logging.warning("Requested phenotypes missing and will be ignored: %s", ", ".join(missing))
+        if present:
+            ph_feat = ph_feat.loc[present]
+
+    feat_by_ph = ph_feat.T.astype(bool)
+
+    if int(min_feature_phenotypes) > 1:
+        mask = feat_by_ph.sum(axis=1) >= int(min_feature_phenotypes)
+        feat_by_ph = feat_by_ph.loc[mask]
+
+    return feat_by_ph
+
+
+def _write_upset_intersections(
+    *,
+    feat_by_ph: pd.DataFrame,
+    out_tsv: Path,
+) -> None:
+    """
+    Write phenotype-set intersection sizes to a TSV (tab-separated).
+
+    Parameters
+    ----------
+    feat_by_ph : pandas.DataFrame
+        Features × phenotypes boolean matrix.
+    out_tsv : pathlib.Path
+        Output TSV path.
+    """
+    rows: list[tuple[str, str]] = []
+    for feature, row in feat_by_ph.iterrows():
+        combo = tuple(sorted(row.index[row.values]))
+        if combo:
+            rows.append((";".join(combo), feature))
+
+    if not rows:
+        pd.DataFrame({"phenotype_set": [], "n_features": []}).to_csv(out_tsv, sep="\t", index=False)
+        return
+
+    df = pd.DataFrame(rows, columns=["phenotype_set", "feature"])
+    out = (
+        df.groupby("phenotype_set", as_index=False)
+        .agg(n_features=("feature", "size"))
+        .sort_values("n_features", ascending=False)
+    )
+    out.to_csv(out_tsv, sep="\t", index=False)
+
+
 def run(
     sig_dir: Path,
     phenotype_tsv: Path,
@@ -226,6 +306,10 @@ def run(
     qvalue_alpha: float,
     make_plots: bool,
     plot_all: bool,
+    make_upset: bool,                  
+    min_feature_phenotypes: int,       
+    max_upset_sets: int,               
+    phenotypes_keep: List[str] | None, 
 ) -> None:
     """
     Execute the phenotype-feature enrichment workflow.
@@ -296,6 +380,55 @@ def run(
     comp_feat_out = out_dir / "compound_feature_matrix.tsv"
     comp_feat.to_csv(comp_feat_out, sep="\t")
     (out_dir / "upset_compound_feature.tsv").write_text(comp_feat.to_csv(sep="\t"), encoding="utf-8")
+
+    # Optional UpSet plot of phenotype–feature overlaps
+    if make_upset:
+        if not HAS_UPSETPLOT:
+            logging.warning("upsetplot not available; install with 'pip install upsetplot'. Skipping UpSet.")
+        else:
+            plots_dir = out_dir / "plots"
+            plots_dir.mkdir(exist_ok=True)
+
+            feat_by_ph = _prepare_features_by_phenotype(
+                ph_feat=ph_feat,
+                phenotypes_keep=phenotypes_keep,
+                min_feature_phenotypes=int(min_feature_phenotypes),
+            )
+
+            # Always write the filtered matrix for reproducibility
+            (plots_dir / "features_by_phenotype.filtered.tsv").write_text(
+                feat_by_ph.astype(int).to_csv(sep="\t"), encoding="utf-8"
+            )
+
+            # Intersections table (useful alongside UpSet)
+            _write_upset_intersections(
+                feat_by_ph=feat_by_ph,
+                out_tsv=plots_dir / "upset_intersections.tsv",
+            )
+
+            if feat_by_ph.empty:
+                logging.info("UpSet skipped: no features passed filtering (min_feature_phenotypes=%d).",
+                             int(min_feature_phenotypes))
+            else:
+                # Build indicators and plot
+                indicators = from_indicators(
+                    data=feat_by_ph.astype(bool),
+                    data_name="features",
+                )
+                plt.figure(figsize=(12, 7))
+                UpSet(
+                    indicators,
+                    subset_size="count",
+                    show_counts=True,
+                    sort_by="cardinality",
+                    sort_categories_by="degree",
+                    max_num=int(max_upset_sets),
+                ).plot()
+                plt.tight_layout()
+                plt.savefig(plots_dir / "upset_phenotype_features.pdf")
+                plt.close()
+
+
 
     # Phenotype assignments restricted to overlapping compounds
     ph_use = ph_pairs.loc[ph_pairs["name_norm"].isin(set(_normalise_name(x) for x in comp_feat.index))].copy()
@@ -419,7 +552,7 @@ def run(
             plt.tight_layout()
 
             safe_phen = re.sub(r"[^A-Za-z0-9]+", "_", phen)
-            plt.savefig(plots_dir / f"{safe_phen}_top_features.png", dpi=200)
+            plt.savefig(plots_dir / f"{safe_phen}_top_features.pdf", dpi=200)
             plt.close()
 
 
@@ -442,6 +575,15 @@ def main() -> None:
     parser.add_argument("--no_plots", action="store_true", help="If set, do not generate quick bar plots.")
     parser.add_argument("--plot_all", action="store_true",
                        help="If no features pass thresholds, plot top 20 by p-value per phenotype.")
+    parser.add_argument("--make_upset", action="store_true",
+                    help="Generate an UpSet plot from the phenotype×feature matrix.")
+    parser.add_argument("--min_feature_phenotypes", type=int, default=2,
+                        help="Keep features present in at least this many phenotypes for the UpSet.")
+    parser.add_argument("--max_upset_sets", type=int, default=12,
+                        help="Maximum number of phenotype sets shown in the UpSet intersections.")
+    parser.add_argument("--phenotypes_keep", type=str, nargs="*", default=None,
+                        help="Optional list of phenotype names to include in the UpSet (others dropped).")
+
 
     parser.add_argument("--log_level", type=str, default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -466,6 +608,10 @@ def main() -> None:
         qvalue_alpha=float(args.qvalue_alpha),
         make_plots=(not args.no_plots),
         plot_all=bool(args.plot_all),
+        make_upset=bool(args.make_upset),                          
+        min_feature_phenotypes=int(args.min_feature_phenotypes),   
+        max_upset_sets=int(args.max_upset_sets),                   
+        phenotypes_keep=args.phenotypes_keep,                      
     )
 
 
