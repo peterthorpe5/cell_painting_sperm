@@ -1,88 +1,109 @@
 name	published_phenotypes
-ASI-8	blocks sAC
-bpV(phen)	blocks progesterone induced acrosome reaction;blocks progesterone induced ca2+ response
-Tideglusib	spermicidial;vaginal treatment
-Genistein	blocks progesterone induced acrosome reaction;blocks progesterone induced ca2+ response
-T16Ainh-A01	blocks acrosome reaction in conjunction w. rhZP3
-Niflumic acid	blocks acrosome reaction in conjunction w. rhZP3
-Hexachlorophene	reduces sperm motility;blocks sAC
-Fenvalerate	blocks progesterone induced acrosome reaction
-Niclosamide	shape abnormality
-BMS-189453	interferes with spermatogenesis
-Dipyridamole	enhances sperm motility
-Cloperastine hydrochloride	reduces sperm motility
-Resiquimod	reduction of sperm motility;only sperm with X chr
-Compound B4	reducing sperm motility
-2-Guanidinobenzimidazole	reduces sperm motility
-Alexidine dihydrochloride	inhibition of PTPMT1;paper not sperm related
-TP 003	enhances sperm motility
-NSC 697923	NA
-Pha-665752	p4 evoked ca2+ response
-MCP05	reduces sperm motility
-Ouabain	reduces sperm motility
-Trequinsin hydrochloride	increases hyperactivated sperm;increases penetration index;increases motility
-Leelamine hydrochloride	p4 evoked ca2+ response
-SLM 6031434 hydrochloride	induces acrosome reaction
-JQ1	interferes with spermatogenesis;reduces sperm count;reduces motility
-n-[4-(4-Chlorophenyl)-1,3-thiazol-2-yl]guanidine	NA
-Nafamostat	interferes with liquefaction;reduces sperm motility
-Anandamide	reduces sperm motility
-Torin 2	enhances sperm motility
-PD 146176	antagonizing ROS effects
-Mibefradil	blocks ccl-20 induced ca2+ response;blocks progesterone induced ca2+ response
-CYM 5442 hydrchloride	reduces sperm motility;induces acrosome reaction
-MJ33	prevents capacitation-associated tyrosinephosphorylation by PKA
-HC-056456	blocks ca2+ and Na+ entry;blocks onset of hyperactive motility
-Urinastatin	interferes with liquefaction;reduces sperm motility
-Pristimerin	reduces sperm motility
-CZC 25146	LRRK2 neuronal toxicity
-NNC 55-0396 dihydrochloride	blocks ccl-20 induced ca2+ response
-666-15	reduces sperm motility;induces acrosome reaction
-Phenanthroline	inhibit proteolytic activity of PSA
-CCR6 inhibitor	NA
-Oprea1_544341	reduces sperm motility;role of glycolysis in sperm motility
-A23187	NA
-LRRK2-IN-1	NA
-Disulfiram	immotile sperm;spermicidial
-Forskolin	stimulates acrosome reaction
-Alfuzosin	interferes with ejaculation
-Compound 19	blocks TSSK; similarity to brigatinib
-IBMX	NA
-Tamsulosin	intereferes with ejaculation
-Imiquimod	reduction of sperm motility;only sperm with X chr
-DDD0002387619	reduction of sperm motility
-Bithionol	blocks sAC
-GF 109203X	blocks progesterone induced acrosome reaction;blocks progesterone induced ca2+ response
-CTFRinh-172	blocks progesterone induced acrosome reaction;blocks sperm hyperactivation;blocks rhZP3 induced acrosome reaction
-Sodium orthovanadate	blocks progesterone induced acrosome reaction;blocks progesterone induced ca2+ response
-FPL 64176	p4 evoked ca2+ response
-183	reduces acrosome reaction
-Esomeprazole	reduces sperm motility
+183	Reduces acrosome reaction
+2-Guanidinobenzimidazole	Reduces sperm motility
+666-15	Induces acrosome reaction
+666-15	Reduces sperm motility
 68853496	NA
-Gossypol	causes azoospermia
-Clofarabine	enhances sperm motility
-B07 hydrochloride	reduction of sperm motility
-KT 5720	evokes Ca2+ signaling in sperm cells w/o P4
-Linsitinib	NA
-Tafenoquine	NA
-Hesperadin hydrochloride	reduces sperm motility
-UK 78282 hydrochloride	p4 evoked ca2+ response
-Tacrolimus	blocks progesterone induced acrosome reaction
-BPO-27	NA
-Tak-063	enhances sperm motility
-LRE1	prevents hyperactivation
-TAE226	NA
-GW 843682X	enhances sperm motility
-GSK1904529A	inhibition of hyperactive motility
+A23187	NA
+ASI-8	Blocks sAC
 AZD 7762 hydrochloride	NA
-Cyclosporin A	blocks progesterone induced acrosome reaction
-NVP-AEW541	inhibition of hyperactive motility
-PF 431396	blocks capacitation
-JX 401	p4 evoked ca2+ response
-H 89 dihydrochloride	evokes Ca2+ signaling in sperm cells w/o P4
-Ro 106-9920	reduces sperm motility
-CCR6 inhibitor 1	potentially blocks acrosome reaction
-DDD0002387619	reduction of sperm motility
-Niclosamide	shape abnormality
-LRE1	prevents hyperactivation
-Miglustat	intereferes with spermatogenesis
+Alexidine dihydrochloride	Inhibition of PTPMT1
+Alexidine dihydrochloride	Paper not sperm related
+Alfuzosin	Interferes with ejaculation
+Anandamide	Reduces sperm motility
+B07 hydrochloride	Reduces sperm motility
+BMS-189453	Interferes with spermatogenesis
+BPO-27	NA
+Bithionol	Blocks sAC
+CCR6 inhibitor	NA
+CCR6 inhibitor 1	Blocks acrosome reaction
+CTFRinh-172	Blocks P4-induced acrosome reaction
+CTFRinh-172	Blocks ZP3-induced acrosome reaction
+CTFRinh-172	Blocks sperm hyperactivation
+CYM 5442 hydrchloride	Induces acrosome reaction
+CYM 5442 hydrchloride	Reduces sperm motility
+CZC 25146	LRRK2 neuronal toxicity
+Clofarabine	Enhances sperm motility
+Cloperastine hydrochloride	Reduces sperm motility
+Compound 19	Blocks TSSK
+Compound 19	Similarity to brigatinib
+Compound B4	Reduces sperm motility
+Cyclosporin A	Blocks P4-induced acrosome reaction
+DDD0002387619	Reduces sperm motility
+Dipyridamole	Enhances sperm motility
+Disulfiram	Immotile sperm
+Disulfiram	Spermicidal
+Esomeprazole	Reduces sperm motility
+FPL 64176	P4-evoked Ca2+ response
+Fenvalerate	Blocks P4-induced acrosome reaction
+Forskolin	Stimulates acrosome reaction
+GF 109203X	Blocks P4-evoked Ca2+ response
+GF 109203X	Blocks P4-induced acrosome reaction
+GSK1904529A	Blocks hyperactivation
+GW 843682X	Enhances sperm motility
+Genistein	Blocks P4-evoked Ca2+ response
+Genistein	Blocks P4-induced acrosome reaction
+Gossypol	Azoospermia
+H 89 dihydrochloride	Evokes Ca2+ signalling
+HC-056456	Blocks ca2+ and Na+ entry
+HC-056456	Blocks hyperactivation
+Hesperadin hydrochloride	Reduces sperm motility
+Hexachlorophene	Blocks sAC
+Hexachlorophene	Reduces sperm motility
+IBMX	NA
+Imiquimod	Enriches X-bearing sperm
+Imiquimod	Reduces sperm motility
+JQ1	Interferes with spermatogenesis
+JQ1	Reduces motility
+JQ1	Reduces sperm count
+JX 401	P4-evoked Ca2+ response
+KT 5720	Evokes Ca2+ signalling
+LRE1	Prevents hyperactivation
+LRRK2-IN-1	NA
+Leelamine hydrochloride	P4-evoked Ca2+ response
+Linsitinib	NA
+MCP05	Reduces sperm motility
+MJ33	Prevents capacitation-associated tyrosinephosphorylation by PKA
+Mibefradil	Blocks CCL20-evoked Ca2+ response
+Mibefradil	Blocks P4-evoked Ca2+ response
+Miglustat	Intereferes with spermatogenesis
+NNC 55-0396 dihydrochloride	Blocks CCL20-evoked Ca2+ response
+NSC 697923	NA
+NVP-AEW541	Blocks hyperactivation
+Nafamostat	Interferes with liquefaction
+Nafamostat	Reduces sperm motility
+Niclosamide	Shape abnormality
+Niflumic acid	Blocks acrosome reaction
+Oprea1_544341	Reduces sperm motility
+Oprea1_544341	Role of glycolysis in sperm motility
+Ouabain	Reduces sperm motility
+PD 146176	Antagonizing ROS effects
+PF 431396	Blocks capacitation
+Pha-665752	P4-evoked Ca2+ response
+Phenanthroline	Inhibit proteolytic activity of PSA
+Pristimerin	Reduces sperm motility
+Resiquimod	Enriches X-bearing sperm
+Resiquimod	Reduces sperm motility
+Ro 106-9920	Reduces sperm motility
+SLM 6031434 hydrochloride	Induces acrosome reaction
+Sodium orthovanadate	Blocks P4-evoked Ca2+ response
+Sodium orthovanadate	Blocks P4-induced acrosome reaction
+T16Ainh-A01	Blocks acrosome reaction
+TAE226	NA
+TP 003	Enhances sperm motility
+Tacrolimus	Blocks P4-induced acrosome reaction
+Tafenoquine	NA
+Tak-063	Enhances sperm motility
+Tamsulosin	Interferes with ejaculation
+Tideglusib	Spermicidal
+Tideglusib	Vaginal treatment
+Torin 2	Enhances sperm motility
+Trequinsin hydrochloride	Enhances hyperactivation
+Trequinsin hydrochloride	Enhances sperm motility
+Trequinsin hydrochloride	Increases penetration index
+UK 78282 hydrochloride	P4-evoked Ca2+ response
+Urinastatin	Interferes with liquefaction
+Urinastatin	Reduces sperm motility
+bpV(phen)	Blocks P4-evoked Ca2+ response
+bpV(phen)	Blocks P4-induced acrosome reaction
+"n-[4-(4-Chlorophenyl)-1,3-thiazol-2-yl]guanidine"	NA
