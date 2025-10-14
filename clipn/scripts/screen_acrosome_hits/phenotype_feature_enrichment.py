@@ -372,23 +372,55 @@ def run(
         if not HAS_MPL:
             logging.warning("matplotlib not available; skipping plots.")
             return
+
         plots_dir = out_dir / "plots"
         plots_dir.mkdir(exist_ok=True)
-        for phen in phenos:
-            sub = top.loc[top["phenotype"] == phen].head(20)
-            if sub.empty:
-                continue
+
+        # Log if the strict 'top' table is empty
+        if top.empty:
+            logging.info(
+                "No plots generated under current thresholds: "
+                "top table empty (q_value ≤ %.3g and support ≥ %d).",
+                qvalue_alpha, int(min_support)
+            )
+
+        # Decide what to plot: strict 'top' or fallback to best by p-value
+        to_plot = {}
+        if not top.empty:
+            for phen in phenos:
+                sub = top.loc[top["phenotype"] == phen].head(20)
+                if not sub.empty:
+                    to_plot[phen] = sub
+        elif getattr(args, "plot_all", False):
+            logging.info("Using fallback plotting: top 20 by raw p-value per phenotype.")
+            # build best-by-p (unfiltered except phenotype membership)
+            for phen in phenos:
+                sub = enr.loc[enr["phenotype"] == phen].sort_values("p_value").head(20)
+                if not sub.empty:
+                    to_plot[phen] = sub
+
+        if not to_plot:
+            logging.info("No per-phenotype plot candidates found.")
+            return
+
+        for phen, sub in to_plot.items():
+            # Replace infinities for plotting
+            sub = sub.copy()
+            sub["odds_ratio"] = sub["odds_ratio"].replace([np.inf, -np.inf], np.nan)
+            sub["odds_ratio"] = sub["odds_ratio"].fillna(sub["odds_ratio"].max())
+
             plt.figure(figsize=(10, 5))
-            y = sub["feature"]
-            x = sub["odds_ratio"].replace([np.inf, -np.inf], np.nan).fillna(sub["odds_ratio"].max())
-            plt.barh(y, x)
-            plt.xlabel("Odds ratio (top 20 enriched features)")
+            plt.barh(sub["feature"], sub["odds_ratio"])
+            plt.xlabel("Odds ratio")
             plt.ylabel("Feature")
             plt.title(f"{phen} — enriched features")
             plt.gca().invert_yaxis()
             plt.tight_layout()
-            plt.savefig(plots_dir / f"{re.sub(r'[^A-Za-z0-9]+', '_', phen)}_top_enriched_features.png", dpi=200)
+
+            safe_phen = re.sub(r"[^A-Za-z0-9]+", "_", phen)
+            plt.savefig(plots_dir / f"{safe_phen}_top_features.png", dpi=200)
             plt.close()
+
 
 
 def main() -> None:
