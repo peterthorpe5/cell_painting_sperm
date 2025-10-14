@@ -452,7 +452,12 @@ def run(
                     int(min_feature_phenotypes),
                 )
             else:
-                indicators = from_indicators(data=feat_by_ph.astype(bool), data_name="features")
+                # Build UpSet data from boolean matrix (features × phenotypes)
+                indicators = from_indicators(
+                    indicators=list(feat_by_ph.columns),
+                    data=feat_by_ph.astype(bool)
+                )
+
                 plt.figure(figsize=(12, 7))
                 UpSet(
                     indicators,
