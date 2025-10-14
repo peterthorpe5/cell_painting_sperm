@@ -465,7 +465,7 @@ def run(
                     show_counts=True,
                     sort_by="cardinality",
                     sort_categories_by="degree",
-                    max_num=int(max_upset_sets),
+                    intersection_plot_elements=int(max_upset_sets),
                 ).plot()
                 plt.tight_layout()
                 # Save as PDF for vector quality
