@@ -262,6 +262,197 @@ def _prepare_features_by_phenotype(
     return feat_by_ph
 
 
+def _select_heatmap_features(
+    *,
+    top_enriched: pd.DataFrame,
+    ph_feat: pd.DataFrame,
+    min_support: int,
+    max_features: int,
+) -> List[str]:
+    """
+    Choose a manageable set of features for the heatmap.
+
+    Preference order:
+      1) features from 'top_enriched_features_by_phenotype.tsv' (most significant),
+      2) fall back to globally frequent phenotype-present features.
+
+    Parameters
+    ----------
+    top_enriched : pandas.DataFrame
+        Table with at least columns: ['phenotype','feature','q_value'].
+    ph_feat : pandas.DataFrame
+        Phenotype × feature 0/1 matrix.
+    min_support : int
+        Minimum number of compounds within a phenotype that must support a
+        feature for eligibility (used to bias selections to informative ones).
+    max_features : int
+        Maximum number of features to return.
+
+    Returns
+    -------
+    list[str]
+        Selected feature names.
+    """
+    chosen: List[str] = []
+
+    if not top_enriched.empty:
+        # Prioritise by FDR then phenotype frequency
+        cand = top_enriched.copy()
+        # crude phenotype-weight: how many phenotypes contain the feature at all
+        phen_freq = (ph_feat > 0).sum(axis=0).rename("phen_count").reset_index().rename(columns={"index": "feature"})
+        cand = cand.merge(phen_freq, how="left", on="feature")
+        cand = cand.sort_values(["q_value", "phen_count"], ascending=[True, False])
+        chosen = cand["feature"].drop_duplicates().head(int(max_features)).tolist()
+
+    if len(chosen) < int(max_features):
+        # fill with globally common features (by phenotype coverage)
+        commons = (ph_feat > 0).sum(axis=0).sort_values(ascending=False).index.tolist()
+        for f in commons:
+            if f not in chosen:
+                chosen.append(f)
+            if len(chosen) >= int(max_features):
+                break
+
+    return chosen[: int(max_features)]
+
+
+def _draw_compound_feature_heatmap(
+    *,
+    comp_feat: pd.DataFrame,
+    ph_use: pd.DataFrame,
+    selected_features: List[str],
+    max_compounds_per_phenotype: int,
+    out_path: Path,
+) -> None:
+    """
+    Render a simple binary heatmap (compound × feature), grouped by phenotype.
+
+    Compounds are ordered by phenotype (alphabetical), then by row sum on
+    selected features, and truncated to max per phenotype for legibility.
+
+    Parameters
+    ----------
+    comp_feat : pandas.DataFrame
+        Binary matrix (rows = compounds, columns = features).
+    ph_use : pandas.DataFrame
+        Two columns: ['compound','phenotype'] (deduplicated pairs).
+    selected_features : list[str]
+        Features to display as columns in the heatmap.
+    max_compounds_per_phenotype : int
+        Maximum number of compounds to show for each phenotype group.
+    out_path : pathlib.Path
+        Where to write the PNG/PDF.
+    """
+    # Build compound → primary phenotype mapping (a compound may appear in multiple;
+    # we will duplicate rows per phenotype block for visibility but cap per block)
+    ph_groups = (
+        ph_use.groupby("phenotype")["compound"]
+        .apply(lambda s: sorted(set(s)))
+        .sort_index()
+    )
+
+    # For each phenotype, pick top compounds by how many of the selected features they have
+    blocks = []
+    row_labels = []
+    row_phenos = []
+    for phen, comps in ph_groups.items():
+        if not comps:
+            continue
+        sub = comp_feat.loc[[c for c in comps if c in comp_feat.index], selected_features]
+        if sub.empty:
+            continue
+        order = sub.sum(axis=1).sort_values(ascending=False)
+        keep = order.index.tolist()[: int(max_compounds_per_phenotype)]
+        sub = sub.loc[keep]
+        blocks.append(sub)
+        row_labels.extend(sub.index.tolist())
+        row_phenos.extend([phen] * sub.shape[0])
+
+    if not blocks:
+        logging.info("Heatmap skipped: no compounds selected for the chosen features.")
+        return
+
+    mat = pd.concat(blocks, axis=0)
+
+    # Normalise to 0/1 int and plot with matplotlib
+    data = mat.astype(int).to_numpy()
+    plt.figure(figsize=(max(8, data.shape[1] * 0.25 + 3), max(6, data.shape[0] * 0.25 + 2)))
+    ax = plt.gca()
+    im = ax.imshow(data, aspect="auto", interpolation="nearest")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    ax.set_xticks(range(len(selected_features)))
+    ax.set_xticklabels(selected_features, rotation=90)
+    ax.set_yticks(range(len(row_labels)))
+    # Annotate phenotype group separators
+    ax.set_yticklabels(row_labels)
+
+    # Draw thin horizontal lines between phenotype blocks
+    pos = 0
+    for phen, comps in ph_groups.items():
+        sub = [c for c in row_labels if c in comps]
+        if not sub:
+            continue
+        pos += len(sub)
+        ax.axhline(pos - 0.5, lw=0.5, color="k")
+
+    ax.set_xlabel("Features")
+    ax.set_ylabel("Compounds (grouped by phenotype)")
+    ax.set_title("Compound × feature heatmap (selected subset)")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def _write_compound_upset(
+    *,
+    ph_use: pd.DataFrame,
+    out_png: Path,
+    max_sets: int,
+) -> None:
+    """
+    Make an UpSet where sets are phenotypes and elements are compounds.
+
+    Parameters
+    ----------
+    ph_use : pandas.DataFrame
+        Two columns: ['compound','phenotype'].
+    out_png : pathlib.Path
+        Output PNG/PDF path.
+    max_sets : int
+        Max number of intersection bars to show.
+    """
+    if not HAS_UPSETPLOT:
+        logging.warning("upsetplot not available; skipping compound-based UpSet.")
+        return
+    if not HAS_MPL:
+        logging.warning("matplotlib not available; skipping compound-based UpSet.")
+        return
+
+    phenos = sorted(ph_use["phenotype"].unique().tolist())
+    comps = sorted(ph_use["compound"].unique().tolist())
+    # compounds × phenotypes boolean matrix
+    df = pd.DataFrame(data=False, index=comps, columns=phenos, dtype=bool)
+    for phen, sub in ph_use.groupby("phenotype"):
+        df.loc[sub["compound"].tolist(), phen] = True
+
+    indicators = from_indicators(
+        indicators=list(df.columns),
+        data=df.astype(bool),
+    )
+    plt.figure(figsize=(12, 7))
+    UpSet(
+        data=indicators,
+        subset_size="count",
+        show_counts=True,
+        sort_by="cardinality",
+        intersection_plot_elements=int(max_sets),
+    ).plot()
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+
+
+
 def _write_upset_intersections(
     *,
     feat_by_ph: pd.DataFrame,
@@ -311,6 +502,10 @@ def run(
     min_feature_phenotypes: int,
     max_upset_sets: int,
     phenotypes_keep: List[str] | None,
+    make_heatmap: bool,                         
+    heatmap_features: int,                      
+    heatmap_compounds_per_phenotype: int,       
+    heatmap_min_support: int,                   
 ) -> None:
     """
     Execute the phenotype–feature enrichment workflow.
@@ -529,6 +724,44 @@ def run(
 
     logging.info("Saved outputs into: %s", out_dir)
 
+    # === Heatmap (compound × feature) ===
+    if make_heatmap:
+        plots_dir = out_dir / "plots"
+        plots_dir.mkdir(exist_ok=True)
+
+        # Load the 'top' table we just created (or use variable 'top')
+        top_tbl = top.copy()
+
+        selected_feats = _select_heatmap_features(
+            top_enriched=top_tbl,
+            ph_feat=ph_feat,
+            min_support=int(heatmap_min_support),
+            max_features=int(heatmap_features),
+        )
+
+        if not selected_feats:
+            logging.info("Heatmap skipped: no features selected with current criteria.")
+        else:
+            _draw_compound_feature_heatmap(
+                comp_feat=comp_feat,
+                ph_use=ph_use,
+                selected_features=selected_feats,
+                max_compounds_per_phenotype=int(heatmap_compounds_per_phenotype),
+                out_path=plots_dir / "compound_feature_heatmap.pdf",
+            )
+
+    # === UpSet: phenotypes as sets, compounds as elements ===
+    if make_upset:
+        plots_dir = out_dir / "plots"
+        plots_dir.mkdir(exist_ok=True)
+        _write_compound_upset(
+            ph_use=ph_use,
+            out_png=plots_dir / "upset_compounds_by_phenotype.pdf",
+            max_sets=int(max_upset_sets),
+        )
+
+
+
     # Optional quick plots (bar charts), per phenotype
     if make_plots:
         if not HAS_MPL:
@@ -609,6 +842,15 @@ def main() -> None:
     parser.add_argument("--phenotypes_keep", type=str, nargs="*", default=None,
                         help="Optional list of phenotype names to include in the UpSet (others dropped).")
 
+    parser.add_argument("--make_heatmap", action="store_true",
+                        help="Make a compound×feature heatmap grouped by phenotype.")
+    parser.add_argument("--heatmap_features", type=int, default=30,
+                        help="Max number of features to include in the heatmap.")
+    parser.add_argument("--heatmap_compounds_per_phenotype", type=int, default=10,
+                        help="Max number of compounds per phenotype shown in the heatmap.")
+    parser.add_argument("--heatmap_min_support", type=int, default=1,
+                        help="Minimum number of compounds within a phenotype supporting a feature to be eligible for the heatmap.")
+
 
     parser.add_argument("--log_level", type=str, default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -633,10 +875,14 @@ def main() -> None:
         qvalue_alpha=float(args.qvalue_alpha),
         make_plots=(not args.no_plots),
         plot_all=bool(args.plot_all),
-        make_upset=bool(args.make_upset),                          
-        min_feature_phenotypes=int(args.min_feature_phenotypes),   
-        max_upset_sets=int(args.max_upset_sets),                   
-        phenotypes_keep=args.phenotypes_keep,                      
+        make_upset=bool(args.make_upset),
+        min_feature_phenotypes=int(args.min_feature_phenotypes),
+        max_upset_sets=int(args.max_upset_sets),
+        phenotypes_keep=args.phenotypes_keep,
+        make_heatmap=bool(args.make_heatmap),                                 
+        heatmap_features=int(args.heatmap_features),                          
+        heatmap_compounds_per_phenotype=int(args.heatmap_compounds_per_phenotype), 
+        heatmap_min_support=int(args.heatmap_min_support),                    
     )
 
 
