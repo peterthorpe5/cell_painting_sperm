@@ -297,6 +297,7 @@ def _write_upset_intersections(
 
 
 def run(
+    *,
     sig_dir: Path,
     phenotype_tsv: Path,
     out_dir: Path,
@@ -306,13 +307,21 @@ def run(
     qvalue_alpha: float,
     make_plots: bool,
     plot_all: bool,
-    make_upset: bool,                  
-    min_feature_phenotypes: int,       
-    max_upset_sets: int,               
-    phenotypes_keep: List[str] | None, 
+    make_upset: bool,
+    min_feature_phenotypes: int,
+    max_upset_sets: int,
+    phenotypes_keep: List[str] | None,
 ) -> None:
     """
-    Execute the phenotype-feature enrichment workflow.
+    Execute the phenotype–feature enrichment workflow.
+
+    This function:
+      1) Parses significant features per compound from '*_vs_DMSO_significant_features.tsv'.
+      2) Aligns compounds to published phenotypes (case-insensitive).
+      3) Builds and writes compound×feature and phenotype×feature matrices (TSV).
+      4) Runs per-phenotype one-sided Fisher tests for feature enrichment with BH FDR.
+      5) Optionally plots per-phenotype bar charts (top features).
+      6) Optionally generates an UpSet plot of phenotype–feature overlaps.
 
     Parameters
     ----------
@@ -321,73 +330,108 @@ def run(
     phenotype_tsv : pathlib.Path
         TSV file with columns [name_col, phenotype_col].
     out_dir : pathlib.Path
-        Output directory for all result files.
+        Output directory for all results (will be created if missing).
     name_col : str
         Column in phenotype_tsv containing compound names.
     phenotype_col : str
-        Column in phenotype_tsv containing ';' separated phenotypes.
+        Column in phenotype_tsv containing ';'-separated phenotypes.
     min_support : int
-        Minimum number of compounds with phenotype that must have a feature
-        for the feature to appear in the 'top' table.
+        Minimum number of compounds with the phenotype that must have a
+        feature for it to appear in the 'top' table.
     qvalue_alpha : float
-        BH FDR threshold used to define 'enriched' features.
+        BH FDR threshold for calling enrichment.
     make_plots : bool
-        If True, generate simple bar plots for top features per phenotype.
+        If True, generate per-phenotype bar plots for enriched features.
+    plot_all : bool
+        If True and no features pass thresholds, plot top-20 by raw p-value
+        per phenotype as a fallback.
+    make_upset : bool
+        If True, generate an UpSet plot from the phenotype×feature matrix.
+    min_feature_phenotypes : int
+        In the UpSet step, keep only features present in at least this many
+        phenotypes.
+    max_upset_sets : int
+        Maximum number of phenotype sets shown in the UpSet intersections.
+    phenotypes_keep : list[str] | None
+        Optional subset of phenotype names to include in the UpSet.
+
+    Returns
+    -------
+    None
+        Results are written to disk as TSV and PDF/PNG files.
     """
+    # Ensure output directory exists
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load and tidy the phenotype table
     logging.info("Reading phenotype table: %s", phenotype_tsv)
     ph = pd.read_csv(phenotype_tsv, sep="\t", dtype=str)
     if name_col not in ph.columns or phenotype_col not in ph.columns:
         raise ValueError(f"Phenotype TSV must contain '{name_col}' and '{phenotype_col}'.")
 
-    ph_pairs = _explode_phenotypes(ph, name_col=name_col, phenotype_col=phenotype_col)
-    # Normalise keys for joining
+    ph_pairs = _explode_phenotypes(df=ph, name_col=name_col, phenotype_col=phenotype_col)
     ph_pairs["name_norm"] = ph_pairs["name"].map(_normalise_name)
 
-    # Parse all compound feature sets
+    # Parse significant features per compound
     sig_files = sorted(sig_dir.glob("*_vs_DMSO_significant_features.tsv"))
     logging.info("Found %d significant-feature TSVs.", len(sig_files))
 
     comp_to_feats: Dict[str, Set[str]] = {}
     comp_to_display: Dict[str, str] = {}
-
     for f in sig_files:
-        comp_display = _parse_compound_from_filename(f)
-        feats = _read_significant_features(f)
-        comp_norm = _normalise_name(comp_display)
+        comp_display = _parse_compound_from_filename(path=f)
+        feats = _read_significant_features(sig_file=f)
+        comp_norm = _normalise_name(x=comp_display)
         comp_to_feats[comp_norm] = feats
         comp_to_display[comp_norm] = comp_display
 
-    # Intersect compounds present in both phenotype mapping and TSVs
+    # Intersect compounds between phenotypes and TSVs
     comp_norm_in_both = sorted(set(comp_to_feats.keys()) & set(ph_pairs["name_norm"]))
     if not comp_norm_in_both:
         raise RuntimeError("No overlapping compounds between TSVs and phenotype table after normalisation.")
-
     logging.info("Overlapping compounds for analysis: %d", len(comp_norm_in_both))
 
     # Build compound × feature matrix
     all_features = sorted({f for c in comp_norm_in_both for f in comp_to_feats[c]})
-    comp_feat = pd.DataFrame(0, index=comp_norm_in_both, columns=all_features, dtype=int)
+    comp_feat = pd.DataFrame(data=0, index=comp_norm_in_both, columns=all_features, dtype=int)
     for c in comp_norm_in_both:
         comp_feat.loc[c, list(comp_to_feats[c])] = 1
 
-    # Keep a display name index
+    # Restore display casing for index
     comp_feat.index = [comp_to_display[c] for c in comp_feat.index]
     comp_feat.index.name = "compound"
 
-    # Write matrices (TSV)
+    # Write compound-level matrices (tabs only)
     comp_feat_out = out_dir / "compound_feature_matrix.tsv"
     comp_feat.to_csv(comp_feat_out, sep="\t")
+    # Explicit UpSet-friendly duplicate
     (out_dir / "upset_compound_feature.tsv").write_text(comp_feat.to_csv(sep="\t"), encoding="utf-8")
 
-    # Optional UpSet plot of phenotype–feature overlaps
+    # Phenotype assignment restricted to overlapping compounds
+    norm_to_display = { _normalise_name(x=k): k for k in comp_feat.index }
+    ph_use = ph_pairs.loc[ph_pairs["name_norm"].isin(set(norm_to_display.keys()))].copy()
+    ph_use["compound"] = ph_use["name_norm"].map(norm_to_display)
+    ph_use = ph_use[["compound", "phenotype"]].drop_duplicates().sort_values(["compound", "phenotype"])
+    ph_use.to_csv(out_dir / "phenotype_assignment.tsv", sep="\t", index=False)
+
+    # Phenotype × feature (present in ≥1 compound with that phenotype)
+    phenos = sorted(ph_use["phenotype"].unique())
+    ph_feat = pd.DataFrame(data=0, index=phenos, columns=all_features, dtype=int)
+    for phen in phenos:
+        comps = ph_use.loc[ph_use["phenotype"] == phen, "compound"].unique().tolist()
+        if comps:
+            ph_feat.loc[phen] = (comp_feat.loc[comps].sum(axis=0) > 0).astype(int)
+    ph_feat.index.name = "phenotype"
+    ph_feat_out = out_dir / "upset_phenotype_feature.tsv"
+    ph_feat.to_csv(ph_feat_out, sep="\t")
+
+    # Optional UpSet (now that ph_feat exists)
     if make_upset:
         if not HAS_UPSETPLOT:
             logging.warning("upsetplot not available; install with 'pip install upsetplot'. Skipping UpSet.")
         else:
             plots_dir = out_dir / "plots"
-            plots_dir.mkdir(exist_ok=True)
+            plots_dir.mkdir(parents=True, exist_ok=True)
 
             feat_by_ph = _prepare_features_by_phenotype(
                 ph_feat=ph_feat,
@@ -395,26 +439,20 @@ def run(
                 min_feature_phenotypes=int(min_feature_phenotypes),
             )
 
-            # Always write the filtered matrix for reproducibility
-            (plots_dir / "features_by_phenotype.filtered.tsv").write_text(
-                feat_by_ph.astype(int).to_csv(sep="\t"), encoding="utf-8"
-            )
-
-            # Intersections table (useful alongside UpSet)
+            # Always write filtered matrix and intersections (tabs only)
+            feat_by_ph.astype(int).to_csv(plots_dir / "features_by_phenotype.filtered.tsv", sep="\t")
             _write_upset_intersections(
                 feat_by_ph=feat_by_ph,
                 out_tsv=plots_dir / "upset_intersections.tsv",
             )
 
             if feat_by_ph.empty:
-                logging.info("UpSet skipped: no features passed filtering (min_feature_phenotypes=%d).",
-                             int(min_feature_phenotypes))
-            else:
-                # Build indicators and plot
-                indicators = from_indicators(
-                    data=feat_by_ph.astype(bool),
-                    data_name="features",
+                logging.info(
+                    "UpSet skipped: no features passed filtering (min_feature_phenotypes=%d).",
+                    int(min_feature_phenotypes),
                 )
+            else:
+                indicators = from_indicators(data=feat_by_ph.astype(bool), data_name="features")
                 plt.figure(figsize=(12, 7))
                 UpSet(
                     indicators,
@@ -425,31 +463,12 @@ def run(
                     max_num=int(max_upset_sets),
                 ).plot()
                 plt.tight_layout()
+                # Save as PDF for vector quality
                 plt.savefig(plots_dir / "upset_phenotype_features.pdf")
                 plt.close()
 
-
-
-    # Phenotype assignments restricted to overlapping compounds
-    ph_use = ph_pairs.loc[ph_pairs["name_norm"].isin(set(_normalise_name(x) for x in comp_feat.index))].copy()
-    # Replace with display name casing
-    norm_to_display = { _normalise_name(x): x for x in comp_feat.index }
-    ph_use["compound"] = ph_use["name_norm"].map(norm_to_display)
-    ph_use = ph_use[["compound", "phenotype"]].drop_duplicates().sort_values(["compound", "phenotype"])
-    ph_use.to_csv(out_dir / "phenotype_assignment.tsv", sep="\t", index=False)
-
-    # Phenotype × feature (present in ≥ 1 compound with that phenotype)
-    phenos = sorted(ph_use["phenotype"].unique())
-    ph_feat = pd.DataFrame(0, index=phenos, columns=all_features, dtype=int)
-    for phen in phenos:
-        comps = ph_use.loc[ph_use["phenotype"] == phen, "compound"].unique().tolist()
-        if comps:
-            ph_feat.loc[phen] = (comp_feat.loc[comps].sum(axis=0) > 0).astype(int)
-    ph_feat.index.name = "phenotype"
-    ph_feat.to_csv(out_dir / "upset_phenotype_feature.tsv", sep="\t")
-
-    # Enrichment tests (one-sided Fisher, greater)
-    rows = []
+    # Enrichment tests (one-sided Fisher, 'greater')
+    rows: List[Dict[str, float | int | str]] = []
     comp_set_all = set(comp_feat.index)
     for phen in phenos:
         comp_with = set(ph_use.loc[ph_use["phenotype"] == phen, "compound"])
@@ -460,14 +479,14 @@ def run(
         n_without = len(comp_without)
 
         for feat in all_features:
-            a = int(comp_feat.loc[list(comp_with), feat].sum())          # with phenotype & with feature
-            b = n_with - a                                               # with phenotype & without feature
-            c = int(comp_feat.loc[list(comp_without), feat].sum())       # without phenotype & with feature
-            d = n_without - c                                            # without phenotype & without feature
-            # To be robust if any side is empty
+            a = int(comp_feat.loc[list(comp_with), feat].sum())    # with phenotype & with feature
+            b = n_with - a                                         # with phenotype & without feature
+            c = int(comp_feat.loc[list(comp_without), feat].sum()) # without phenotype & with feature
+            d = n_without - c                                      # without phenotype & without feature
+
             if (a + b == 0) or (c + d == 0):
-                pval = 1.0
                 odds = np.nan
+                pval = 1.0
             else:
                 odds, pval = fisher_exact([[a, b], [c, d]], alternative="greater")
 
@@ -486,17 +505,22 @@ def run(
     if enr.empty:
         raise RuntimeError("No tests performed; check inputs.")
 
-    enr["q_value"] = _bh_fdr(enr["p_value"].to_numpy())
+    enr["q_value"] = _bh_fdr(pvals=enr["p_value"].to_numpy())
     enr = enr.sort_values(["q_value", "p_value", "phenotype", "feature"]).reset_index(drop=True)
     enr.to_csv(out_dir / "feature_enrichment_by_phenotype.tsv", sep="\t", index=False)
 
-    # Top enriched per-phenotype
+    # Top enriched per-phenotype (thresholded)
     top = enr.loc[
-        (enr["q_value"] <= qvalue_alpha) &
+        (enr["q_value"] <= float(qvalue_alpha)) &
         (enr["support_with_phenotype"] >= int(min_support))
     ].copy()
-    top["frequency_in_phenotype"] = top["support_with_phenotype"] / top["n_compounds_with_phenotype"]
-    top = top.sort_values(["phenotype", "q_value", "frequency_in_phenotype", "odds_ratio"], ascending=[True, True, False, False])
+    top["frequency_in_phenotype"] = (
+        top["support_with_phenotype"] / top["n_compounds_with_phenotype"]
+    )
+    top = top.sort_values(
+        ["phenotype", "q_value", "frequency_in_phenotype", "odds_ratio"],
+        ascending=[True, True, False, False],
+    )
     top.to_csv(out_dir / "top_enriched_features_by_phenotype.tsv", sep="\t", index=False)
 
     logging.info("Saved outputs into: %s", out_dir)
@@ -510,24 +534,22 @@ def run(
         plots_dir = out_dir / "plots"
         plots_dir.mkdir(exist_ok=True)
 
-        # Log if the strict 'top' table is empty
         if top.empty:
             logging.info(
                 "No plots generated under current thresholds: "
                 "top table empty (q_value ≤ %.3g and support ≥ %d).",
-                qvalue_alpha, int(min_support)
+                float(qvalue_alpha), int(min_support),
             )
 
-        # Decide what to plot: strict 'top' or fallback to best by p-value
-        to_plot = {}
+        # Choose strict 'top' or fallback (best by p-value)
+        to_plot: Dict[str, pd.DataFrame] = {}
         if not top.empty:
             for phen in phenos:
                 sub = top.loc[top["phenotype"] == phen].head(20)
                 if not sub.empty:
                     to_plot[phen] = sub
-        elif plot_all:
+        elif bool(plot_all):
             logging.info("Using fallback plotting: top 20 by raw p-value per phenotype.")
-            # build best-by-p (unfiltered except phenotype membership)
             for phen in phenos:
                 sub = enr.loc[enr["phenotype"] == phen].sort_values("p_value").head(20)
                 if not sub.empty:
@@ -538,7 +560,6 @@ def run(
             return
 
         for phen, sub in to_plot.items():
-            # Replace infinities for plotting
             sub = sub.copy()
             sub["odds_ratio"] = sub["odds_ratio"].replace([np.inf, -np.inf], np.nan)
             sub["odds_ratio"] = sub["odds_ratio"].fillna(sub["odds_ratio"].max())
@@ -552,7 +573,7 @@ def run(
             plt.tight_layout()
 
             safe_phen = re.sub(r"[^A-Za-z0-9]+", "_", phen)
-            plt.savefig(plots_dir / f"{safe_phen}_top_features.pdf", dpi=200)
+            plt.savefig(plots_dir / f"{safe_phen}_top_features.pdf")
             plt.close()
 
 
