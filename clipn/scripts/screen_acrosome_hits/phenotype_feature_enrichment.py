@@ -225,6 +225,7 @@ def run(
     min_support: int,
     qvalue_alpha: float,
     make_plots: bool,
+    plot_all: bool,
 ) -> None:
     """
     Execute the phenotype-feature enrichment workflow.
@@ -391,7 +392,7 @@ def run(
                 sub = top.loc[top["phenotype"] == phen].head(20)
                 if not sub.empty:
                     to_plot[phen] = sub
-        elif getattr(args, "plot_all", False):
+        elif plot_all:
             logging.info("Using fallback plotting: top 20 by raw p-value per phenotype.")
             # build best-by-p (unfiltered except phenotype membership)
             for phen in phenos:
@@ -439,6 +440,9 @@ def main() -> None:
     parser.add_argument("--min_support", type=int, default=2, help="Minimum #compounds-with-phenotype supporting a feature for 'top' table.")
     parser.add_argument("--qvalue_alpha", type=float, default=0.05, help="BH FDR threshold for calling enrichment.")
     parser.add_argument("--no_plots", action="store_true", help="If set, do not generate quick bar plots.")
+    parser.add_argument("--plot_all", action="store_true",
+                       help="If no features pass thresholds, plot top 20 by p-value per phenotype.")
+
     parser.add_argument("--log_level", type=str, default="INFO", help="Logging level.")
     args = parser.parse_args()
 
@@ -461,6 +465,7 @@ def main() -> None:
         min_support=int(args.min_support),
         qvalue_alpha=float(args.qvalue_alpha),
         make_plots=(not args.no_plots),
+        plot_all=bool(args.plot_all),
     )
 
 
