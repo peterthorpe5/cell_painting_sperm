@@ -295,6 +295,11 @@ def _select_heatmap_features(
     """
     chosen: List[str] = []
 
+    # keep only features that appear in at least one phenotype with support ≥ min_support
+    eligible = (ph_feat >= int(min_support)).any(axis=0)
+    ph_feat = ph_feat.loc[:, eligible]
+
+
     if not top_enriched.empty:
         # Prioritise by FDR then phenotype frequency
         cand = top_enriched.copy()
@@ -341,7 +346,7 @@ def _draw_compound_feature_heatmap(
     max_compounds_per_phenotype : int
         Maximum number of compounds to show for each phenotype group.
     out_path : pathlib.Path
-        Where to write the pdf/PDF.
+        Where to write the pdf/pdf.
     """
     # Build compound → primary phenotype mapping (a compound may appear in multiple;
     # we will duplicate rows per phenotype block for visibility but cap per block)
@@ -376,15 +381,24 @@ def _draw_compound_feature_heatmap(
 
     # Normalise to 0/1 int and plot with matplotlib
     data = mat.astype(int).to_numpy()
-    plt.figure(figsize=(max(8, data.shape[1] * 0.25 + 3), max(6, data.shape[0] * 0.25 + 2)))
-    ax = plt.gca()
+
+    # Build figure without constrained_layout (avoids ZeroDivisionError)
+    fig, ax = plt.subplots(
+        figsize=(
+            max(8, data.shape[1] * 0.25 + 3),
+            max(6, data.shape[0] * 0.25 + 2)
+        ),
+        constrained_layout=False,
+    )
     im = ax.imshow(data, aspect="auto", interpolation="nearest")
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks(range(len(selected_features)))
-    ax.set_xticklabels(selected_features, rotation=90)
-    ax.set_yticks(range(len(row_labels)))
-    # Annotate phenotype group separators
-    ax.set_yticklabels(row_labels)
+
+    # Colourbar: attach to the same figure/axes
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax.set_xticks(ticks=range(len(selected_features)))
+    ax.set_xticklabels(labels=selected_features, rotation=90)
+    ax.set_yticks(ticks=range(len(row_labels)))
+    ax.set_yticklabels(labels=row_labels)
 
     # Draw thin horizontal lines between phenotype blocks
     pos = 0
@@ -393,15 +407,18 @@ def _draw_compound_feature_heatmap(
         if not sub:
             continue
         pos += len(sub)
-        ax.axhline(pos - 0.5, lw=0.5, color="k")
+        ax.axhline(y=pos - 0.5, lw=0.5)
 
     ax.set_xlabel("Features")
     ax.set_ylabel("Compounds (grouped by phenotype)")
     ax.set_title("Compound × feature heatmap (selected subset)")
-    fig = plt.gcf()
-    fig.set_constrained_layout(True)
-    plt.savefig(out_path, bbox_inches="tight")
+
+    # Give bottom/left a touch more room for ticklabels; then save
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.25, left=0.25)
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
+
 
 
 
@@ -419,7 +436,7 @@ def _write_compound_upset(
     ph_use : pandas.DataFrame
         Two columns: ['compound','phenotype'].
     out_pdf : pathlib.Path
-        Output pdf/PDF path.
+        Output pdf/pdf path.
     max_sets : int
         Max number of intersection bars to show.
     """
@@ -559,7 +576,7 @@ def run(
     Returns
     -------
     None
-        Results are written to disk as TSV and PDF/pdf files.
+        Results are written to disk as TSV and pdf/pdf files.
     """
     # Ensure output directory exists
     out_dir.mkdir(parents=True, exist_ok=True)
