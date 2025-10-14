@@ -464,7 +464,6 @@ def run(
                     subset_size="count",
                     show_counts=True,
                     sort_by="cardinality",
-                    sort_categories_by="degree",
                     intersection_plot_elements=int(max_upset_sets),
                 ).plot()
                 plt.tight_layout()
