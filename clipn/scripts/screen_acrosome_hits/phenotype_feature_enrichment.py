@@ -341,7 +341,7 @@ def _draw_compound_feature_heatmap(
     max_compounds_per_phenotype : int
         Maximum number of compounds to show for each phenotype group.
     out_path : pathlib.Path
-        Where to write the PNG/PDF.
+        Where to write the pdf/PDF.
     """
     # Build compound → primary phenotype mapping (a compound may appear in multiple;
     # we will duplicate rows per phenotype block for visibility but cap per block)
@@ -408,7 +408,7 @@ def _draw_compound_feature_heatmap(
 def _write_compound_upset(
     *,
     ph_use: pd.DataFrame,
-    out_png: Path,
+    out_pdf: Path,
     max_sets: int,
 ) -> None:
     """
@@ -418,8 +418,8 @@ def _write_compound_upset(
     ----------
     ph_use : pandas.DataFrame
         Two columns: ['compound','phenotype'].
-    out_png : pathlib.Path
-        Output PNG/PDF path.
+    out_pdf : pathlib.Path
+        Output pdf/PDF path.
     max_sets : int
         Max number of intersection bars to show.
     """
@@ -450,9 +450,10 @@ def _write_compound_upset(
         intersection_plot_elements=int(max_sets),
     ).plot()
 
+
     fig = plt.gcf()
     fig.set_constrained_layout(True)
-    plt.savefig(out_path, bbox_inches="tight")
+    plt.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -558,7 +559,7 @@ def run(
     Returns
     -------
     None
-        Results are written to disk as TSV and PDF/PNG files.
+        Results are written to disk as TSV and PDF/pdf files.
     """
     # Ensure output directory exists
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -605,7 +606,8 @@ def run(
     comp_feat_out = out_dir / "compound_feature_matrix.tsv"
     comp_feat.to_csv(comp_feat_out, sep="\t")
     # Explicit UpSet-friendly duplicate
-    (out_dir / "upset_compound_feature.tsv").write_text(comp_feat.to_csv(sep="\t"), encoding="utf-8")
+    comp_feat.to_csv(out_dir / "upset_compound_feature.tsv", sep="\t")
+
 
     # Phenotype assignment restricted to overlapping compounds
     norm_to_display = { _normalise_name(x=k): k for k in comp_feat.index }
@@ -659,13 +661,15 @@ def run(
                 )
 
                 plt.figure(figsize=(12, 7))
+
                 UpSet(
-                    indicators,
+                    data=indicators,
                     subset_size="count",
                     show_counts=True,
                     sort_by="cardinality",
                     intersection_plot_elements=int(max_upset_sets),
                 ).plot()
+
                 fig = plt.gcf()
                 fig.set_constrained_layout(True)
                 plt.savefig(plots_dir / "upset_phenotype_features.pdf", bbox_inches="tight")
@@ -763,7 +767,7 @@ def run(
         plots_dir.mkdir(exist_ok=True)
         _write_compound_upset(
             ph_use=ph_use,
-            out_png=plots_dir / "upset_compounds_by_phenotype.pdf",
+            out_pdf=plots_dir / "upset_compounds_by_phenotype.pdf",
             max_sets=int(max_upset_sets),
         )
 
