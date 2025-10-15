@@ -101,6 +101,18 @@ _SCRIPT_START_TIME = time.time()
 set_config(transform_output="pandas")
 
 
+# ---- Memory & prediction defaults (Python-controlled; no shell exports needed) ----
+# If unset in the environment, we set this allocator hint to reduce fragmentation.
+_DEFAULT_CUDA_ALLOC_CONF = "expandable_segments:True"
+
+# Hard cap of rows per forward-pass during inference. Adjust if needed.
+_DEFAULT_PREDICT_CHUNK_ROWS = 100_000
+
+# Apply CUDA allocator hint once at import time if the user hasn't set it explicitly.
+if os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "").strip() == "":
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = _DEFAULT_CUDA_ALLOC_CONF
+
+
 
 # =========================
 # Logging and small helpers
