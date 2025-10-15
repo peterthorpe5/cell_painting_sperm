@@ -33,6 +33,9 @@ from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import LabelEncoder
 from sklearn.cluster import KMeans
 from sklearn.feature_selection import VarianceThreshold
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+import pandas as pd
 # so we keep the index .. fingers crossed!
 from sklearn import set_config
 set_config(transform_output="pandas")
@@ -1057,9 +1060,147 @@ def encode_cpd_data(dataframes, encode_labels=False):
 
 
 
-from typing import Dict, List, Tuple, Optional
-import numpy as np
-import pandas as pd
+
+def _predict_chunked_indexed(
+    *,
+    model,
+    indexed_data_dict: dict[int, np.ndarray],
+    chunk_rows: int,
+    logger: logging.Logger,
+) -> dict[int, np.ndarray]:
+    """
+    GPU-safe inference over CLIPn's indexed data dict by slicing rows per dataset.
+
+    Parameters
+    ----------
+    model : Any
+        Trained CLIPn model (already on eval mode).
+    indexed_data_dict : dict[int, np.ndarray]
+        Mapping int dataset key -> feature matrix (N x D).
+    chunk_rows : int
+        Maximum rows per chunk; if <= 0 falls back to single-shot predict.
+    logger : logging.Logger
+        Logger for progress messages.
+
+    Returns
+    -------
+    dict[int, np.ndarray]
+        Dataset key -> latent matrix with rows concatenated in original order.
+    """
+    import gc
+    import numpy as np
+    import torch
+
+    if chunk_rows <= 0:
+        return model.predict(indexed_data_dict)
+
+    out: dict[int, list[np.ndarray]] = {k: [] for k in indexed_data_dict}
+    for ds_key, X in indexed_data_dict.items():
+        n = int(X.shape[0])
+        logger.info("Chunked predict: ds_key=%d, rows=%d, chunk_rows=%d", ds_key, n, chunk_rows)
+        if n == 0:
+            out[ds_key] = []
+            continue
+
+        start = 0
+        while start < n:
+            end = min(start + chunk_rows, n)
+            # Build a mini dict only for this dataset key
+            mini = {ds_key: X[start:end]}
+            with torch.inference_mode():
+                z_part = model.predict(mini)[ds_key]
+            out[ds]()
+
+
+
+def _iter_row_chunks(total_rows: int, *, chunk_rows: int) -> list[tuple[int, int]]:
+    """
+    Yield (start, end) index pairs that partition [0, total_rows) into row chunks.
+
+    Parameters
+    ----------
+    total_rows : int
+        Number of rows to cover.
+    chunk_rows : int
+        Maximum number of rows per chunk.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Consecutive [start, end) half-open intervals.
+    """
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    while start < total_rows:
+        end = min(start + chunk_rows, total_rows)
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def _predict_chunked_indexed(
+    *,
+    model,
+    indexed_data: dict[int, np.ndarray],
+    chunk_rows: int,
+    logger: logging.Logger
+) -> dict[int, np.ndarray]:
+    """
+    Predict latents for an indexed data dict in bounded-sized row chunks.
+
+    Parameters
+    ----------
+    model : Any
+        Trained CLIPn model exposing .predict(dict[int -> np.ndarray]).
+    indexed_data : dict[int, np.ndarray]
+        Mapping dataset_id -> feature matrix (N_i x D).
+    chunk_rows : int
+        Max rows per forward pass. If <= 0, runs single-shot.
+    logger : logging.Logger
+        Logger for status.
+
+    Returns
+    -------
+    dict[int, np.ndarray]
+        Mapping dataset_id -> concatenated latent array (N_i x L).
+    """
+    import gc
+    import torch
+
+    if chunk_rows is None or int(chunk_rows) <= 0:
+        # Original single-shot behaviour
+        return model.predict(indexed_data)
+
+    out: dict[int, list[np.ndarray]] = {k: [] for k in indexed_data}
+
+    for k, X in indexed_data.items():
+        n_rows = int(X.shape[0])
+        logger.info("Chunked predict: dataset_id=%d, rows=%d, chunk_rows=%d", k, n_rows, int(chunk_rows))
+        if n_rows == 0:
+            out[k] = []
+            continue
+
+        for start, end in _iter_row_chunks(n_rows, chunk_rows=int(chunk_rows)):
+            X_slice = X[start:end, :]
+            # Use inference_mode to minimise overhead
+            with torch.inference_mode():
+                lat_dict = model.predict({k: X_slice})
+            out[k].append(lat_dict[k].detach().cpu().numpy())
+
+            # Proactively release memory between chunks
+            del X_slice, lat_dict
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    # Concatenate slices
+    z: dict[int, np.ndarray] = {}
+    for k, parts in out.items():
+        if not parts:
+            z[k] = np.empty((0, getattr(model, "latent_dim", 0)), dtype=np.float32)
+        else:
+            z[k] = np.concatenate(parts, axis=0)
+    return z
 
 
 def prepare_data_for_clipn_from_df(
@@ -1295,10 +1436,38 @@ def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     model = CLIPn(indexed_data_dict, indexed_label_dict, latent_dim=latent_dim)
     loss = model.fit(indexed_data_dict, indexed_label_dict, lr=lr, epochs=epochs)
 
-    latent_dict = model.predict(indexed_data_dict)
+    # latent_dict = model.predict(indexed_data_dict)
+
+    # Free any training graph before inference and set eval mode
+    import gc, torch
+    model.eval()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Read chunk size from env (default 100k rows per pass)
+    chunk_rows_env = os.getenv("CLIPN_PREDICT_CHUNK_ROWS", "100000")
+    try:
+        chunk_rows = int(chunk_rows_env)
+    except ValueError:
+        chunk_rows = 100000
+
+    # Optional: reduce allocator fragmentation pressure
+    alloc_conf = os.getenv("PYTORCH_CUDA_ALLOC_CONF", "")
+    if "expandable_segments" not in alloc_conf:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (alloc_conf + "," if alloc_conf else "") + "expandable_segments:True"
+
+    latent_dict = _predict_chunked_indexed(
+        model=model,
+        indexed_data=indexed_data_dict,
+        chunk_rows=chunk_rows,
+        logger=logger,
+    )
+
     latent_named_dict = {reverse_mapping[i]: latent_dict[i] for i in latent_dict}
 
     return latent_named_dict, model, loss
+
 
 
 def project_query_to_latent(model, query_df):

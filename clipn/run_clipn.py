@@ -2643,6 +2643,7 @@ def _rank_features_for_corr_filter(
     return prot + ranked
 
 
+
 def correlation_filter_variance_first(
     *,
     X: pd.DataFrame,
