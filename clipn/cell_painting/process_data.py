@@ -49,6 +49,12 @@ logger = logging.getLogger(__name__)
 
 
 
+
+# Reduce allocator fragmentation before torch initialises (CLIPn will import torch)
+if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "").strip():
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+
 # Technical, non-biological columns that must never be used as features
 TECHNICAL_FEATURE_BLOCKLIST = {"ImageNumber","Number_Object_Number","ObjectNumber","TableNumber"}
 
@@ -1401,7 +1407,6 @@ def prepare_data_for_clipn(experiment_data_imputed, experiment_labels, experimen
     return X, y, label_mappings, dataset_mapping
 
 
-
 def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     """
     Runs CLIPn training given input features and labels.
@@ -1409,9 +1414,9 @@ def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     Parameters
     ----------
     data_dict : dict
-        Mapping from dataset names to np.ndarray of features.
+        Mapping from dataset name -> np.ndarray of features.
     label_dict : dict
-        Mapping from dataset names to np.ndarray of label ids.
+        Mapping from dataset name -> np.ndarray of label ids.
     latent_dim : int
         Dimensionality of the latent space.
     lr : float
@@ -1423,40 +1428,39 @@ def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     -------
     tuple
         latent_named_dict : dict
-            Dictionary mapping dataset name to latent representations.
+            Dictionary mapping dataset name -> latent representations.
         model : CLIPn
             Trained CLIPn model.
         loss : float
             Final training loss.
     """
-    indexed_data_dict = {i: data_dict[k] for i, k in enumerate(data_dict)}
-    indexed_label_dict = {i: label_dict[k] for i, k in enumerate(label_dict)}
-    reverse_mapping = {i: k for i, k in enumerate(data_dict)}
+    # Use a single ordered key list for consistent indexing
+    keys = list(data_dict.keys())
+
+    indexed_data_dict = {i: data_dict[k] for i, k in enumerate(keys)}
+    indexed_label_dict = {i: label_dict[k] for i, k in enumerate(keys)}
+    reverse_mapping = {i: k for i, k in enumerate(keys)}
 
     model = CLIPn(indexed_data_dict, indexed_label_dict, latent_dim=latent_dim)
     loss = model.fit(indexed_data_dict, indexed_label_dict, lr=lr, epochs=epochs)
 
-    # latent_dict = model.predict(indexed_data_dict)
+    # --- Memory hygiene before inference ---
+    import gc
+    import torch
 
-    # Free any training graph before inference and set eval mode
-    import gc, torch
     model.eval()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Read chunk size from env (default 100k rows per pass)
-    chunk_rows_env = os.getenv("CLIPN_PREDICT_CHUNK_ROWS", "100000")
+    # Decide chunk size in Python (no shell needed), default 100k
+    chunk_env = os.environ.get("CLIPN_PREDICT_CHUNK_ROWS", "").strip()
     try:
-        chunk_rows = int(chunk_rows_env)
+        chunk_rows = int(chunk_env) if chunk_env else 100_000
     except ValueError:
-        chunk_rows = 100000
+        chunk_rows = 100_000
 
-    # Optional: reduce allocator fragmentation pressure
-    alloc_conf = os.getenv("PYTORCH_CUDA_ALLOC_CONF", "")
-    if "expandable_segments" not in alloc_conf:
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (alloc_conf + "," if alloc_conf else "") + "expandable_segments:True"
-
+    # Chunked, GPU-friendly prediction
     latent_dict = _predict_chunked_indexed(
         model=model,
         indexed_data=indexed_data_dict,
@@ -1465,8 +1469,8 @@ def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     )
 
     latent_named_dict = {reverse_mapping[i]: latent_dict[i] for i in latent_dict}
-
     return latent_named_dict, model, loss
+
 
 
 
