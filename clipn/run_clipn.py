@@ -3153,6 +3153,16 @@ def main(args: argparse.Namespace) -> None:
     logger.info("PyTorch Version: %s", getattr(torch, "__version__", "unknown"))
 
 
+    # Default: skip QC unless --run_qc is set
+    if not getattr(args, "run_qc", False):
+        # Only set these to True if the user did not explicitly pass the flags
+        if not getattr(args, "no_qc_replicates", False):
+            args.no_qc_replicates = True
+        if not getattr(args, "no_diagnostics", False):
+            args.no_diagnostics = True
+
+
+
     # Threading: simple and explicit
     _CLIPN_THREADS = _apply_threads(args.cpu_threads, logger)
 
@@ -4332,6 +4342,14 @@ if __name__ == "__main__":
         default=None,
         help="Optional filename for the pre-encode TSV. Default is derived from "
             "experiment/mode: {experiment}_{mode}_preencode_merged.tsv.gz",
+    )
+
+
+    parser.add_argument(
+        "--run_qc",
+        action="store_true",
+        help="Run all QC steps (replicate similarity + training diagnostics). "
+            "If not set, QC is skipped by default.",
     )
 
 
