@@ -36,6 +36,8 @@ from sklearn.feature_selection import VarianceThreshold
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
+import gc
+from contextlib import nullcontext
 # so we keep the index .. fingers crossed!
 from sklearn import set_config
 set_config(transform_output="pandas")
@@ -1066,56 +1068,108 @@ def encode_cpd_data(dataframes, encode_labels=False):
 
 
 
-
 def _predict_chunked_indexed(
     *,
     model,
-    indexed_data_dict: dict[int, np.ndarray],
+    indexed_data: dict[int, np.ndarray],
     chunk_rows: int,
-    logger: logging.Logger,
+    logger: logging.Logger
 ) -> dict[int, np.ndarray]:
     """
-    GPU-safe inference over CLIPn's indexed data dict by slicing rows per dataset.
+    Predict latents for an indexed data dict in bounded-sized row chunks.
+
+    Behaviour
+    ---------
+    - If ``chunk_rows <= 0``, runs a single-shot predict and normalises outputs
+      to NumPy arrays.
+    - Otherwise, iterates each dataset id and calls ``model.predict`` on
+      successive row slices, concatenating outputs in order.
 
     Parameters
     ----------
     model : Any
-        Trained CLIPn model (already on eval mode).
-    indexed_data_dict : dict[int, np.ndarray]
-        Mapping int dataset key -> feature matrix (N x D).
+        Trained CLIPn model exposing ``predict(dict[int -> array-like])``.
+    indexed_data : dict[int, np.ndarray]
+        Mapping ``dataset_id -> feature matrix (N_i x D)``.
     chunk_rows : int
-        Maximum rows per chunk; if <= 0 falls back to single-shot predict.
+        Maximum number of rows per forward pass.
     logger : logging.Logger
-        Logger for progress messages.
+        Logger for status messages.
 
     Returns
     -------
     dict[int, np.ndarray]
-        Dataset key -> latent matrix with rows concatenated in original order.
+        Mapping ``dataset_id -> latent array (N_i x L)``.
     """
-    import gc
-    import numpy as np
-    import torch
 
-    if chunk_rows <= 0:
-        return model.predict(indexed_data_dict)
+    # Helper: convert tensor/array-like to NumPy without assuming torch is present
+    def _as_numpy(x):
+        try:
+            # Torch tensor path (only if torch is imported/available)
+            import torch  # noqa: F401
+            if hasattr(x, "detach") and hasattr(x, "device"):
+                return x.detach().cpu().numpy()
+        except Exception:
+            pass
+        # NumPy or array-like fallback
+        return np.asarray(x)
 
-    out: dict[int, list[np.ndarray]] = {k: [] for k in indexed_data_dict}
-    for ds_key, X in indexed_data_dict.items():
-        n = int(X.shape[0])
-        logger.info("Chunked predict: ds_key=%d, rows=%d, chunk_rows=%d", ds_key, n, chunk_rows)
-        if n == 0:
-            out[ds_key] = []
+    # Single-shot path
+    if chunk_rows is None or int(chunk_rows) <= 0:
+        lat = model.predict(indexed_data)
+        return {k: _as_numpy(v) for k, v in lat.items()}
+
+    # Chunked path
+    out: dict[int, list[np.ndarray]] = {k: [] for k in indexed_data}
+
+    # Use inference_mode if torch is present; otherwise no-op
+    try:
+        import torch  # noqa: F401
+        inference_ctx = torch.inference_mode()
+    except Exception:
+        inference_ctx = nullcontext()
+
+    for k, X in indexed_data.items():
+        n_rows = int(X.shape[0])
+        logger.info(
+            "Chunked predict: dataset_id=%d, rows=%d, chunk_rows=%d",
+            k, n_rows, int(chunk_rows)
+        )
+        if n_rows == 0:
             continue
 
         start = 0
-        while start < n:
-            end = min(start + chunk_rows, n)
-            # Build a mini dict only for this dataset key
-            mini = {ds_key: X[start:end]}
-            with torch.inference_mode():
-                z_part = model.predict(mini)[ds_key]
-            out[ds]()
+        with inference_ctx:
+            while start < n_rows:
+                end = min(start + int(chunk_rows), n_rows)
+                X_slice = X[start:end, :]
+
+                lat_k_dict = model.predict({k: X_slice})
+                # Normalise to NumPy (handles either tensor or numpy)
+                lat_k_np = _as_numpy(lat_k_dict[k])
+                out[k].append(lat_k_np)
+
+                # Tidy up between slices
+                del X_slice, lat_k_dict, lat_k_np
+                gc.collect()
+                try:
+                    import torch  # noqa: F401
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
+                start = end
+
+    # Concatenate parts per dataset id
+    z: dict[int, np.ndarray] = {}
+    for k, parts in out.items():
+        if parts:
+            z[k] = np.concatenate(parts, axis=0)
+        else:
+            z[k] = np.empty((0, 0), dtype=np.float32)
+    return z
+
 
 
 
