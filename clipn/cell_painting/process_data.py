@@ -1444,14 +1444,31 @@ def run_clipn_simple(data_dict, label_dict, latent_dim=20, lr=1e-5, epochs=300):
     model = CLIPn(indexed_data_dict, indexed_label_dict, latent_dim=latent_dim)
     loss = model.fit(indexed_data_dict, indexed_label_dict, lr=lr, epochs=epochs)
 
-    # --- Memory hygiene before inference ---
+    # --- Memory hygiene before inference (safe eval) ---
     import gc
     import torch
 
-    model.eval()
+    def _safe_eval(m) -> None:
+        """
+        Put the model into eval mode if supported, trying both the wrapper
+        and its inner torch module (commonly on .model). Silently no-ops if
+        neither exposes .eval().
+        """
+        try:
+            if hasattr(m, "eval") and callable(getattr(m, "eval")):
+                m.eval()
+            inner = getattr(m, "model", None)
+            if inner is not None and hasattr(inner, "eval") and callable(getattr(inner, "eval")):
+                inner.eval()
+        except Exception as e:
+            # Keep quiet in normal runs; switch to logger.debug if you prefer
+            pass
+
+    _safe_eval(model)
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
 
     # Decide chunk size in Python (no shell needed), default 100k
     chunk_env = os.environ.get("CLIPN_PREDICT_CHUNK_ROWS", "").strip()
