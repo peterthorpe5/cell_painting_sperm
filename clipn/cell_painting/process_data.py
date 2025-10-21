@@ -1068,6 +1068,22 @@ def encode_cpd_data(dataframes, encode_labels=False):
 
 
 
+from contextlib import nullcontext
+import numpy as np
+import gc
+
+def _to_numpy_safe(x):
+    """
+    Convert torch tensor or array-like to a NumPy array without assuming torch is present.
+    """
+    try:
+        import torch  # noqa: F401
+        if hasattr(x, "detach") and hasattr(x, "device"):
+            return x.detach().cpu().numpy()
+    except Exception:
+        pass
+    return np.asarray(x)
+
 def _predict_chunked_indexed(
     *,
     model,
@@ -1080,46 +1096,15 @@ def _predict_chunked_indexed(
 
     Behaviour
     ---------
-    - If ``chunk_rows <= 0``, runs a single-shot predict and normalises outputs
-      to NumPy arrays.
-    - Otherwise, iterates each dataset id and calls ``model.predict`` on
-      successive row slices, concatenating outputs in order.
-
-    Parameters
-    ----------
-    model : Any
-        Trained CLIPn model exposing ``predict(dict[int -> array-like])``.
-    indexed_data : dict[int, np.ndarray]
-        Mapping ``dataset_id -> feature matrix (N_i x D)``.
-    chunk_rows : int
-        Maximum number of rows per forward pass.
-    logger : logging.Logger
-        Logger for status messages.
-
-    Returns
-    -------
-    dict[int, np.ndarray]
-        Mapping ``dataset_id -> latent array (N_i x L)``.
+    - If ``chunk_rows <= 0``, runs a single-shot predict and normalises outputs to NumPy.
+    - Otherwise, iterates each dataset id and calls ``model.predict`` on successive row
+      slices, concatenating outputs in order.
     """
-
-    # Helper: convert tensor/array-like to NumPy without assuming torch is present
-    def _as_numpy(x):
-        try:
-            # Torch tensor path (only if torch is imported/available)
-            import torch  # noqa: F401
-            if hasattr(x, "detach") and hasattr(x, "device"):
-                return x.detach().cpu().numpy()
-        except Exception:
-            pass
-        # NumPy or array-like fallback
-        return np.asarray(x)
-
     # Single-shot path
     if chunk_rows is None or int(chunk_rows) <= 0:
         lat = model.predict(indexed_data)
-        return {k: _as_numpy(v) for k, v in lat.items()}
+        return {k: _to_numpy_safe(v) for k, v in lat.items()}
 
-    # Chunked path
     out: dict[int, list[np.ndarray]] = {k: [] for k in indexed_data}
 
     # Use inference_mode if torch is present; otherwise no-op
@@ -1131,10 +1116,7 @@ def _predict_chunked_indexed(
 
     for k, X in indexed_data.items():
         n_rows = int(X.shape[0])
-        logger.info(
-            "Chunked predict: dataset_id=%d, rows=%d, chunk_rows=%d",
-            k, n_rows, int(chunk_rows)
-        )
+        logger.info("Chunked predict: dataset_id=%d, rows=%d, chunk_rows=%d", k, n_rows, int(chunk_rows))
         if n_rows == 0:
             continue
 
@@ -1145,8 +1127,7 @@ def _predict_chunked_indexed(
                 X_slice = X[start:end, :]
 
                 lat_k_dict = model.predict({k: X_slice})
-                # Normalise to NumPy (handles either tensor or numpy)
-                lat_k_np = _as_numpy(lat_k_dict[k])
+                lat_k_np = _to_numpy_safe(lat_k_dict[k])
                 out[k].append(lat_k_np)
 
                 # Tidy up between slices
@@ -1164,12 +1145,8 @@ def _predict_chunked_indexed(
     # Concatenate parts per dataset id
     z: dict[int, np.ndarray] = {}
     for k, parts in out.items():
-        if parts:
-            z[k] = np.concatenate(parts, axis=0)
-        else:
-            z[k] = np.empty((0, 0), dtype=np.float32)
+        z[k] = np.concatenate(parts, axis=0) if parts else np.empty((0, 0), dtype=np.float32)
     return z
-
 
 
 

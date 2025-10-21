@@ -58,12 +58,11 @@ os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple, Optional, Callable
+from typing import Dict, Iterable, List, Tuple, Optional, Callable, Sequence
 from cell_painting.process_data import variance_threshold_selector
 import re
 import numpy as np
 import pandas as pd
-from typing import Sequence
 import matplotlib 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
