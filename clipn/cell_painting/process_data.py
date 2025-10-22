@@ -1137,7 +1137,6 @@ def _predict_chunked_indexed(
         Mapping dataset_id -> concatenated latent array (N_i x L).
     """
     import gc
-    import
     if chunk_rows is None or int(chunk_rows) <= 0:
         lat = model.predict(indexed_data)
         return {k: _to_numpy_safe(v) for k, v in lat.items()}
