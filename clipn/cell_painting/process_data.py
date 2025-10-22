@@ -1084,71 +1084,6 @@ def _to_numpy_safe(x):
         pass
     return np.asarray(x)
 
-def _predict_chunked_indexed(
-    *,
-    model,
-    indexed_data: dict[int, np.ndarray],
-    chunk_rows: int,
-    logger: logging.Logger
-) -> dict[int, np.ndarray]:
-    """
-    Predict latents for an indexed data dict in bounded-sized row chunks.
-
-    Behaviour
-    ---------
-    - If ``chunk_rows <= 0``, runs a single-shot predict and normalises outputs to NumPy.
-    - Otherwise, iterates each dataset id and calls ``model.predict`` on successive row
-      slices, concatenating outputs in order.
-    """
-    # Single-shot path
-    if chunk_rows is None or int(chunk_rows) <= 0:
-        lat = model.predict(indexed_data)
-        return {k: _to_numpy_safe(v) for k, v in lat.items()}
-
-    out: dict[int, list[np.ndarray]] = {k: [] for k in indexed_data}
-
-    # Use inference_mode if torch is present; otherwise no-op
-    try:
-        import torch  # noqa: F401
-        inference_ctx = torch.inference_mode()
-    except Exception:
-        inference_ctx = nullcontext()
-
-    for k, X in indexed_data.items():
-        n_rows = int(X.shape[0])
-        logger.info("Chunked predict: dataset_id=%d, rows=%d, chunk_rows=%d", k, n_rows, int(chunk_rows))
-        if n_rows == 0:
-            continue
-
-        start = 0
-        with inference_ctx:
-            while start < n_rows:
-                end = min(start + int(chunk_rows), n_rows)
-                X_slice = X[start:end, :]
-
-                lat_k_dict = model.predict({k: X_slice})
-                lat_k_np = _to_numpy_safe(lat_k_dict[k])
-                out[k].append(lat_k_np)
-
-                # Tidy up between slices
-                del X_slice, lat_k_dict, lat_k_np
-                gc.collect()
-                try:
-                    import torch  # noqa: F401
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
-
-                start = end
-
-    # Concatenate parts per dataset id
-    z: dict[int, np.ndarray] = {}
-    for k, parts in out.items():
-        z[k] = np.concatenate(parts, axis=0) if parts else np.empty((0, 0), dtype=np.float32)
-    return z
-
-
 
 def _iter_row_chunks(total_rows: int, *, chunk_rows: int) -> list[tuple[int, int]]:
     """
@@ -1202,42 +1137,54 @@ def _predict_chunked_indexed(
         Mapping dataset_id -> concatenated latent array (N_i x L).
     """
     import gc
-    import torch
-
+    import
     if chunk_rows is None or int(chunk_rows) <= 0:
-        # Original single-shot behaviour
-        return model.predict(indexed_data)
+        lat = model.predict(indexed_data)
+        return {k: _to_numpy_safe(v) for k, v in lat.items()}
 
     out: dict[int, list[np.ndarray]] = {k: [] for k in indexed_data}
+
+    # Use inference_mode if torch is present; otherwise no-op
+    try:
+        import torch 
+        inference_ctx = torch.inference_mode()
+        has_torch = True
+    except Exception:
+        from contextlib import nullcontext
+        inference_ctx = nullcontext()
+        has_torch = False
 
     for k, X in indexed_data.items():
         n_rows = int(X.shape[0])
         logger.info("Chunked predict: dataset_id=%d, rows=%d, chunk_rows=%d", k, n_rows, int(chunk_rows))
         if n_rows == 0:
-            out[k] = []
             continue
 
         for start, end in _iter_row_chunks(n_rows, chunk_rows=int(chunk_rows)):
             X_slice = X[start:end, :]
-            # Use inference_mode to minimise overhead
-            with torch.inference_mode():
-                lat_dict = model.predict({k: X_slice})
-            out[k].append(lat_dict[k].detach().cpu().numpy())
 
-            # Proactively release memory between chunks
+            with inference_ctx:
+                lat_dict = model.predict({k: X_slice})
+            out[k].append(_to_numpy_safe(lat_dict[k]))
+
+            # Tidy up between slices
             del X_slice, lat_dict
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if has_torch:
+                try:
+                    import torch  # noqa: F401
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
     # Concatenate slices
     z: dict[int, np.ndarray] = {}
     for k, parts in out.items():
-        if not parts:
-            z[k] = np.empty((0, getattr(model, "latent_dim", 0)), dtype=np.float32)
-        else:
-            z[k] = np.concatenate(parts, axis=0)
+        z[k] = np.concatenate(parts, axis=0) if parts else np.empty((0, 0), dtype=np.float32)
     return z
+
+
 
 
 def prepare_data_for_clipn_from_df(
