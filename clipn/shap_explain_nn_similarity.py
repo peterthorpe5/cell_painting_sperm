@@ -651,11 +651,16 @@ def run_shap(
     Fit a simple classifier to distinguish the query vs its nearest neighbours,
     then compute SHAP values robustly and produce TSV tables and PDFs.
 
-    This implementation hardens SHAP against additivity errors by:
-      1) Cleaning X to be finite float64.
-      2) Using probability output and an interventional background.
-      3) Trying strict additivity first, then falling back to
-         check_additivity=False if required.
+    Strategy
+    --------
+    1) Clean X to finite float64 and freeze feature order.
+    2) Prefer SHAP with an explicit background:
+         - Tree models: TreeExplainer with feature_perturbation='interventional'
+           and model_output='probability', strict additivity first then relaxed.
+         - If the SHAP build rejects that combo, fall back to
+           feature_perturbation='tree_path_dependent' and model_output='raw'.
+    3) For very small n, use LogisticRegression with shap.Explainer on
+       probability space.
 
     Parameters
     ----------
@@ -717,13 +722,16 @@ def run_shap(
             )
             model.fit(X, y)
 
-            # Use probability space + interventional background
+            # Background for LR (keep small but representative)
+            bg_n = min(1024, X.shape[0])
+            background = shap.sample(X, bg_n, random_state=42)
+
             explainer = shap.Explainer(
                 model=model,
-                masker=X,
-                feature_perturbation="interventional",
-                model_output="probability"
+                masker=background,
+                algorithm="auto"  # lets SHAP choose the right explainer
             )
+            # shap.Explainer returns shap.Explanation; values are on probability scale
             shap_raw = explainer(X).values
 
         else:
@@ -735,24 +743,51 @@ def run_shap(
             )
             model.fit(X, y)
 
-            explainer = shap.TreeExplainer(
-                model=model,
-                feature_perturbation="interventional",
-                model_output="probability"
-            )
+            # Background for tree explainer
+            bg_n = min(1024, X.shape[0])
+            background = shap.sample(X, bg_n, random_state=42)
 
-            # Try strict additivity once; fall back if it fails
             try:
-                sv = explainer.shap_values(X, check_additivity=True)
-                logger.debug("TreeExplainer: strict additivity passed.")
-            except Exception as e:
-                logger.warning(
-                    "TreeExplainer additivity failed (%s). "
-                    "Retrying with check_additivity=False.", e
+                # Preferred: interventional + probability (needs background)
+                explainer = shap.TreeExplainer(
+                    model=model,
+                    data=background,
+                    feature_perturbation="interventional",
+                    model_output="probability"
                 )
-                sv = explainer.shap_values(X, check_additivity=False)
+                try:
+                    sv = explainer.shap_values(X, check_additivity=True)
+                    logger.debug(
+                        "TreeExplainer interventional/probability with strict additivity succeeded."
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Strict additivity failed (%s). Retrying with check_additivity=False.", e
+                    )
+                    sv = explainer.shap_values(X, check_additivity=False)
 
-            # Binary classifiers often return [class0, class1]; take class 1
+            except ValueError as e:
+                # Fallback required by some SHAP builds
+                logger.warning(
+                    "Interventional+probability not supported in this SHAP build (%s). "
+                    "Falling back to tree_path_dependent/raw.", e
+                )
+                explainer = shap.TreeExplainer(
+                    model=model,
+                    data=background,
+                    feature_perturbation="tree_path_dependent",
+                    model_output="raw"
+                )
+                try:
+                    sv = explainer.shap_values(X, check_additivity=True)
+                except Exception as e2:
+                    logger.warning(
+                        "Strict additivity failed even in raw mode (%s). "
+                        "Retrying with check_additivity=False.", e2
+                    )
+                    sv = explainer.shap_values(X, check_additivity=False)
+
+            # Binary classifiers usually return [class0, class1]
             shap_raw = sv[1] if isinstance(sv, list) and len(sv) >= 2 else np.asarray(sv)
 
     except Exception as e:
