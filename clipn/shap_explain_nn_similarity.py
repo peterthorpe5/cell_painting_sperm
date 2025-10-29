@@ -638,72 +638,142 @@ def _normalise_shap_array(shap_raw: np.ndarray,
     return shap_arr
 
 
-def run_shap(features_df: pd.DataFrame,
-             n_top_features: int,
-             out_dir: str,
-             query_id: str,
-             logger: logging.Logger,
-             small_sample_threshold: int = 30,
-             threads: int = 1) -> None:
+def run_shap(
+    features_df: pd.DataFrame,
+    n_top_features: int,
+    out_dir: str,
+    query_id: str,
+    logger: logging.Logger,
+    small_sample_threshold: int = 30,
+    threads: int = 1
+) -> None:
     """
-    Fit simple classifier to distinguish query vs neighbours and compute SHAP.
+    Fit a simple classifier to distinguish the query vs its nearest neighbours,
+    then compute SHAP values robustly and produce TSV tables and PDFs.
+
+    This implementation hardens SHAP against additivity errors by:
+      1) Cleaning X to be finite float64.
+      2) Using probability output and an interventional background.
+      3) Trying strict additivity first, then falling back to
+         check_additivity=False if required.
 
     Parameters
     ----------
     features_df : pandas.DataFrame
-        Features (including 'target' column).
+        Input data containing numeric feature columns, metadata, and a 'target'
+        column where 1 marks the query wells and 0 marks the neighbour wells.
     n_top_features : int
-        Number of top/lowest features to report/plot.
+        Number of top and lowest |SHAP| features to report/plot.
     out_dir : str
-        Output directory for this query.
+        Directory to write outputs for this query.
     query_id : str
-        Query compound identifier.
+        Identifier for the query compound (used in filenames).
     logger : logging.Logger
-        Logger for messages.
-    small_sample_threshold : int
-        Use logistic regression if n_samples < this threshold.
+        Logger for informational and diagnostic messages.
+    small_sample_threshold : int, optional
+        If the number of rows in X is < this threshold, use logistic regression
+        (denser SHAP) instead of a random forest. Default is 30.
+    threads : int, optional
+        Number of CPU threads for the RandomForestClassifier. Default is 1.
+
+    Returns
+    -------
+    None
+        Results are written to disk under `out_dir`.
     """
     # Select features (numeric only), drop known metadata
-    X, y, feature_cols = _prepare_X_y(features_df)
+    X, y, feature_cols = _prepare_X_y(features_df=features_df)
 
     if not feature_cols:
         logger.error("No numeric feature columns available after excluding metadata.")
         return
 
-    logger.info("X shape: %s; positives=%d, negatives=%d",
-                X.shape, int((y == 1).sum()), int((y == 0).sum()))
+    logger.info(
+        "X shape: %s; positives=%d, negatives=%d",
+        X.shape, int((y == 1).sum()), int((y == 0).sum())
+    )
 
-    # Guardrails
+    # Guardrails for tiny/degenerate problems
     if X.shape[0] < 4 or y.nunique() < 2 or y.value_counts().min() < 2:
         logger.error("Not enough samples/classes to run SHAP reliably. Skipping.")
         return
 
+    # Clean and standardise the design matrix: finite float64, stable order
+    X = X.apply(pd.to_numeric, errors="coerce")
+    X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float64)
+    feature_order = list(X.columns)
+
     # Choose model and compute SHAP
     try:
         if X.shape[0] < small_sample_threshold:
-            logger.info("Using LogisticRegression (n=%d < %d).", X.shape[0], small_sample_threshold)
-            model = LogisticRegression(max_iter=2000, n_jobs=None, random_state=42)
+            logger.info(
+                "Using LogisticRegression (n=%d < %d).",
+                X.shape[0], small_sample_threshold
+            )
+            model = LogisticRegression(
+                max_iter=2000,
+                n_jobs=None,
+                random_state=42
+            )
             model.fit(X, y)
-            explainer = shap.Explainer(model, X)
+
+            # Use probability space + interventional background
+            explainer = shap.Explainer(
+                model=model,
+                masker=X,
+                feature_perturbation="interventional",
+                model_output="probability"
+            )
             shap_raw = explainer(X).values
+
         else:
             logger.info("Using RandomForest (n=%d).", X.shape[0])
-            model = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=threads)
+            model = RandomForestClassifier(
+                n_estimators=300,
+                random_state=42,
+                n_jobs=threads
+            )
             model.fit(X, y)
-            explainer = shap.TreeExplainer(model)
-            sv = explainer.shap_values(X)
+
+            explainer = shap.TreeExplainer(
+                model=model,
+                feature_perturbation="interventional",
+                model_output="probability"
+            )
+
+            # Try strict additivity once; fall back if it fails
+            try:
+                sv = explainer.shap_values(X, check_additivity=True)
+                logger.debug("TreeExplainer: strict additivity passed.")
+            except Exception as e:
+                logger.warning(
+                    "TreeExplainer additivity failed (%s). "
+                    "Retrying with check_additivity=False.", e
+                )
+                sv = explainer.shap_values(X, check_additivity=False)
+
+            # Binary classifiers often return [class0, class1]; take class 1
             shap_raw = sv[1] if isinstance(sv, list) and len(sv) >= 2 else np.asarray(sv)
+
     except Exception as e:
         logger.error("Model/SHAP failed: %s", e)
         logger.debug(traceback.format_exc())
         return
 
-    # Make SHAP 2D (n_samples, n_features)
+    # Normalise SHAP output to (n_samples, n_features)
     try:
-        shap_arr = _normalise_shap_array(shap_raw, X, logger)
+        shap_arr = _normalise_shap_array(shap_raw=shap_raw, X=X, logger=logger)
     except Exception as e:
         logger.error("Failed to normalise SHAP output: %s", e)
         logger.debug(traceback.format_exc())
+        return
+
+    # Sanity: verify dimensions still align with the frozen schema
+    if shap_arr.shape[1] != len(feature_order):
+        logger.error(
+            "SHAP dimensionality %s does not match features (%d). Aborting.",
+            shap_arr.shape, len(feature_order)
+        )
         return
 
     # Rank features by mean |SHAP|
@@ -719,66 +789,120 @@ def run_shap(features_df: pd.DataFrame,
     # Outputs
     os.makedirs(out_dir, exist_ok=True)
 
-    pd.DataFrame({"feature": top_feats, "mean_abs_shap": top_vals}) \
-        .to_csv(os.path.join(out_dir, f"{query_id}_top_shap_features_driving_difference.tsv"),
-                sep="\t", index=False)
-    pd.DataFrame({"feature": low_feats, "mean_abs_shap": low_vals}) \
-        .to_csv(os.path.join(out_dir, f"{query_id}_most_similar_features.tsv"),
-                sep="\t", index=False)
+    pd.DataFrame(
+        {"feature": top_feats, "mean_abs_shap": top_vals}
+    ).to_csv(
+        os.path.join(out_dir, f"{query_id}_top_shap_features_driving_difference.tsv"),
+        sep="\t",
+        index=False
+    )
+
+    pd.DataFrame(
+        {"feature": low_feats, "mean_abs_shap": low_vals}
+    ).to_csv(
+        os.path.join(out_dir, f"{query_id}_most_similar_features.tsv"),
+        sep="\t",
+        index=False
+    )
 
     # Simple bar plots (difference/similarity)
-    plot_feature_importance_bar(top_feats, top_vals,
-                                os.path.join(out_dir, f"{query_id}_top_shap_features_bar.pdf"),
-                                f"{query_id}: Features driving difference", logger)
-    plot_feature_importance_bar(low_feats, low_vals,
-                                os.path.join(out_dir, f"{query_id}_most_similar_features_bar.pdf"),
-                                f"{query_id}: Features driving similarity", logger)
+    plot_feature_importance_bar(
+        features=top_feats,
+        importance=top_vals,
+        out_pdf=os.path.join(out_dir, f"{query_id}_top_shap_features_bar.pdf"),
+        title=f"{query_id}: Features driving difference",
+        logger=logger
+    )
+    plot_feature_importance_bar(
+        features=low_feats,
+        importance=low_vals,
+        out_pdf=os.path.join(out_dir, f"{query_id}_most_similar_features_bar.pdf"),
+        title=f"{query_id}: Features driving similarity",
+        logger=logger
+    )
 
     # SHAP summary plots for full feature set
-    plot_summary_pair(X, shap_arr, feature_cols,
-                      os.path.join(out_dir, f"{query_id}_shap_summary"), logger,
-                      n_top=n_top_features)
+    plot_summary_pair(
+        X=X,
+        shap_values=shap_arr,
+        feature_names=feature_cols,
+        out_prefix=os.path.join(out_dir, f"{query_id}_shap_summary"),
+        logger=logger,
+        n_top=n_top_features
+    )
 
     # SHAP summary plots for top/lowest subsets
     X_top = X.iloc[:, top_idx]
     X_low = X.iloc[:, low_idx]
-    plot_summary_pair(X_top, shap_arr[:, top_idx], top_feats,
-                      os.path.join(out_dir, f"{query_id}_shap_summary_top"), logger,
-                      n_top=n_top_features)
-    plot_summary_pair(X_low, shap_arr[:, low_idx], low_feats,
-                      os.path.join(out_dir, f"{query_id}_shap_summary_similar"), logger,
-                      n_top=n_top_features)
+
+    plot_summary_pair(
+        X=X_top,
+        shap_values=shap_arr[:, top_idx],
+        feature_names=top_feats,
+        out_prefix=os.path.join(out_dir, f"{query_id}_shap_summary_top"),
+        logger=logger,
+        n_top=n_top_features
+    )
+    plot_summary_pair(
+        X=X_low,
+        shap_values=shap_arr[:, low_idx],
+        feature_names=low_feats,
+        out_prefix=os.path.join(out_dir, f"{query_id}_shap_summary_similar"),
+        logger=logger,
+        n_top=n_top_features
+    )
 
     # Clustered bar plots via shap.Explanation
     plot_shap_bar_clustered(
-        X_top, shap_arr[:, top_idx], top_feats,
-        os.path.join(out_dir, f"{query_id}_shap_bar_clustered_difference.pdf"),
-        logger, max_display=n_top_features
+        X=X_top,
+        shap_values=shap_arr[:, top_idx],
+        feature_names=top_feats,
+        output_file=os.path.join(out_dir, f"{query_id}_shap_bar_clustered_difference.pdf"),
+        logger=logger,
+        max_display=n_top_features
     )
     plot_shap_bar_clustered(
-        X_low, shap_arr[:, low_idx], low_feats,
-        os.path.join(out_dir, f"{query_id}_shap_bar_clustered_similarity.pdf"),
-        logger, max_display=n_top_features
+        X=X_low,
+        shap_values=shap_arr[:, low_idx],
+        feature_names=low_feats,
+        output_file=os.path.join(out_dir, f"{query_id}_shap_bar_clustered_similarity.pdf"),
+        logger=logger,
+        max_display=n_top_features
     )
 
     # Waterfall: median query well
     plot_waterfall_for_median_query(
-        X, shap_arr, feature_cols, features_df["target"],
-        os.path.join(out_dir, f"{query_id}_shap_waterfall_query_median.pdf"),
-        logger, max_display=n_top_features
+        X=X,
+        shap_values=shap_arr,
+        feature_names=feature_cols,
+        target=features_df["target"],
+        out_pdf=os.path.join(out_dir, f"{query_id}_shap_waterfall_query_median.pdf"),
+        logger=logger,
+        max_display=n_top_features
     )
 
     # Heatmap on full set (top-N display controlled in function)
     plot_heatmap(
-        X, shap_arr, feature_cols,
-        os.path.join(out_dir, f"{query_id}_shap_heatmap.pdf"),
-        logger, max_display=n_top_features, font_size=6
+        X=X,
+        shap_values=shap_arr,
+        feature_names=feature_cols,
+        out_pdf=os.path.join(out_dir, f"{query_id}_shap_heatmap.pdf"),
+        logger=logger,
+        max_display=n_top_features,
+        font_size=6
     )
 
     # Dependence plots for the top-N features
     plot_shap_dependence_plots(
-        X, shap_arr, top_feats, out_dir, query_id, logger, n_dependence=min(5, n_top_features)
+        X=X,
+        shap_values=shap_arr,
+        top_features=top_feats,
+        output_dir=out_dir,
+        query_id=query_id,
+        logger=logger,
+        n_dependence=min(5, n_top_features)
     )
+
 
 
 def main() -> None:
