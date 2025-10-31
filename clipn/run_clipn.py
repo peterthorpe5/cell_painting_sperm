@@ -3237,7 +3237,7 @@ def main(args: argparse.Namespace) -> None:
     # ======================================================================
     # Merge-time variance selection (numeric-only; before scaling/encoding)
     # ======================================================================
-    variance_thr = getattr(args, "variance_threshold", 1e-4)
+    variance_thr = getattr(args, "variance_threshold", 1e-3)
     variance_pdf = getattr(args, "variance_pdf", None)
     variance_log_pdf = getattr(args, "variance_log_pdf", None)
     variance_title = getattr(args, "variance_diag_title", None)
@@ -3378,7 +3378,10 @@ def main(args: argparse.Namespace) -> None:
     corr_thr = args.correlation_threshold
     corr_method = args.correlation_method
     corr_strategy = args.corr_keep_order  # 'variance' keeps most variable first
-
+    logger.info(
+        "Starting joint correlation filtering: threshold=%.3f, method=%s, strategy=%s",
+        corr_thr, corr_method, corr_strategy,
+    )
 
     # Re-identify current numeric feature columns after variance + impute
     feature_cols = [
@@ -4256,7 +4259,7 @@ if __name__ == "__main__":
         help="Distance metric for diagnostics.",
     )
 
-    parser.add_argument("--variance_threshold", type=float, default=0.00001,
+    parser.add_argument("--variance_threshold", type=float, default=0.001,
                 help="Keep features with population variance strictly greater than this value.")
     parser.add_argument("--variance_pdf", type=str, default=None,
                 help="Path to write linear-scale variance diagnostics PDF.")
@@ -4294,6 +4297,7 @@ if __name__ == "__main__":
             default="variance",
             help="Heuristic for priority to keep when two features are highly correlated."
         )
+
 
     # Replicate QC options
     parser.add_argument(
