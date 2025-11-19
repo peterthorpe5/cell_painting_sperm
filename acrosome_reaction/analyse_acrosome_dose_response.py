@@ -1443,6 +1443,186 @@ def plot_volcano(
     LOGGER.info("Saved volcano plot to '%s'", output_path)
 
 
+def summarise_compound_effects(
+    *,
+    fisher_df: pd.DataFrame,
+    q_threshold: float = 0.05,
+    min_increase: float = 0.0,
+    max_decrease: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Summarise the overall AR effect of each compound across doses.
+
+    For each cpd_id, doses are classified as:
+      - significant increases: q_value <= q_threshold and delta_AR_pct > min_increase
+      - significant decreases: q_value <= q_threshold and delta_AR_pct < -max_decrease
+
+    The compound is then assigned an overall effect_class:
+      - 'only_inducer': at least one significant increase, no significant decreases
+      - 'only_suppressor': at least one significant decrease, no significant increases
+      - 'mixed_effect': at least one significant increase and one significant decrease
+      - 'no_significant_effect': no significant increases or decreases
+
+    Parameters
+    ----------
+    fisher_df : pandas.DataFrame
+        Per-compound–dose Fisher results.
+    q_threshold : float, optional
+        Maximum FDR q-value for a dose to be considered significant.
+    min_increase : float, optional
+        Minimum delta_AR_pct to classify a dose as a significant increase.
+    max_decrease : float, optional
+        Minimum absolute delta_AR_pct to classify a dose as a significant
+        decrease (delta_AR_pct < -max_decrease).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per cpd_id with columns including:
+        - cpd_id
+        - effect_class
+        - n_doses
+        - n_sig_increase
+        - n_sig_decrease
+        - max_delta_AR_pct
+        - min_delta_AR_pct
+        - max_sig_increase
+        - min_sig_decrease
+        - min_q_increase
+        - min_q_decrease
+    """
+    if fisher_df.empty:
+        LOGGER.warning(
+            "Fisher results table is empty; per-compound summary will be empty."
+        )
+        return pd.DataFrame(
+            columns=[
+                "cpd_id",
+                "effect_class",
+                "n_doses",
+                "n_sig_increase",
+                "n_sig_decrease",
+                "max_delta_AR_pct",
+                "min_delta_AR_pct",
+                "max_sig_increase",
+                "min_sig_decrease",
+                "min_q_increase",
+                "min_q_decrease",
+            ]
+        )
+
+    records: List[Dict[str, object]] = []
+
+    for cpd_id, group in fisher_df.groupby("cpd_id"):
+        g = group.copy()
+
+        # All doses for this compound
+        n_doses = int(g.shape[0])
+
+        # Significant increases and decreases
+        sig_inc = g[
+            (g["q_value"] <= q_threshold)
+            & (g["delta_AR_pct"] > min_increase)
+        ]
+        sig_dec = g[
+            (g["q_value"] <= q_threshold)
+            & (g["delta_AR_pct"] < -max_decrease)
+        ]
+
+        n_sig_inc = int(sig_inc.shape[0])
+        n_sig_dec = int(sig_dec.shape[0])
+
+        # Overall effect class
+        if n_sig_inc == 0 and n_sig_dec == 0:
+            effect_class = "no_significant_effect"
+        elif n_sig_inc > 0 and n_sig_dec == 0:
+            effect_class = "only_inducer"
+        elif n_sig_inc == 0 and n_sig_dec > 0:
+            effect_class = "only_suppressor"
+        else:
+            effect_class = "mixed_effect"
+
+        max_delta = float(g["delta_AR_pct"].max())
+        min_delta = float(g["delta_AR_pct"].min())
+
+        max_sig_inc = float(sig_inc["delta_AR_pct"].max()) if n_sig_inc > 0 else np.nan
+        min_sig_dec = float(sig_dec["delta_AR_pct"].min()) if n_sig_dec > 0 else np.nan
+
+        min_q_inc = float(sig_inc["q_value"].min()) if n_sig_inc > 0 else np.nan
+        min_q_dec = float(sig_dec["q_value"].min()) if n_sig_dec > 0 else np.nan
+
+        records.append(
+            {
+                "cpd_id": cpd_id,
+                "effect_class": effect_class,
+                "n_doses": n_doses,
+                "n_sig_increase": n_sig_inc,
+                "n_sig_decrease": n_sig_dec,
+                "max_delta_AR_pct": max_delta,
+                "min_delta_AR_pct": min_delta,
+                "max_sig_increase": max_sig_inc,
+                "min_sig_decrease": min_sig_dec,
+                "min_q_increase": min_q_inc,
+                "min_q_decrease": min_q_dec,
+            }
+        )
+
+    summary_df = pd.DataFrame(records)
+    LOGGER.info(
+        "Per-compound summary created for %d compounds.", summary_df.shape[0]
+    )
+    return summary_df
+
+
+def plot_compound_effect_classes_barplot(
+    *,
+    summary_df: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """
+    Plot a bar chart of the number of compounds in each effect class.
+
+    Parameters
+    ----------
+    summary_df : pandas.DataFrame
+        Per-compound summary table from summarise_compound_effects().
+        Must contain an 'effect_class' column.
+    output_path : Path
+        Path to save the PNG figure.
+    """
+    if summary_df.empty or "effect_class" not in summary_df.columns:
+        LOGGER.warning(
+            "Per-compound summary is empty or missing 'effect_class'; "
+            "skipping effect-class barplot."
+        )
+        return
+
+    counts = summary_df["effect_class"].value_counts()
+    # Optional ordering for a more interpretable plot
+    order = [
+        "only_inducer",
+        "only_suppressor",
+        "mixed_effect",
+        "no_significant_effect",
+    ]
+    labels = [cls for cls in order if cls in counts.index]
+    values = [int(counts[cls]) for cls in labels]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(labels, values)
+
+    ax.set_xlabel("Effect class")
+    ax.set_ylabel("Number of compounds")
+    ax.set_title("Per-compound AR effect classes")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    LOGGER.info(
+        "Saved per-compound effect-class barplot to '%s'", output_path
+    )
+
+
 def plot_top_delta_barplot(
     *,
     fisher_df: pd.DataFrame,
@@ -1640,6 +1820,7 @@ def tsv_preview_html(
     )
     return wrapped
 
+
 def write_html_report(
     *,
     output_dir: Path,
@@ -1652,6 +1833,8 @@ def write_html_report(
     drc_pngs: List[Path],
     volcano_interactive_html: Path | None = None,
     inducing_barplot_png: Path | None = None,
+    compound_summary_tsv: Path | None = None,
+    class_barplot_png: Path | None = None,
 ) -> Path:
     """
     Write a simple HTML report linking TSVs and embedding plots and previews.
@@ -1663,6 +1846,7 @@ def write_html_report(
       - Static PNG plots and optional interactive volcano link.
       - Optional dose–response curve PNGs.
       - Optional barplot of compounds that only induce AR.
+      - Optional per-compound effect-class barplot.
 
     Parameters
     ----------
@@ -1686,6 +1870,10 @@ def write_html_report(
         Path to interactive volcano HTML, if generated.
     inducing_barplot_png : Path or None, optional
         Path to “only inducers” barplot PNG, if generated.
+    compound_summary_tsv : Path or None, optional
+        Path to per-compound summary TSV, if generated.
+    class_barplot_png : Path or None, optional
+        Path to per-compound effect-class barplot PNG, if generated.
 
     Returns
     -------
@@ -1735,6 +1923,11 @@ def write_html_report(
             f"<li>Dose–response fit summary: "
             f"<a href='{drc_tsv.name}'>{drc_tsv.name}</a></li>"
         )
+    if compound_summary_tsv is not None and compound_summary_tsv.exists():
+        parts.append(
+            f"<li>Per-compound effect summary: "
+            f"<a href='{compound_summary_tsv.name}'>{compound_summary_tsv.name}</a></li>"
+        )
     parts.append("</ul>")
 
     # Embedded previews of TSVs
@@ -1759,6 +1952,14 @@ def write_html_report(
                 path=drc_tsv,
                 max_rows=100,
                 title="Dose–response fit summary",
+            )
+        )
+    if compound_summary_tsv is not None and compound_summary_tsv.exists():
+        parts.append(
+            tsv_preview_html(
+                path=compound_summary_tsv,
+                max_rows=100,
+                title="Per-compound effect summary",
             )
         )
 
@@ -1803,6 +2004,18 @@ def write_html_report(
         parts.append(
             f"<img src='{inducing_barplot_png.name}' "
             f"alt='Compounds that only induce AR'>"
+        )
+
+    # Per-compound effect-class barplot
+    if class_barplot_png is not None and class_barplot_png.exists():
+        parts.append("<h2>Summary of per-compound effect classes</h2>")
+        parts.append(
+            "<p>Counts of compounds classified as only inducers, only "
+            "suppressors, mixed effect, or having no significant effect.</p>"
+        )
+        parts.append(
+            f"<img src='{class_barplot_png.name}' "
+            f"alt='Per-compound effect class summary'>"
         )
 
     # DRC curves
@@ -1940,6 +2153,29 @@ def main() -> None:
     fisher_df.to_csv(fisher_tsv, sep="\t", index=False)
     LOGGER.info("Wrote Fisher results to '%s'", fisher_tsv)
 
+    # Per-compound summary
+    compound_summary_tsv: Path | None = None
+    compound_summary_df: pd.DataFrame | None = None
+    compound_summary_df = summarise_compound_effects(
+        fisher_df=fisher_df,
+        q_threshold=0.05,
+        min_increase=0.0,
+        max_decrease=0.0,
+    )
+    if compound_summary_df is not None and not compound_summary_df.empty:
+        compound_summary_tsv = output_dir / "acrosome_per_compound_summary.tsv"
+        compound_summary_df.to_csv(
+            compound_summary_tsv,
+            sep="\t",
+            index=False,
+        )
+        LOGGER.info(
+            "Wrote per-compound summary to '%s'", compound_summary_tsv
+        )
+    else:
+        LOGGER.warning(
+            "Per-compound summary is empty; no summary TSV will be written."
+        )
 
 
     # 7. Optional dose–response fitting
@@ -1985,6 +2221,15 @@ def main() -> None:
         top_n=30,
     )
 
+    class_barplot_png: Path | None = None
+    if compound_summary_df is not None and not compound_summary_df.empty:
+        class_barplot_png = output_dir / "compound_effect_classes_barplot.png"
+        plot_compound_effect_classes_barplot(
+            summary_df=compound_summary_df,
+            output_path=class_barplot_png,
+        )
+
+
     inducing_barplot_png = output_dir / "inducing_compounds_barplot.png"
     plot_inducing_compounds_barplot(
         fisher_df=fisher_df,
@@ -2016,6 +2261,8 @@ def main() -> None:
         drc_pngs=drc_pngs,
         volcano_interactive_html=volcano_interactive_html,
         inducing_barplot_png=inducing_barplot_png,
+        compound_summary_tsv=compound_summary_tsv,
+        class_barplot_png=class_barplot_png,
     )
 
 
