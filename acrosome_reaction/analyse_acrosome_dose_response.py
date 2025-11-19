@@ -1640,8 +1640,6 @@ def tsv_preview_html(
     )
     return wrapped
 
-
-
 def write_html_report(
     *,
     output_dir: Path,
@@ -1664,6 +1662,7 @@ def write_html_report(
         (first N rows only).
       - Static PNG plots and optional interactive volcano link.
       - Optional dose–response curve PNGs.
+      - Optional barplot of compounds that only induce AR.
 
     Parameters
     ----------
@@ -1685,6 +1684,8 @@ def write_html_report(
         List of individual DRC plot PNGs.
     volcano_interactive_html : Path or None, optional
         Path to interactive volcano HTML, if generated.
+    inducing_barplot_png : Path or None, optional
+        Path to “only inducers” barplot PNG, if generated.
 
     Returns
     -------
@@ -1790,13 +1791,14 @@ def write_html_report(
     if barplot_png is not None and barplot_png.exists():
         parts.append("<h2>Top compound–dose hits by FDR</h2>")
         parts.append(f"<img src='{barplot_png.name}' alt='Top hits barplot'>")
-        
-        if inducing_barplot_png is not None and inducing_barplot_png.exists():
+
+    # “Only inducers” barplot
+    if inducing_barplot_png is not None and inducing_barplot_png.exists():
         parts.append("<h2>Compounds that only induce AR</h2>")
         parts.append(
             "<p>Compounds shown here have no doses that reduce AR below the "
             "DMSO level, and at least one significant dose (FDR ≤ 0.05) that "
-            "increases AR. Bars reflect the dose with the largest ΔAR%%.</p>"
+            "increases AR. Bars reflect the dose with the largest ΔAR%.</p>"
         )
         parts.append(
             f"<img src='{inducing_barplot_png.name}' "
@@ -1824,6 +1826,7 @@ def write_html_report(
     html_content = "\n".join(parts)
     html_path.write_text(html_content, encoding="utf-8")
     return html_path
+
 
 
 # ---------------------------------------------------------------------------
@@ -1962,8 +1965,7 @@ def main() -> None:
     volcano_png = output_dir / "fisher_volcano.png"
     plot_volcano(fisher_df=fisher_df, output_path=volcano_png)
 
-    volcano_interactive_html: Path | None = None
-    volcano_interactive_html = plot_volcano_interactive(
+    volcano_interactive_html: Path | None = plot_volcano_interactive(
         fisher_df=fisher_df,
         output_path=output_dir / "fisher_volcano_interactive.html",
     )
@@ -1974,19 +1976,6 @@ def main() -> None:
             "Interactive volcano HTML path: %s (exists=%s)",
             volcano_interactive_html,
             volcano_interactive_html.exists(),
-        )
-
-
-    barplot_png = output_dir / "top_delta_AR_pct_barplot.png"
-    plot_top_delta_barplot(fisher_df=fisher_df, output_path=barplot_png, top_n=30)
-
-    drc_pngs: List[Path] = []
-    if args.fit_dose_response and drc_df is not None:
-        drc_pngs = plot_dose_response_examples(
-            fisher_df=fisher_df,
-            drc_df=drc_df,
-            output_dir=output_dir,
-            max_compounds=12,
         )
 
     barplot_png = output_dir / "top_delta_AR_pct_barplot.png"
@@ -2004,6 +1993,15 @@ def main() -> None:
         min_delta=0.0,
         top_n=30,
     )
+
+    drc_pngs: List[Path] = []
+    if args.fit_dose_response and drc_df is not None:
+        drc_pngs = plot_dose_response_examples(
+            fisher_df=fisher_df,
+            drc_df=drc_df,
+            output_dir=output_dir,
+            max_compounds=12,
+        )
 
 
     # 9. HTML report
