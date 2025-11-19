@@ -200,8 +200,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=3.0,
         help=(
-            "IQR multiplier for defining AR%% outliers amongst DMSO wells. "
-            "Only DMSO wells are auto-dropped as AR%% outliers."
+            "IQR multiplier for defining AR% outliers amongst DMSO wells. "
+            "Only DMSO wells are auto-dropped as AR% outliers."
         ),
     )
     parser.add_argument(
@@ -211,7 +211,7 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         help=(
             "MAD multiplier for flagging within-compound–dose replicate "
-            "AR%% outliers."
+            "AR% outliers."
         ),
     )
     parser.add_argument(
@@ -2092,7 +2092,7 @@ def main() -> None:
         replicate_mad_multiplier=args.replicate_mad_multiplier,
     )
 
-        # DEBUG: how many DMSO wells before/after QC?
+    # DEBUG: how many DMSO wells before/after QC?
     LOGGER.info(
         "cpd_type counts (all wells):\n%s",
         df_well_qc["cpd_type"].value_counts(dropna=False),
