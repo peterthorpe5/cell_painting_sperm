@@ -445,51 +445,96 @@ def load_controls(
 # CellProfiler discovery and per-image counts
 # ---------------------------------------------------------------------------
 
-
 def discover_cp_files(
     *,
     cp_dir: Path,
-) -> Tuple[Path, Path | None]:
+) -> Dict[str, Path | None]:
     """
-    Discover CellProfiler Image and Acrosome tables in a directory.
+    Discover CellProfiler output tables in a directory.
 
-    Parameters
-    ----------
-    cp_dir : Path
-        Directory containing CellProfiler *.csv outputs.
+    Finds both .csv and .csv.gz variants for:
+        - *_Image
+        - *_Acrosome
+        - *_SpermCells
+        - *_FilteredNuclei
+
+    Only the Image table is required; others are optional.
 
     Returns
     -------
-    tuple
-        (image_path, acrosome_path_or_none)
-
-    Raises
-    ------
-    FileNotFoundError
-        If no Image table is found.
+    dict
+        Keys:
+            image
+            acrosome
+            spermcells
+            filterednuclei
     """
-    image_files = sorted(cp_dir.glob("*_Image.csv"))
-    acrosome_files = sorted(cp_dir.glob("*_Acrosome.csv"))
 
-    if not image_files:
+    def _find(pattern: str) -> Path | None:
+        files = sorted(
+            list(cp_dir.glob(pattern + ".csv")) +
+            list(cp_dir.glob(pattern + ".csv.gz"))
+        )
+        return files[0] if files else None
+
+    image_path = _find("*_Image")
+    acrosome_path = _find("*_Acrosome")
+    spermcells_path = _find("*_SpermCells")
+    nuclei_path = _find("*_FilteredNuclei")
+
+    if image_path is None:
         raise FileNotFoundError(
-            f"No '*_Image.csv' file found in directory '{cp_dir}'."
-        )
-    if len(image_files) > 1:
-        LOGGER.warning(
-            "Multiple Image tables found; using the first: %s", image_files[0]
+            f"No '*_Image.csv' or '*_Image.csv.gz' found in {cp_dir}"
         )
 
-    image_path = image_files[0]
-    acrosome_path = acrosome_files[0] if acrosome_files else None
+    LOGGER.info(f"Using Image table: {image_path}")
 
-    LOGGER.info("Using Image table: '%s'", image_path)
-    if acrosome_path is not None:
-        LOGGER.info("Found Acrosome table: '%s' (currently unused).", acrosome_path)
-    else:
-        LOGGER.info("No '*_Acrosome.csv' file found; continuing without it.")
+    if acrosome_path:
+        LOGGER.info(f"Found Acrosome table: {acrosome_path}")
+    if spermcells_path:
+        LOGGER.info(f"Found SpermCells table: {spermcells_path}")
+    if nuclei_path:
+        LOGGER.info(f"Found FilteredNuclei table: {nuclei_path}")
 
-    return image_path, acrosome_path
+    return {
+        "image": image_path,
+        "acrosome": acrosome_path,
+        "spermcells": spermcells_path,
+        "filterednuclei": nuclei_path,
+    }
+
+
+
+def load_acrosome_table(*, acrosome_path: Path) -> pd.DataFrame:
+    """
+    Load the CellProfiler object-level Acrosome table (.csv or .csv.gz).
+
+    This does not yet integrate with the pipeline but is kept ready
+    for future use (QC, morphology, AR object-level validation).
+
+    Parameters
+    ----------
+    acrosome_path : Path
+        Path to the Acrosome table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Raw object-level acrosome table.
+    """
+    LOGGER.info("Loading Acrosome table from '%s'", acrosome_path)
+
+    compression = "gzip" if str(acrosome_path).endswith(".gz") else None
+
+    df = pd.read_csv(
+        acrosome_path,
+        sep=None,
+        engine="python",
+        compression=compression,
+    )
+
+    LOGGER.info("Acrosome table loaded with %d rows and %d columns", *df.shape)
+    return df
 
 
 def load_image_counts(
@@ -2203,7 +2248,10 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Discover and load CellProfiler Image table
-    image_path, _ = discover_cp_files(cp_dir=cp_dir)
+    cp_files = discover_cp_files(cp_dir=cp_dir)
+
+    # Required
+    image_path = cp_files["image"]
     df_image = load_image_counts(
         image_path=image_path,
         plate_col=args.image_plate_col,
@@ -2211,6 +2259,14 @@ def main() -> None:
         cell_count_col=args.image_cell_count_col,
         ar_count_col=args.image_ar_count_col,
     )
+
+    # Optional: load object-level acrosome table
+    acrosome_path = cp_files["acrosome"]
+    df_acrosome = None
+    if acrosome_path is not None:
+        df_acrosome = load_acrosome_table(acrosome_path=acrosome_path)
+        LOGGER.info("Loaded object-level acrosome table with %d rows", len(df_acrosome))
+
 
     # 2. Load metadata and controls
     df_meta = load_compound_metadata(metadata_path=lib_path)
