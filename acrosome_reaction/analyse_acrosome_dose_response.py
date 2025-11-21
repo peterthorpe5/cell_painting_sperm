@@ -75,6 +75,8 @@ import shlex
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -384,6 +386,148 @@ def object_level_qc(
     qc_outputs["flagged_wells"] = flagged
 
     return qc_outputs
+
+
+def intensity_qc(
+    *,
+    df_acrosome: pd.DataFrame | None,
+    df_image: pd.DataFrame,
+    intensity_col: str = None,
+) -> pd.DataFrame | None:
+    """
+    Perform intensity-based QC using the acrosome object table.
+
+    Parameters
+    ----------
+    df_acrosome : pandas.DataFrame or None
+        The Acrosome object table, minimally containing:
+            ImageNumber, <intensity_col>
+        If None, returns None.
+    df_image : pandas.DataFrame
+        The Image table (for plate_id, well_id)
+    intensity_col : str or None
+        Column representing acrosome intensity. If None, attempts to detect one.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        Well-level intensity QC table, or None if unavailable.
+    """
+    if df_acrosome is None:
+        LOGGER.warning("Intensity QC skipped: no Acrosome table available.")
+        return None
+
+    # Auto-detect an intensity column if user did not provide one
+    if intensity_col is None:
+        candidates = [c for c in df_acrosome.columns if "Intensity" in c]
+        if not candidates:
+            LOGGER.warning("No intensity column found in Acrosome table.")
+            return None
+        intensity_col = candidates[0]
+        LOGGER.info("Using intensity column '%s' for intensity QC.", intensity_col)
+
+    df = df_acrosome[[ "ImageNumber", intensity_col ]].copy()
+
+    # Merge plate + well info
+    df = df.merge(
+        df_image[["ImageNumber", "plate_id", "well_id"]],
+        on="ImageNumber",
+        how="left",
+    )
+
+    # Compute well-level stats
+    df_qc = (
+        df.groupby(["plate_id", "well_id"])[intensity_col]
+        .agg(
+            median_intensity="median",
+            mean_intensity="mean",
+            sd_intensity="std",
+            mad_intensity=lambda x: (x - x.median()).abs().median(),
+            n_objects="count",
+        )
+        .reset_index()
+    )
+
+    # CV (coefficient of variation)
+    df_qc["cv_intensity"] = df_qc["sd_intensity"] / df_qc["mean_intensity"]
+
+    # Flag outliers
+    df_qc["is_low_intensity"] = df_qc["median_intensity"] < df_qc["median_intensity"].median() * 0.4
+    df_qc["is_high_variability"] = df_qc["cv_intensity"] > 1.0
+
+    return df_qc
+
+
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
+
+def write_qc_pdf(
+    *,
+    output_path: Path,
+    image_qc: pd.DataFrame,
+    well_qc: pd.DataFrame,
+    intensity_qc: pd.DataFrame | None = None,
+):
+    """
+    Produce a multi-page PDF QC report for the plate.
+
+    Parameters
+    ----------
+    output_path : Path
+        Destination PDF path.
+    image_qc : pandas.DataFrame
+        Per-image QC summary.
+    well_qc : pandas.DataFrame
+        Per-well object QC.
+    intensity_qc : pandas.DataFrame or None
+        Optional intensity QC table.
+    """
+    with PdfPages(output_path) as pdf:
+
+        # PAGE 1 — OBJECT COUNTS
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.hist(image_qc["acrosome_objects"], bins=50)
+        ax.set_title("Object counts per image (Acrosome)")
+        ax.set_xlabel("Objects per image")
+        ax.set_ylabel("Frequency")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # PAGE 2 — TOTAL OBJECTS BY WELL
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.hist(well_qc["objects_total"], bins=50)
+        ax.set_title("Total objects per well")
+        ax.set_xlabel("Objects")
+        ax.set_ylabel("Number of wells")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # PAGE 3 — INTENSITY QC, if available
+        if intensity_qc is not None:
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.hist(intensity_qc["median_intensity"], bins=50)
+            ax.set_title("Median acrosome intensity")
+            ax.set_xlabel("Intensity")
+            ax.set_ylabel("Wells")
+            pdf.savefig(fig)
+            plt.close(fig)
+
+        # PAGE 4 — FLAGGED WELLS SUMMARY
+        flagged = well_qc[
+            (well_qc["objects_total"] < 50)
+            | (well_qc["images"] < 2)
+            | (well_qc["objects_total"] > 50000)
+        ]
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.axis("off")
+        txt = flagged.to_string(index=False)
+        ax.text(0, 1, "Flagged Wells:\n" + txt, va="top", family="monospace")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    LOGGER.info("QC PDF written: %s", output_path)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1444,6 +1588,99 @@ def fit_dose_response_per_compound(
 # Plotting and HTML report
 # ---------------------------------------------------------------------------
 
+def df_to_html_table(df: pd.DataFrame, max_rows: int = 30) -> str:
+    """
+    Convert a DataFrame into a safe HTML <table> string with limited rows.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame to render.
+    max_rows : int
+        Maximum number of rows to display in the HTML summary.
+
+    Returns
+    -------
+    str
+        HTML <table> element as a string.
+    """
+    if df is None or df.empty:
+        return "<p>No data available.</p>"
+
+    df_show = df.head(max_rows).copy()
+    html = df_show.to_html(
+        index=False,
+        border=0,
+        classes="qc-table",
+        escape=False,
+    )
+    if len(df) > max_rows:
+        html += f"<p>Showing first {max_rows} of {len(df)} rows…</p>"
+    return html
+
+
+def qc_section_html(
+    *,
+    qc_results: Dict[str, pd.DataFrame],
+    intensity_qc: pd.DataFrame | None,
+    pdf_path: Path,
+) -> str:
+    """
+    Create the HTML block for object-level QC.
+
+    Parameters
+    ----------
+    qc_results : dict
+        Dictionary from object_level_qc() with keys:
+            image_qc
+            well_qc
+            flagged_wells
+    intensity_qc : pandas.DataFrame or None
+        Intensity QC table.
+    pdf_path : Path
+        Path to the QC PDF report.
+
+    Returns
+    -------
+    str
+        HTML string representing the QC section.
+    """
+
+    parts = []
+    parts.append("<h2>Object-Level QC Summary</h2>")
+
+    # Link to PDF
+    if pdf_path.exists():
+        parts.append(
+            f"<p><a href='{pdf_path.name}' target='_blank'>Download full QC PDF report</a></p>"
+        )
+
+    # Image QC table
+    parts.append("<h3>Image-Level QC (first rows)</h3>")
+    parts.append(df_to_html_table(qc_results.get("image_qc")))
+
+    # Well QC table
+    parts.append("<h3>Well-Level QC Summary</h3>")
+    parts.append(df_to_html_table(qc_results.get("well_qc")))
+
+    # Flagged wells
+    flagged = qc_results.get("flagged_wells")
+    if flagged is not None and not flagged.empty:
+        parts.append("<h3>Flagged Wells (Potential Issues)</h3>")
+        parts.append(df_to_html_table(flagged))
+    else:
+        parts.append("<h3>No flagged wells detected.</h3>")
+
+    # Intensity QC
+    if intensity_qc is not None:
+        parts.append("<h3>Intensity QC Summary</h3>")
+        parts.append(df_to_html_table(intensity_qc))
+    else:
+        parts.append("<h3>No intensity QC available.</h3>")
+
+    return "\n".join(parts)
+
+
 
 def plot_plate_heatmap(
     *,
@@ -2214,6 +2451,9 @@ def write_html_report(
     inducing_barplot_png: Path | None = None,
     compound_summary_tsv: Path | None = None,
     class_barplot_png: Path | None = None,
+    qc_results: Dict[str, pd.DataFrame] | None = None,
+    intensity_qc: pd.DataFrame | None = None,
+    qc_pdf_path: Path | None = None,
 ) -> Path:
     """
     Write a simple HTML report linking TSVs and embedding plots and previews.
@@ -2347,6 +2587,41 @@ def write_html_report(
         parts.append("<h2>Plate layout – AR% per well (QC-kept)</h2>")
         parts.append(f"<img src='{plate_heatmap_png.name}' alt='Plate heatmap'>")
 
+    # ---------------------------------------------------------
+    # OBJECT-LEVEL QC SECTION
+    # ---------------------------------------------------------
+    if qc_results is not None and qc_results:
+        parts.append("<h2>Object-Level QC Summary</h2>")
+
+        if qc_pdf_path is not None and qc_pdf_path.exists():
+            parts.append(
+                f"<p><a href='{qc_pdf_path.name}' target='_blank'>"
+                "Download full QC PDF report</a></p>"
+            )
+
+        # Image QC
+        parts.append("<h3>Image-Level QC</h3>")
+        parts.append(df_to_html_table(qc_results.get("image_qc")))
+
+        # Well QC
+        parts.append("<h3>Well-Level QC</h3>")
+        parts.append(df_to_html_table(qc_results.get("well_qc")))
+
+        # Flagged wells
+        flagged = qc_results.get("flagged_wells")
+        if flagged is not None and not flagged.empty:
+            parts.append("<h3>Flagged Wells</h3>")
+            parts.append(df_to_html_table(flagged))
+        else:
+            parts.append("<p>No flagged wells detected.</p>")
+
+        # Intensity QC
+        if intensity_qc is not None:
+            parts.append("<h3>Intensity QC Summary</h3>")
+            parts.append(df_to_html_table(intensity_qc))
+
+
+
     # Interactive volcano
     if (
         volcano_interactive_html is not None
@@ -2433,6 +2708,11 @@ def main() -> None:
     args = parse_args()
     configure_logging(verbosity=args.verbosity)
 
+    df_acrosome = None
+    df_spermcells = None
+    df_nuclei = None
+
+
     cp_dir = Path(args.cp_dir)
     lib_path = Path(args.library_metadata)
     ctrl_path = Path(args.controls)
@@ -2461,6 +2741,25 @@ def main() -> None:
             cols=["ImageNumber"],   # add more columns later if needed
         )
         LOGGER.info("Loaded object-level acrosome table with %d rows", len(df_acrosome))
+
+    if cp_files["spermcells"] is not None:
+        df_spermcells = load_acrosome_minimal(
+            path=cp_files["spermcells"],
+            cols=["ImageNumber"]
+        )
+        logger.info("Loaded object-level sperm cells table with %d rows", len(df_spermcells))
+    else:
+        df_spermcells = None
+
+    if cp_files["filterednuclei"] is not None:
+        df_nuclei = load_acrosome_minimal(
+            path=cp_files["filterednuclei"],
+            cols=["ImageNumber"]
+        )
+        logger.info("Loaded object-level filtered nuclei table with %d rows", len(df_nuclei))
+    else:
+        df_nuclei = None
+
 
 
     # 2. Load metadata and controls
@@ -2497,6 +2796,11 @@ def main() -> None:
         df_sperm=df_spermcells if "df_spermcells" in locals() else None,
         df_nuclei=df_nuclei if "df_nuclei" in locals() else None,
     )
+    intensity_qc_table = intensity_qc(
+            df_acrosome=df_acrosome,
+            df_image=df_image,
+        )
+
 
     if qc_results:
         # Save QC tables inside output_dir
@@ -2526,6 +2830,15 @@ def main() -> None:
     per_well_tsv = output_dir / "acrosome_per_well_qc.tsv"
     df_well_qc.to_csv(per_well_tsv, sep="\t", index=False)
     LOGGER.info("Wrote per-well QC table to '%s'", per_well_tsv)
+
+
+    write_qc_pdf(
+        output_path=Path(args.output_dir)/"object_qc"/"QC_report.pdf",
+        image_qc=qc_results["image_qc"],
+        well_qc=qc_results["well_qc"],
+        intensity_qc=intensity_qc_table,
+    )
+
 
     # 6. Fisher tests per compound–dose
     fisher_df = run_fisher_per_compound_dose(df_well_qc=df_well_qc)
@@ -2680,6 +2993,9 @@ def main() -> None:
         inducing_barplot_png=inducing_barplot_png,
         compound_summary_tsv=compound_summary_tsv,
         class_barplot_png=class_barplot_png,
+        qc_results=qc_results,
+        intensity_qc=intensity_qc_table,
+        qc_pdf_path=Path(args.output_dir) / "object_qc" / "QC_report.pdf",
     )
 
 
