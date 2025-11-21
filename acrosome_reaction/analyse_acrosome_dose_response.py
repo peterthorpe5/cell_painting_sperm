@@ -153,12 +153,14 @@ def parse_args() -> argparse.Namespace:
             "Row/Col and/or Well."
         ),
     )
+
     parser.add_argument(
         "--controls",
         dest="controls",
-        default="sperm_painting_controls_20221019.csv",
-        help="Controls file listing DMSO and other controls.",
+        default=None,
+        help="Optional controls file (DMSO etc.). Omit to skip controls.",
     )
+
     parser.add_argument(
         "--output_dir",
         dest="output_dir",
@@ -3006,8 +3008,13 @@ def main() -> None:
     # 2. Load metadata and controls
     df_meta = load_compound_metadata(metadata_path=lib_path)
     qc_summary_for_metadata(df_meta=df_meta)
-    
-    df_ctrl = load_controls(controls_path=ctrl_path)
+
+    if controls_path is not None:
+        df_ctrl = load_controls(controls_path=controls_path)
+    else:
+        LOGGER.info("No controls file provided — skipping controls.")
+        df_ctrl = None
+
 
     # 3. Merge per-image counts with metadata
     df_image = merge_image_with_metadata(
