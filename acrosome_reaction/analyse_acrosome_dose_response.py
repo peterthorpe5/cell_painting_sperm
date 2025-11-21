@@ -558,58 +558,133 @@ def merge_image_with_metadata(
     *,
     df_image: pd.DataFrame,
     df_meta: pd.DataFrame,
-    df_ctrl: pd.DataFrame | None,
+    df_ctrl: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    Merge per-image counts with library metadata and control annotations.
+    Merge per-image counts with harmonised library metadata and optionally
+    with a controls table. If df_ctrl is not provided, control types are
+    inferred from well positions (columns 23 = DMSO, 24 = POS).
+
+    The function:
+        • normalises metadata column names ('OLPTID' → 'plate_id',
+          'PTODWELLREFERENCE' → 'well_id', 'OBJDID' → 'cpd_id')
+        • normalises well identifiers (A001 → A01)
+        • merges CellProfiler per-image data with metadata on
+          ('plate_id', 'well_id')
+        • assigns cpd_type values: 'DMSO', 'POS', or 'TEST'
+        • if df_ctrl is provided, overrides inferred control types
 
     Parameters
     ----------
     df_image : pandas.DataFrame
-        Per-image counts with plate_id, well_id, Cell_count, AR_count.
+        Per-image CellProfiler table. Must contain:
+        plate_id, well_id, Cell_count, AR_count.
     df_meta : pandas.DataFrame
-        Library metadata with plate_id, well_id, cpd_id, conc.
+        Stamped metadata including plate barcode, well ID and cpd_id.
     df_ctrl : pandas.DataFrame or None
-        Controls table with plate_id, well_id and control_type.
+        Optional control table with plate_id, well_id, control_type.
 
     Returns
     -------
     pandas.DataFrame
-        Per-image table with added:
-        - cpd_id
-        - conc
-        - cpd_type ('DMSO', 'POS', 'TEST').
+        Per-image table with metadata merged and control types assigned.
     """
-    df = df_image.copy()
 
-    LOGGER.info("Merging per-image counts with library metadata.")
-    df = df.merge(
-        df_meta,
-        how="left",
-        on=["plate_id", "well_id"],
-        suffixes=("", "_lib"),
+    df = df_image.copy()
+    meta = df_meta.copy()
+
+    # ------------------------------------------------------------------
+    # 1. Harmonise metadata colnames to match df_image conventions
+    # ------------------------------------------------------------------
+    meta = meta.rename(
+        columns={
+            "OLPTID": "plate_id",
+            "PTODWELLREFERENCE": "well_id",
+            "OBJDID": "cpd_id",
+            # fallback variants:
+            "Plate_Metadata": "plate_id",
+            "Well_Metadata": "well_id",
+        }
     )
 
+    # concentration naming
+    for col in ["conc", "Concentration", "PTODCONCVALUE"]:
+        if col in meta.columns:
+            meta = meta.rename(columns={col: "conc"})
+            break
+
+    # ------------------------------------------------------------------
+    # 2. Normalise well strings
+    # ------------------------------------------------------------------
+    meta["well_id"] = meta["well_id"].map(lambda w: standardise_well_string(well=w))
+
+    # ------------------------------------------------------------------
+    # 3. Merge metadata into df_image
+    # ------------------------------------------------------------------
+    LOGGER.info("Merging per-image data with stamped metadata.")
+
+    df = df.merge(
+        meta,
+        how="left",
+        on=["plate_id", "well_id"],
+        suffixes=("", "_meta"),
+    )
+
+    # warn for missing metadata
     if df["cpd_id"].isna().any():
-        n_missing = df["cpd_id"].isna().sum()
+        missing = df["cpd_id"].isna().sum()
         LOGGER.warning(
-            "After merging library metadata, %d image rows have missing cpd_id.",
-            n_missing,
+            "%d image rows have missing cpd_id after metadata merge. "
+            "Check plate_id and well_id formatting.",
+            missing,
         )
 
+    # Default all wells to TEST unless we reassign them
     df["cpd_type"] = "TEST"
+
+    # ------------------------------------------------------------------
+    # 4. Optional control file
+    # ------------------------------------------------------------------
     if df_ctrl is not None and not df_ctrl.empty:
-        LOGGER.info("Merging control annotations into per-image table.")
+        LOGGER.info("Merging control annotations from provided control file.")
+        ctrl = df_ctrl.copy()
+
+        ctrl = ctrl.rename(
+            columns={
+                "source_plate_barcode": "plate_id",
+                "source_well": "well_id",
+            }
+        )
+        ctrl["well_id"] = ctrl["well_id"].map(lambda w: standardise_well_string(well=w))
+
         df = df.merge(
-            df_ctrl,
+            ctrl[["plate_id", "well_id", "control_type"]],
             how="left",
-            on=["well_id"],  # "plate_id",  WE SHOULD LOOK AT THIS!!!
+            on=["plate_id", "well_id"],
             suffixes=("", "_ctrl"),
         )
         df["cpd_type"] = df["control_type"].fillna(df["cpd_type"])
         df.drop(columns=["control_type"], inplace=True, errors="ignore")
 
+    # ------------------------------------------------------------------
+    # 5. Control inference (only apply where still TEST)
+    # ------------------------------------------------------------------
+    # Extract numeric well column: A01 → 1, B12 → 12
+    df["_colnum"] = df["well_id"].str[1:].astype(int)
+
+    # Column 23 → DMSO (LowControl)
+    mask_low = (df["_colnum"] == 23) & (df["cpd_type"] == "TEST")
+    df.loc[mask_low, "cpd_type"] = "DMSO"
+
+    # Column 24 → POS (HighControl)
+    mask_high = (df["_colnum"] == 24) & (df["cpd_type"] == "TEST")
+    df.loc[mask_high, "cpd_type"] = "POS"
+
+    df.drop(columns=["_colnum"], inplace=True, errors="ignore")
+
     return df
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1750,6 +1825,73 @@ def plot_dose_response_examples(
     return paths
 
 
+def qc_summary_for_metadata(*, df_meta: pd.DataFrame) -> None:
+    """
+    Print QC summaries for harmonised metadata.
+
+    This includes:
+        • unique plate barcodes
+        • wells per barcode
+        • compounds per plate
+        • missing or malformed well identifiers
+
+    Parameters
+    ----------
+    df_meta : pandas.DataFrame
+        Harmonised metadata table containing at least:
+        plate_id, well_id, cpd_id.
+    """
+    LOGGER.info("---- Metadata QC summary ----")
+
+    # --- Unique barcodes ---
+    plates = sorted(df_meta["plate_id"].unique())
+    LOGGER.info("Unique plate barcodes (%d): %s", len(plates), ", ".join(plates))
+
+    # --- Wells per barcode ---
+    LOGGER.info("Wells per plate barcode:")
+    wells_per = (
+        df_meta.groupby("plate_id")["well_id"]
+        .nunique()
+        .sort_index()
+        .to_dict()
+    )
+    for plate, n in wells_per.items():
+        LOGGER.info("    %s: %d wells", plate, n)
+
+    # --- Compounds per plate ---
+    LOGGER.info("Compounds per plate:")
+    compounds_per = (
+        df_meta.groupby("plate_id")["cpd_id"]
+        .nunique()
+        .sort_index()
+        .to_dict()
+    )
+    for plate, n in compounds_per.items():
+        LOGGER.info("    %s: %d compounds", plate, n)
+
+    # --- Missing or malformed well IDs ---
+    malformed_mask = (
+        df_meta["well_id"].isna()
+        | ~df_meta["well_id"].astype(str).str.match(r"^[A-H][0-9]{2}$")
+    )
+
+    malformed_rows = df_meta[malformed_mask]
+
+    LOGGER.info(
+        "Malformed or missing wells: %d rows",
+        malformed_rows.shape[0],
+    )
+
+    if not malformed_rows.empty:
+        LOGGER.info(
+            "Examples of malformed wells:\n%s",
+            malformed_rows.head(10).to_string(index=False),
+        )
+
+    LOGGER.info("---- End metadata QC summary ----")
+
+
+
 def tsv_preview_html(
     *,
     path: Path,
@@ -2072,6 +2214,8 @@ def main() -> None:
 
     # 2. Load metadata and controls
     df_meta = load_compound_metadata(metadata_path=lib_path)
+    qc_summary_for_metadata(df_meta=df_meta)
+    
     df_ctrl = load_controls(controls_path=ctrl_path)
 
     # 3. Merge per-image counts with metadata
