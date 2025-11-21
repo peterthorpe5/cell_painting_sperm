@@ -1722,6 +1722,95 @@ def qc_section_html(
     return "\n".join(parts)
 
 
+def plot_inducer_boxplot_per_compound(
+    *,
+    df: pd.DataFrame,
+    output_path: Path,
+    ar_col: str = "AR_percent",
+    cpd_type_col: str = "cpd_type",
+    cpd_col: str = "cpd_id",
+):
+    """
+    Create a box plot comparing AR% for each inducing compound against DMSO.
+
+    One box is drawn per compound. All points are plotted with jitter.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Per-well summary containing AR measurements.
+    output_path : Path
+        Path to save the resulting PNG.
+    ar_col : str
+        Column name containing AR percentage values.
+    cpd_type_col : str
+        Column specifying compound type (e.g. 'TEST', 'DMSO', etc.).
+    cpd_col : str
+        Column specifying compound identifier.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Extract groups
+    df_dmso = df[df[cpd_type_col] == "DMSO"].copy()
+    df_ind = df[df[cpd_type_col] == "TEST"].copy()
+
+    if df_dmso.empty or df_ind.empty:
+        LOGGER.warning("Cannot create compound-wise inducer boxplot: missing DMSO or TEST wells.")
+        return
+
+    # Unique inducing compounds
+    unique_cpds = sorted(df_ind[cpd_col].unique().tolist())
+
+    # Data list: first DMSO, then each compound
+    groups = ["DMSO"] + unique_cpds
+
+    data = [df_dmso[ar_col].dropna().values]
+    for cpd in unique_cpds:
+        data.append(df_ind[df_ind[cpd_col] == cpd][ar_col].dropna().values)
+
+    # Build plot
+    num_groups = len(groups)
+    fig, ax = plt.subplots(figsize=(max(8, num_groups * 0.8), 6))
+
+    bp = ax.boxplot(
+        data,
+        labels=groups,
+        patch_artist=True,
+        showfliers=False,
+        widths=0.5,
+    )
+
+    # Colours
+    colours = ["lightgrey"] + ["skyblue"] * (len(groups) - 1)
+    for patch, colour in zip(bp["boxes"], colours):
+        patch.set_facecolor(colour)
+        patch.set_alpha(0.7)
+
+    # Overlay points with jitter
+    rng = np.random.default_rng(seed=42)
+    for i, values in enumerate(data, start=1):
+        x_jitter = rng.normal(loc=i, scale=0.06, size=len(values))
+        ax.scatter(
+            x_jitter,
+            values,
+            alpha=0.6,
+            s=22,
+            edgecolors="black",
+            linewidth=0.3,
+        )
+
+    ax.set_ylabel("AR percentage")
+    ax.set_title("Compound-wise AR Inducers Compared with DMSO")
+    plt.xticks(rotation=45, ha="right")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+    LOGGER.info("Saved compound-wise inducer boxplot to %s", output_path)
+
+
 
 def plot_inducer_boxplot(
     *,
@@ -2574,6 +2663,7 @@ def write_html_report(
     volcano_interactive_html: Path | None = None,
     inducing_barplot_png: Path | None = None,
     inducer_boxplot_png: Path | None = None,
+    inducer_per_cpd_boxplot_png: Path | None = None,
     compound_summary_tsv: Path | None = None,
     class_barplot_png: Path | None = None,
     qc_results: Dict[str, pd.DataFrame] | None = None,
@@ -2773,6 +2863,11 @@ def write_html_report(
         parts.append(f"<img src='{barplot_png.name}' alt='Top hits barplot'>")
 
     # “Only inducers” barplot
+    if inducer_per_cpd_boxplot_png is not None and inducer_per_cpd_boxplot_png.exists():
+        parts.append("<h2>Compound-wise AR Inducers</h2>")
+        parts.append(f"<img src='{inducer_per_cpd_boxplot_png.name}' "
+                    f"alt='Compound-wise inducer boxplot'>")
+
     if inducing_barplot_png is not None and inducing_barplot_png.exists():
         parts.append("<h2>Compounds that only induce AR</h2>")
         parts.append(
@@ -2916,6 +3011,16 @@ def main() -> None:
         min_cells_per_well=args.min_cells_per_well,
         dmso_iqr_multiplier=args.dmso_iqr_multiplier,
         replicate_mad_multiplier=args.replicate_mad_multiplier,
+    )
+
+    inducer_per_cpd_boxplot_png = Path(args.output_dir) / "inducer_boxplot_per_compound.png"
+
+    plot_inducer_boxplot_per_compound(
+        df=df_well_qc[df_well_qc["qc_keep"]].rename(columns={"AR_pct_well": "AR_percent"}),
+        output_path=inducer_per_cpd_boxplot_png,
+        ar_col="AR_percent",
+        cpd_type_col="cpd_type",
+        cpd_col="cpd_id",
     )
 
 
@@ -3137,6 +3242,7 @@ def main() -> None:
         volcano_interactive_html=volcano_interactive_html,
         inducing_barplot_png=inducing_barplot_png,
         inducer_boxplot_png=inducer_boxplot_png,
+        inducer_per_cpd_boxplot_png: Path | None = None,
         compound_summary_tsv=compound_summary_tsv,
         class_barplot_png=class_barplot_png,
         qc_results=qc_results,
