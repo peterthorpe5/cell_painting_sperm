@@ -2958,7 +2958,9 @@ def main() -> None:
 
     cp_dir = Path(args.cp_dir)
     lib_path = Path(args.library_metadata)
-    ctrl_path = Path(args.controls)
+    if ctrl_path is not None:
+        df_ctrl = load_controls(controls_path=ctrl_path)
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
