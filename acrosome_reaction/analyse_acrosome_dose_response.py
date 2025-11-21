@@ -1732,6 +1732,89 @@ def qc_section_html(
 
 
 
+def plot_inducer_boxplot(
+    *,
+    df: pd.DataFrame,
+    output_path: Path,
+    ar_col: str = "AR_percent",
+    cpd_type_col: str = "cpd_type",
+):
+    """
+    Produce a box plot comparing AR% between compounds that induce the
+    acrosome reaction and DMSO controls. All points are plotted with
+    jitter for transparency.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Per-well summary containing AR measurements.
+    output_path : Path
+        Full path for saving the resulting PNG file.
+    ar_col : str, default 'AR_percent'
+        Column representing AR percentage per well.
+    cpd_type_col : str, default 'cpd_type'
+        Column indicating compound class ('TEST', 'DMSO', etc.).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Filter groups
+    df_comp = df[df[cpd_type_col] == "TEST"].copy()
+    df_dmso = df[df[cpd_type_col] == "DMSO"].copy()
+
+    if df_comp.empty or df_dmso.empty:
+        LOGGER.warning(
+            "Cannot generate inducer boxplot: missing DMSO or TEST wells."
+        )
+        return
+
+    groups = ["DMSO", "Inducers"]
+    data = [
+        df_dmso[ar_col].dropna().values,
+        df_comp[ar_col].dropna().values,
+    ]
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    # Box plot
+    bp = ax.boxplot(
+        data,
+        labels=groups,
+        patch_artist=True,
+        showfliers=False,
+        widths=0.5,
+    )
+
+    # Colour boxes
+    for patch, colour in zip(bp["boxes"], ["lightgrey", "skyblue"]):
+        patch.set_facecolor(colour)
+        patch.set_alpha(0.7)
+
+    # Jittered scatter points
+    rng = np.random.default_rng(seed=42)
+    for i, values in enumerate(data, start=1):
+        x_jitter = rng.normal(loc=i, scale=0.04, size=len(values))
+        ax.scatter(
+            x_jitter,
+            values,
+            alpha=0.6,
+            s=20,
+            edgecolour="black",
+            linewidth=0.3,
+        )
+
+    ax.set_ylabel("AR percentage")
+    ax.set_title("Compounds that Induce AR: Comparison with DMSO")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+    LOGGER.info("Saved inducer boxplot to %s", output_path)
+
+
+
 def plot_plate_heatmap(
     *,
     df_well_qc: pd.DataFrame,
@@ -2499,6 +2582,7 @@ def write_html_report(
     drc_pngs: List[Path],
     volcano_interactive_html: Path | None = None,
     inducing_barplot_png: Path | None = None,
+    inducer_boxplot_png: Path | None = None,
     compound_summary_tsv: Path | None = None,
     class_barplot_png: Path | None = None,
     qc_results: Dict[str, pd.DataFrame] | None = None,
@@ -2709,6 +2793,13 @@ def write_html_report(
             f"<img src='{inducing_barplot_png.name}' "
             f"alt='Compounds that only induce AR'>"
         )
+
+    # “Only inducers” boxplot
+    if inducer_boxplot_png is not None and inducer_boxplot_png.exists():
+        parts.append("<h2>Compounds That Only Induce AR</h2>")
+        parts.append(f"<img src='{inducer_boxplot_png.name}' alt='Inducer boxplot'>")
+
+
 
     # Per-compound effect-class barplot
     if class_barplot_png is not None and class_barplot_png.exists():
@@ -3028,6 +3119,19 @@ def main() -> None:
             max_compounds=12,
         )
 
+    # Inducer boxplot with jittered points and DMSO for reference
+    inducer_boxplot_png = Path(args.output_dir) / "inducer_boxplot.png"
+
+    plot_inducer_boxplot(
+        df=df_well_qc[df_well_qc["qc_keep"]].rename(
+            columns={"AR_pct_well": "AR_percent"}
+        ),
+        output_path=inducer_boxplot_png,
+        ar_col="AR_percent",
+        cpd_type_col="cpd_type",
+    )
+
+
 
     # 9. HTML report
     html_report = write_html_report(
@@ -3041,6 +3145,7 @@ def main() -> None:
         drc_pngs=drc_pngs,
         volcano_interactive_html=volcano_interactive_html,
         inducing_barplot_png=inducing_barplot_png,
+        inducer_boxplot_png=inducer_boxplot_png,
         compound_summary_tsv=compound_summary_tsv,
         class_barplot_png=class_barplot_png,
         qc_results=qc_results,
