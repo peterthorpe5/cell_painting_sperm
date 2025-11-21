@@ -650,7 +650,8 @@ def load_compound_metadata(
     elif "row" in cols_lower and "col" in cols_lower:
         LOGGER.info("Building 'well_id' from ROW/COL columns.")
         df["well_id"] = [
-            standardise_well_from_row_col(r, c)
+            standardise_well_from_row_col(row=r, col=c)
+
             for r, c in zip(df[cols_lower["row"]], df[cols_lower["col"]])
         ]
 
@@ -3241,8 +3242,7 @@ def main() -> None:
         drc_pngs=drc_pngs,
         volcano_interactive_html=volcano_interactive_html,
         inducing_barplot_png=inducing_barplot_png,
-        inducer_boxplot_png=inducer_boxplot_png,
-        inducer_per_cpd_boxplot_png: Path | None = None,
+        inducer_per_cpd_boxplot_png=inducer_per_cpd_boxplot_png,
         compound_summary_tsv=compound_summary_tsv,
         class_barplot_png=class_barplot_png,
         qc_results=qc_results,
