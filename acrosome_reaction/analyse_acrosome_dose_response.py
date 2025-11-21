@@ -602,13 +602,18 @@ def load_compound_metadata(
     metadata_path: Path,
 ) -> pd.DataFrame:
     """
-    Load library metadata for compounds and doses (PTOD).
+    Load and harmonise PTOD compound metadata.
 
-    The input is expected to contain at least:
+    Supports multiple well-identifier formats, including:
+        - Row + Col (e.g. Row='A', Col='1')
+        - Well (e.g. 'A01')
+        - PTODWELLREFERENCE (e.g. 'A001'), converted to 'A01'
+        - ptodwellreference (lower-case variant)
+
+    Expected PTOD fields:
         - 'DDD'              -> cpd_id
         - 'PTODCONCVALUE'    -> conc
-        - 'Plate ID'
-        - Row/Col and/or Well
+        - 'Plate ID'         -> plate_id
 
     Parameters
     ----------
@@ -618,49 +623,94 @@ def load_compound_metadata(
     Returns
     -------
     pandas.DataFrame
-        Metadata with columns:
-        - plate_id
-        - well_id
-        - cpd_id
-        - conc
-        plus any additional chemistry columns.
+        Metadata with harmonised columns:
+            - plate_id
+            - well_id
+            - cpd_id
+            - conc
+        plus any additional chemistry columns provided in the metadata.
     """
     LOGGER.info("Loading library metadata from '%s'", metadata_path)
-    df = pd.read_csv(metadata_path, sep=None, engine="python")
-    LOGGER.info("Loaded library metadata with %d rows and %d columns", *df.shape)
 
-    # Build well_id
+    df = pd.read_csv(metadata_path, sep=None, engine="python")
+    LOGGER.info(
+        "Loaded library metadata with %d rows and %d columns",
+        df.shape[0], df.shape[1]
+    )
+
+    # ----------------------------------------------------------------------
+    # BUILD WELL IDENTIFIERS
+    # ----------------------------------------------------------------------
+
+    # Case 1 — Row + Col, CellProfiler-style
     if {"Row", "Col"}.issubset(df.columns):
         LOGGER.info("Building well_id from 'Row' and 'Col' columns.")
         df["well_id"] = [
             standardise_well_from_row_col(row=r, col=c)
             for r, c in zip(df["Row"], df["Col"])
         ]
+
+    # Case 2 — Well column (A01, B12...)
     elif "Well" in df.columns:
         LOGGER.info("Normalising well_id from 'Well' column.")
-        df["well_id"] = df["Well"].map(lambda w: standardise_well_string(well=w))
+        df["well_id"] = df["Well"].astype(str).map(
+            lambda w: standardise_well_string(well=w)
+        )
+
+    # Case 3 — PTODWELLREFERENCE (A001 → A01)
+    elif "PTODWELLREFERENCE" in df.columns:
+        LOGGER.info(
+            "Normalising well_id from 'PTODWELLREFERENCE' (A001 → A01)."
+        )
+        vals = df["PTODWELLREFERENCE"].astype(str).str.upper()
+        df["well_id"] = (
+            vals.str[0] +
+            vals.str[1:].astype(int).astype(str).str.zfill(2)
+        )
+
+    # Case 4 — ptodwellreference (lowercase)
+    elif "ptodwellreference" in df.columns:
+        LOGGER.info(
+            "Normalising well_id from 'ptodwellreference' (A001 → A01)."
+        )
+        vals = df["ptodwellreference"].astype(str).str.upper()
+        df["well_id"] = (
+            vals.str[0] +
+            vals.str[1:].astype(int).astype(str).str.zfill(2)
+        )
+
+    # Nothing usable found
     else:
         raise KeyError(
-            "Metadata must contain either ('Row', 'Col') or 'Well' columns "
+            "Metadata must contain one of: "
+            "('Row' + 'Col'), 'Well', 'PTODWELLREFERENCE', or 'ptodwellreference' "
             "to derive well identifiers."
         )
 
+    # ----------------------------------------------------------------------
+    # RENAME PTOD FIELDS
+    # ----------------------------------------------------------------------
     rename_map = {
         "Plate ID": "plate_id",
         "DDD": "cpd_id",
         "PTODCONCVALUE": "conc",
     }
+
     for old, new in rename_map.items():
         if old in df.columns:
             df.rename(columns={old: new}, inplace=True)
+            LOGGER.info("Renamed metadata column '%s' → '%s'", old, new)
         else:
             LOGGER.warning(
                 "Expected metadata column '%s' not found; '%s' will be missing.",
-                old,
-                new,
+                old, new,
             )
 
+    # Standard formatting
+    df["plate_id"] = df["plate_id"].astype(str)
+
     return df
+
 
 
 def load_controls(
