@@ -241,6 +241,151 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+
+
+# ---------------------------------------------------------------------------
+# QC functions
+# ---------------------------------------------------------------------------
+
+def load_object_table(*, path: Path) -> pd.DataFrame:
+    """
+    Load any CellProfiler object-level table (.csv or .csv.gz).
+
+    Parameters
+    ----------
+    path : Path
+        Path to the object table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Raw object-level table.
+    """
+    LOGGER.info("Loading object-level table: %s", path)
+
+    compression = "gzip" if str(path).endswith(".gz") else None
+
+    df = pd.read_csv(
+        path,
+        sep=None,
+        engine="python",
+        compression=compression,
+    )
+
+    LOGGER.info(
+        "Loaded object-level table with %d rows and %d columns from %s",
+        df.shape[0], df.shape[1], path
+    )
+
+    return df
+
+
+
+def object_level_qc(
+    *,
+    df_image: pd.DataFrame,
+    df_acrosome: pd.DataFrame | None,
+    df_sperm: pd.DataFrame | None,
+    df_nuclei: pd.DataFrame | None,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Perform object-level QC using available CellProfiler object tables.
+
+    Missing tables (SpermCells, FilteredNuclei) are handled gracefully
+    and assigned zero-count columns.
+    """
+
+    qc_outputs = {}
+    image_num_col = "ImageNumber"
+
+    # -------------------------------------------------------------
+    # 1. BUILD PER-IMAGE OBJECT COUNTS
+    # -------------------------------------------------------------
+    counts = []
+
+    # Acrosome table (most important)
+    if df_acrosome is not None:
+        tmp = df_acrosome[[image_num_col]].copy()
+        tmp["acrosome_objects"] = 1
+        counts.append(tmp)
+    else:
+        LOGGER.warning("No Acrosome table provided – object QC limited.")
+
+    # SpermCells table (optional)
+    if df_sperm is not None:
+        tmp = df_sperm[[image_num_col]].copy()
+        tmp["sperm_objects"] = 1
+        counts.append(tmp)
+
+    # FilteredNuclei table (optional)
+    if df_nuclei is not None:
+        tmp = df_nuclei[[image_num_col]].copy()
+        tmp["nuclei_objects"] = 1
+        counts.append(tmp)
+
+    if not counts:
+        LOGGER.warning("No object tables provided – skipping object-level QC.")
+        return {}
+
+    df_counts = pd.concat(counts, ignore_index=True)
+
+    # group by ImageNumber
+    df_image_qc = (
+        df_counts.groupby(image_num_col)
+        .sum()
+        .reset_index()
+    )
+
+    # Ensure missing columns are created as zero
+    for col in ["acrosome_objects", "sperm_objects", "nuclei_objects"]:
+        if col not in df_image_qc.columns:
+            df_image_qc[col] = 0
+
+    # merge ImageNumber -> plate/well
+    df_image_qc = df_image_qc.merge(
+        df_image[["ImageNumber", "plate_id", "well_id"]],
+        on="ImageNumber",
+        how="left",
+    )
+
+    qc_outputs["image_qc"] = df_image_qc
+
+    # -------------------------------------------------------------
+    # 2. WELL-LEVEL QC SUMMARY
+    # -------------------------------------------------------------
+    df_well_qc = (
+        df_image_qc.groupby(["plate_id", "well_id"])
+        .agg(
+            images=("ImageNumber", "nunique"),
+            acrosome_objects=("acrosome_objects", "sum"),
+            sperm_objects=("sperm_objects", "sum"),
+            nuclei_objects=("nuclei_objects", "sum"),
+        )
+        .reset_index()
+    )
+
+    df_well_qc["objects_total"] = (
+        df_well_qc["acrosome_objects"]
+        + df_well_qc["sperm_objects"]
+        + df_well_qc["nuclei_objects"]
+    )
+
+    qc_outputs["well_qc"] = df_well_qc
+
+    # -------------------------------------------------------------
+    # 3. FLAG PROBLEM WELLS
+    # -------------------------------------------------------------
+    flagged = df_well_qc[
+        (df_well_qc["objects_total"] < 50)
+        | (df_well_qc["images"] < 2)
+        | (df_well_qc["objects_total"] > 50_000)
+    ].copy()
+
+    qc_outputs["flagged_wells"] = flagged
+
+    return qc_outputs
+
+
 # ---------------------------------------------------------------------------
 # Well ID normalisation and metadata loading
 # ---------------------------------------------------------------------------
@@ -535,6 +680,53 @@ def load_acrosome_table(*, acrosome_path: Path) -> pd.DataFrame:
 
     LOGGER.info("Acrosome table loaded with %d rows and %d columns", *df.shape)
     return df
+
+
+def load_acrosome_minimal(
+    *,
+    path: Path,
+    cols: List[str] = ["ImageNumber"],
+    chunksize: int = 200_000,
+) -> pd.DataFrame:
+    """
+    Efficiently load only required columns from a large Acrosome table.
+
+    Uses chunked reading to avoid ever loading the whole file at once.
+
+    Parameters
+    ----------
+    path : Path
+        Path to the Acrosome CSV/CSV.GZ.
+    cols : list of str
+        Columns to load (default = just ImageNumber).
+    chunksize : int
+        Number of rows per chunk.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame containing only the required columns.
+    """
+    LOGGER.info("Loading minimal Acrosome columns from %s", path)
+
+    compression = "gzip" if str(path).endswith(".gz") else None
+
+    dfs = []
+
+    for chunk in pd.read_csv(
+        path,
+        sep=None,
+        engine="python",
+        compression=compression,
+        usecols=lambda c: c in cols,
+        chunksize=chunksize,
+    ):
+        dfs.append(chunk)
+
+    df_out = pd.concat(dfs, ignore_index=True)
+    LOGGER.info("Minimal Acrosome load complete: %d rows", len(df_out))
+
+    return df_out
 
 
 def load_image_counts(
@@ -2262,9 +2454,12 @@ def main() -> None:
 
     # Optional: load object-level acrosome table
     acrosome_path = cp_files["acrosome"]
-    df_acrosome = None
+
     if acrosome_path is not None:
-        df_acrosome = load_acrosome_table(acrosome_path=acrosome_path)
+        df_acrosome = load_acrosome_minimal(
+            path=acrosome_path,
+            cols=["ImageNumber"],   # add more columns later if needed
+        )
         LOGGER.info("Loaded object-level acrosome table with %d rows", len(df_acrosome))
 
 
@@ -2291,6 +2486,28 @@ def main() -> None:
         dmso_iqr_multiplier=args.dmso_iqr_multiplier,
         replicate_mad_multiplier=args.replicate_mad_multiplier,
     )
+
+
+    # ---------------------------------------------------------
+    # OBJECT-LEVEL QC
+    # ---------------------------------------------------------
+    qc_results = object_level_qc(
+        df_image=df_image,
+        df_acrosome=df_acrosome,
+        df_sperm=df_spermcells if "df_spermcells" in locals() else None,
+        df_nuclei=df_nuclei if "df_nuclei" in locals() else None,
+    )
+
+    if qc_results:
+        # Save QC tables inside output_dir
+        qc_out = Path(args.output_dir) / "object_qc"
+        qc_out.mkdir(exist_ok=True, parents=True)
+
+        for name, df in qc_results.items():
+            out_path = qc_out / f"{name}.tsv"
+            df.to_csv(out_path, sep="\t", index=False)
+            LOGGER.info("Wrote object-level QC: %s", out_path)
+
 
     # DEBUG: how many DMSO wells before/after QC?
     LOGGER.info(
