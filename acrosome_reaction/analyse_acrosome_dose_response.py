@@ -1800,7 +1800,7 @@ def plot_inducer_boxplot(
             values,
             alpha=0.6,
             s=20,
-            edgecolour="black",
+            edgecolor="black",
             linewidth=0.3,
         )
 
