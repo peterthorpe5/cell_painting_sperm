@@ -604,31 +604,22 @@ def load_compound_metadata(
     """
     Load and harmonise PTOD compound metadata.
 
-    Supports multiple well-identifier formats, including:
-        - Row + Col (e.g. Row='A', Col='1')
-        - Well (e.g. 'A01')
-        - PTODWELLREFERENCE (e.g. 'A001'), converted to 'A01'
-        - ptodwellreference (lower-case variant)
-
-    Expected PTOD fields:
-        - 'DDD'              -> cpd_id
-        - 'PTODCONCVALUE'    -> conc
-        - 'Plate ID'         -> plate_id
+    Supports multiple well-identifier formats, but prefers a pre-built
+    'well_id' column (as produced by merge_scp_metadata.py).
 
     Parameters
     ----------
     metadata_path : Path
-        Path to the PTOD metadata file.
+        Path to the merged metadata file.
 
     Returns
     -------
     pandas.DataFrame
-        Metadata with harmonised columns:
+        Metadata with harmonised:
             - plate_id
             - well_id
             - cpd_id
             - conc
-        plus any additional chemistry columns provided in the metadata.
     """
     LOGGER.info("Loading library metadata from '%s'", metadata_path)
 
@@ -638,76 +629,76 @@ def load_compound_metadata(
         df.shape[0], df.shape[1]
     )
 
-    # ----------------------------------------------------------------------
-    # BUILD WELL IDENTIFIERS
-    # ----------------------------------------------------------------------
+    # ---------------------------------------------------------
+    # NORMALISE COLUMN NAMES (strip + lowercase)
+    # ---------------------------------------------------------
+    df.columns = [c.strip() for c in df.columns]
 
-    # Case 1 — Row + Col, CellProfiler-style
-    if {"Row", "Col"}.issubset(df.columns):
-        LOGGER.info("Building well_id from 'Row' and 'Col' columns.")
+    cols_lower = {c.lower(): c for c in df.columns}
+
+    # ---------------------------------------------------------
+    # CASE 1 — Metadata already includes 'well_id'
+    # ---------------------------------------------------------
+    if "well_id" in cols_lower:
+        well_col = cols_lower["well_id"]
+        LOGGER.info("Using existing 'well_id' column from merged metadata: %s", well_col)
+        df["well_id"] = df[well_col].astype(str).str.upper().str.strip()
+
+    # ---------------------------------------------------------
+    # CASE 2 — Has Row + Col
+    # ---------------------------------------------------------
+    elif "row" in cols_lower and "col" in cols_lower:
+        LOGGER.info("Building 'well_id' from ROW/COL columns.")
         df["well_id"] = [
-            standardise_well_from_row_col(row=r, col=c)
-            for r, c in zip(df["Row"], df["Col"])
+            standardise_well_from_row_col(r, c)
+            for r, c in zip(df[cols_lower["row"]], df[cols_lower["col"]])
         ]
 
-    # Case 2 — Well column (A01, B12...)
-    elif "Well" in df.columns:
-        LOGGER.info("Normalising well_id from 'Well' column.")
-        df["well_id"] = df["Well"].astype(str).map(
+    # ---------------------------------------------------------
+    # CASE 3 — Has Well (A01 format)
+    # ---------------------------------------------------------
+    elif "well" in cols_lower:
+        LOGGER.info("Normalising 'well_id' from 'Well' column.")
+        df["well_id"] = df[cols_lower["well"]].map(
             lambda w: standardise_well_string(well=w)
         )
 
-    # Case 3 — PTODWELLREFERENCE (A001 → A01)
-    elif "PTODWELLREFERENCE" in df.columns:
-        LOGGER.info(
-            "Normalising well_id from 'PTODWELLREFERENCE' (A001 → A01)."
-        )
-        vals = df["PTODWELLREFERENCE"].astype(str).str.upper()
+    # ---------------------------------------------------------
+    # CASE 4 — PTODWELLREFERENCE (A001 → A01)
+    # ---------------------------------------------------------
+    elif "ptodwellreference" in cols_lower:
+        LOGGER.info("Converting PTODWELLREFERENCE → A01 format.")
+        col = cols_lower["ptodwellreference"]
+        vals = df[col].astype(str).str.upper().str.strip()
         df["well_id"] = (
             vals.str[0] +
             vals.str[1:].astype(int).astype(str).str.zfill(2)
         )
 
-    # Case 4 — ptodwellreference (lowercase)
-    elif "ptodwellreference" in df.columns:
-        LOGGER.info(
-            "Normalising well_id from 'ptodwellreference' (A001 → A01)."
-        )
-        vals = df["ptodwellreference"].astype(str).str.upper()
-        df["well_id"] = (
-            vals.str[0] +
-            vals.str[1:].astype(int).astype(str).str.zfill(2)
-        )
-
-    # Nothing usable found
+    # ---------------------------------------------------------
+    # FINAL — No usable well column
+    # ---------------------------------------------------------
     else:
         raise KeyError(
-            "Metadata must contain one of: "
-            "('Row' + 'Col'), 'Well', 'PTODWELLREFERENCE', or 'ptodwellreference' "
-            "to derive well identifiers."
+            f"No usable well column found. Columns present: {df.columns.tolist()}"
         )
 
-    # ----------------------------------------------------------------------
-    # RENAME PTOD FIELDS
-    # ----------------------------------------------------------------------
+    # ---------------------------------------------------------
+    # Rename PTOD standard columns
+    # ---------------------------------------------------------
     rename_map = {
-        "Plate ID": "plate_id",
         "DDD": "cpd_id",
         "PTODCONCVALUE": "conc",
+        "Plate ID": "plate_id",
     }
 
     for old, new in rename_map.items():
         if old in df.columns:
             df.rename(columns={old: new}, inplace=True)
-            LOGGER.info("Renamed metadata column '%s' → '%s'", old, new)
-        else:
-            LOGGER.warning(
-                "Expected metadata column '%s' not found; '%s' will be missing.",
-                old, new,
-            )
 
-    # Standard formatting
-    df["plate_id"] = df["plate_id"].astype(str)
+    # Ensure plate_id is string
+    if "plate_id" in df.columns:
+        df["plate_id"] = df["plate_id"].astype(str)
 
     return df
 
