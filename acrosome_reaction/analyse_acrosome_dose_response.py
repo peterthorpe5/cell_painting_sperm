@@ -3017,12 +3017,6 @@ def main() -> None:
     df_meta = load_compound_metadata(metadata_path=lib_path)
     qc_summary_for_metadata(df_meta=df_meta)
 
-    if controls_path is not None:
-        df_ctrl = load_controls(controls_path=controls_path)
-    else:
-        LOGGER.info("No controls file provided — skipping controls.")
-        df_ctrl = None
-
 
     # 3. Merge per-image counts with metadata
     df_image = merge_image_with_metadata(
