@@ -2958,8 +2958,14 @@ def main() -> None:
 
     cp_dir = Path(args.cp_dir)
     lib_path = Path(args.library_metadata)
-    if ctrl_path is not None:
+
+    # Controls may be omitted (multi-plate runs)
+    if args.controls is None:
+        df_ctrl = None
+    else:
+        ctrl_path = Path(args.controls)
         df_ctrl = load_controls(controls_path=ctrl_path)
+
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
