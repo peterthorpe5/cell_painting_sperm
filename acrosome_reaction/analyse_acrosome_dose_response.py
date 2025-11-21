@@ -2747,7 +2747,7 @@ def main() -> None:
             path=cp_files["spermcells"],
             cols=["ImageNumber"]
         )
-        logger.info("Loaded object-level sperm cells table with %d rows", len(df_spermcells))
+        LOGGER.info("Loaded object-level sperm cells table with %d rows", len(df_spermcells))
     else:
         df_spermcells = None
 
@@ -2756,7 +2756,7 @@ def main() -> None:
             path=cp_files["filterednuclei"],
             cols=["ImageNumber"]
         )
-        logger.info("Loaded object-level filtered nuclei table with %d rows", len(df_nuclei))
+        LOGGER.info("Loaded object-level filtered nuclei table with %d rows", len(df_nuclei))
     else:
         df_nuclei = None
 
