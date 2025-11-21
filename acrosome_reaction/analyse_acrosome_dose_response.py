@@ -1761,7 +1761,20 @@ def plot_inducer_boxplot_per_compound(
         return
 
     # Unique inducing compounds
-    unique_cpds = sorted(df_ind[cpd_col].unique().tolist())
+    # Clean compound IDs: drop NaNs, convert to string
+    unique_cpds = (
+        df_ind[cpd_col]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    # Optional: remove any weird leftovers like 'nan', '', 'None'
+    unique_cpds = [c for c in unique_cpds if c.lower() not in {"nan", "none", ""}]
+
+    # Sort safely as strings
+    unique_cpds = sorted(unique_cpds)
 
     # Data list: first DMSO, then each compound
     groups = ["DMSO"] + unique_cpds
