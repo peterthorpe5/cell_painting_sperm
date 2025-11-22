@@ -567,10 +567,8 @@ def standardise_well_from_row_col(
     return f"{row}{col_int:02d}"
 
 
-def standardise_well_string(
-    *,
-    well: str,
-) -> str:
+
+def standardise_well_string(well: str) -> str:
     """
     Normalise a raw well string to 'A01' format where possible.
 
