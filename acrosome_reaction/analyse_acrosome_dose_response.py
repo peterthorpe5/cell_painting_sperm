@@ -567,8 +567,10 @@ def standardise_well_from_row_col(
     return f"{row}{col_int:02d}"
 
 
-
-def standardise_well_string(well: str) -> str:
+def standardise_well_string(
+    *,
+    well: str,
+) -> str:
     """
     Normalise a raw well string to 'A01' format where possible.
 
@@ -985,60 +987,64 @@ def merge_image_with_metadata(
 ) -> pd.DataFrame:
     """
     Merge per-image counts with harmonised library metadata and optionally
-    a controls table. Control inference from well positions (columns 23/24)
-    is only applied when:
-        • no controls file is provided, AND
-        • metadata does not already contain explicit DMSO/POS annotations.
+    with a controls table. If df_ctrl is not provided, control types are
+    inferred from well positions (columns 23 = DMSO, 24 = POS).
+
+    The function:
+        • normalises metadata column names ('OLPTID' → 'plate_id',
+          'PTODWELLREFERENCE' → 'well_id', 'OBJDID' → 'cpd_id')
+        • normalises well identifiers (A001 → A01)
+        • merges CellProfiler per-image data with metadata on
+          ('plate_id', 'well_id')
+        • assigns cpd_type values: 'DMSO', 'POS', or 'TEST'
+        • if df_ctrl is provided, overrides inferred control types
 
     Parameters
     ----------
     df_image : pandas.DataFrame
-        Per-image CellProfiler table (plate_id, well_id, Cell_count, AR_count).
+        Per-image CellProfiler table. Must contain:
+        plate_id, well_id, Cell_count, AR_count.
     df_meta : pandas.DataFrame
-        Harmonised metadata table containing plate_id, well_id, cpd_id, conc,
-        and possibly cpd_type.
+        Stamped metadata including plate barcode, well ID and cpd_id.
     df_ctrl : pandas.DataFrame or None
-        Optional controls table with plate_id, well_id, control_type.
+        Optional control table with plate_id, well_id, control_type.
 
     Returns
     -------
     pandas.DataFrame
-        Per-image table merged with metadata and control assignments.
+        Per-image table with metadata merged and control types assigned.
     """
 
     df = df_image.copy()
     meta = df_meta.copy()
 
     # ------------------------------------------------------------------
-    # 1. Harmonise metadata column names
+    # 1. Harmonise metadata colnames to match df_image conventions
     # ------------------------------------------------------------------
     meta = meta.rename(
         columns={
             "OLPTID": "plate_id",
             "PTODWELLREFERENCE": "well_id",
             "OBJDID": "cpd_id",
+            # fallback variants:
             "Plate_Metadata": "plate_id",
             "Well_Metadata": "well_id",
-            "WELL": "well_id",
         }
     )
 
-    # Concentration field normalisation
+    # concentration naming
     for col in ["conc", "Concentration", "PTODCONCVALUE"]:
         if col in meta.columns:
-            meta.rename(columns={col: "conc"}, inplace=True)
+            meta = meta.rename(columns={col: "conc"})
             break
 
     # ------------------------------------------------------------------
-    # 2. Normalise well identifiers
+    # 2. Normalise well strings
     # ------------------------------------------------------------------
-    if "well_id" not in meta.columns:
-        raise KeyError("Metadata does not contain a 'well_id' column after harmonisation.")
-
-    meta["well_id"] = meta["well_id"].map(standardise_well_string)
+    meta["well_id"] = meta["well_id"].map(lambda w: standardise_well_string(well=w))
 
     # ------------------------------------------------------------------
-    # 3. Merge metadata → image table
+    # 3. Merge metadata into df_image
     # ------------------------------------------------------------------
     LOGGER.info("Merging per-image data with stamped metadata.")
 
@@ -1049,22 +1055,23 @@ def merge_image_with_metadata(
         suffixes=("", "_meta"),
     )
 
+    # warn for missing metadata
     if df["cpd_id"].isna().any():
         missing = df["cpd_id"].isna().sum()
         LOGGER.warning(
             "%d image rows have missing cpd_id after metadata merge. "
-            "Check plate_id/well_id formatting.",
+            "Check plate_id and well_id formatting.",
             missing,
         )
 
-    # Default all to TEST – will be overwritten where controls are known
-    df["cpd_type"] = df.get("cpd_type", "TEST")
+    # Default all wells to TEST unless we reassign them
+    df["cpd_type"] = "TEST"
 
     # ------------------------------------------------------------------
-    # 4. If a controls file is provided → use it and skip inference
+    # 4. Optional control file
     # ------------------------------------------------------------------
     if df_ctrl is not None and not df_ctrl.empty:
-        LOGGER.info("Merging control annotations from control file.")
+        LOGGER.info("Merging control annotations from provided control file.")
         ctrl = df_ctrl.copy()
 
         ctrl = ctrl.rename(
@@ -1073,7 +1080,7 @@ def merge_image_with_metadata(
                 "source_well": "well_id",
             }
         )
-        ctrl["well_id"] = ctrl["well_id"].map(standardise_well_string)
+        ctrl["well_id"] = ctrl["well_id"].map(lambda w: standardise_well_string(well=w))
 
         df = df.merge(
             ctrl[["plate_id", "well_id", "control_type"]],
@@ -1081,41 +1088,27 @@ def merge_image_with_metadata(
             on=["plate_id", "well_id"],
             suffixes=("", "_ctrl"),
         )
-
-        # override TEST with control type
         df["cpd_type"] = df["control_type"].fillna(df["cpd_type"])
         df.drop(columns=["control_type"], inplace=True, errors="ignore")
 
-        LOGGER.info("Control file provided — skipping positional inference.")
-        return df
-
     # ------------------------------------------------------------------
-    # 5. If metadata already contains explicit DMSO/POS → trust it
+    # 5. Control inference (only apply where still TEST)
     # ------------------------------------------------------------------
-    if (df["cpd_type"].str.upper() == "DMSO").any() or (df["cpd_type"].str.upper() == "POS").any():
-        LOGGER.info(
-            "Metadata contains explicit control annotations "
-            "(DMSO or POS) — skipping positional inference."
-        )
-        return df
-
-    # ------------------------------------------------------------------
-    # 6. Fallback: positional inference (only TEST wells updated)
-    # ------------------------------------------------------------------
-    LOGGER.info("No control file or metadata DMSO/POS — applying positional inference.")
+    # Extract numeric well column: A01 → 1, B12 → 12
     df["_colnum"] = df["well_id"].str[1:].astype(int)
 
-    # Column 23 → DMSO
+    # Column 23 → DMSO (LowControl)
     mask_low = (df["_colnum"] == 23) & (df["cpd_type"] == "TEST")
     df.loc[mask_low, "cpd_type"] = "DMSO"
 
-    # Column 24 → POS
+    # Column 24 → POS (HighControl)
     mask_high = (df["_colnum"] == 24) & (df["cpd_type"] == "TEST")
     df.loc[mask_high, "cpd_type"] = "POS"
 
     df.drop(columns=["_colnum"], inplace=True, errors="ignore")
 
     return df
+
 
 
 
@@ -3108,15 +3101,6 @@ def main() -> None:
 
 
     # 6. Fisher tests per compound–dose
-    unique_concs = df_well_qc["conc"].dropna().unique()
-
-    if len(unique_concs) <= 1:
-        LOGGER.info(
-            "Single-rep or single-concentration dataset detected. "
-            "Collapsing groups to cpd_id only."
-        )
-        df_well_qc["conc"] = 1.0   # dummy concentration
-
     fisher_df = run_fisher_per_compound_dose(df_well_qc=df_well_qc)
 
     # Enrich Fisher results with chemistry metadata (one row per cpd_id)
