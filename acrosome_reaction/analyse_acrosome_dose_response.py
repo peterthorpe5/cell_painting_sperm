@@ -3362,9 +3362,11 @@ def main() -> None:
 
         # Subset for this single compound + DMSO
         local_df = df_plot[
-            (df_plot["cpd_type"].isin(["DMSO", "TEST"])) &
-            (df_plot["cpd_id"] == cpd)
+            (df_plot["cpd_type"] == "DMSO") |
+            ((df_plot["cpd_type"] == "TEST") & (df_plot["cpd_id"] == cpd))
         ]
+
+        LOGGER.info("Plotting DMSO vs %s (n=%d)", cpd, local_df.shape[0])
 
         plot_inducer_boxplot_per_compound(
             df=local_df,
