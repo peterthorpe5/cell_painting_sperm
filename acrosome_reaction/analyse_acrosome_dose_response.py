@@ -996,6 +996,24 @@ def load_image_counts(
     return out
 
 
+def get_top_compounds(
+    *,
+    fisher_df: pd.DataFrame,
+    n: int = 20,
+    score_col: str = "delta_AR_pct",
+) -> List[str]:
+    """
+    Return the top N compounds ranked by a chosen metric (default: delta_AR_pct).
+    """
+    ranked = (
+        fisher_df
+        .dropna(subset=[score_col])
+        .sort_values(score_col, ascending=False)
+    )
+    return ranked["cpd_id"].head(n).tolist()
+
+
+
 def merge_image_with_metadata(
     *,
     df_image: pd.DataFrame,
@@ -2506,6 +2524,32 @@ def summarise_compound_effects(
     return summary_df
 
 
+def rank_compounds(
+    *,
+    fisher_df: pd.DataFrame,
+    score_col: str = "delta_AR_pct",
+    n: int = 20,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Rank compounds by a chosen statistic and return:
+      - the full ranked table
+      - the top N compound IDs
+
+    Ranking defaults to descending delta_AR_pct.
+    """
+    ranked = (
+        fisher_df
+        .dropna(subset=[score_col])
+        .sort_values(score_col, ascending=False)
+        .reset_index(drop=True)
+    )
+
+    # Get top N compound IDs
+    topN_list = ranked["cpd_id"].head(n).tolist()
+
+    return ranked, topN_list
+
+
 def plot_compound_effect_classes_barplot(
     *,
     summary_df: pd.DataFrame,
@@ -3271,6 +3315,37 @@ def main() -> None:
 
     # 6. Fisher tests per compound–dose
     fisher_df = run_fisher_per_compound_dose(df_well_qc=df_well_qc)
+
+    # ---------------------------------------------------------
+    # Rank compounds and write top-N table
+    # ---------------------------------------------------------
+
+    # Top 20 compound IDs (sorted by default: delta_AR_pct)
+    top20_cpds = get_top_compounds(fisher_df=fisher_df, n=20)
+
+    # Full ranked table + top N list
+    ranked_df, top20_cpds = rank_compounds(
+        fisher_df=fisher_df,
+        score_col="delta_AR_pct",
+        n=20,
+    )
+
+    ranked_tsv = output_dir / "compound_ranking.tsv"
+    ranked_df.to_csv(ranked_tsv, sep="\t", index=False)
+    LOGGER.info("Wrote ranked compound table: %s", ranked_tsv)
+
+    # Subset well-level data for top20 compounds
+    subset_df = df_well_qc[df_well_qc["cpd_id"].isin(top20_cpds)]
+
+    # Boxplot for only top20 compounds
+    plot_inducer_boxplot_per_compound(
+        df=subset_df.rename(columns={"AR_pct_well": "AR_percent"}),
+        output_path=output_dir / "boxplot_top20.png",
+        ar_col="AR_percent",
+        cpd_type_col="cpd_type",
+        cpd_col="cpd_id",
+    )
+
 
     # Enrich Fisher results with chemistry metadata (one row per cpd_id)
     chem_cols = [
