@@ -3346,6 +3346,34 @@ def main() -> None:
         cpd_col="cpd_id",
     )
 
+    # ---------------------------------------------------------
+    # Per-compound boxplots (one PNG per compound)
+    # ---------------------------------------------------------
+
+    single_cpd_dir = output_dir / "boxplots_per_compound"
+    single_cpd_dir.mkdir(exist_ok=True)
+
+    df_plot = df_well_qc[df_well_qc["qc_keep"]].rename(
+        columns={"AR_pct_well": "AR_percent"}
+    )
+
+    for cpd in top20_cpds:
+        out_path = single_cpd_dir / f"boxplot_{cpd}.png"
+
+        # Subset for this single compound + DMSO
+        local_df = df_plot[
+            (df_plot["cpd_type"].isin(["DMSO", "TEST"])) &
+            (df_plot["cpd_id"] == cpd)
+        ]
+
+        plot_inducer_boxplot_per_compound(
+            df=local_df,
+            output_path=out_path,
+            ar_col="AR_percent",
+            cpd_type_col="cpd_type",
+            cpd_col="cpd_id",
+        )
+
 
     # Enrich Fisher results with chemistry metadata (one row per cpd_id)
     chem_cols = [
