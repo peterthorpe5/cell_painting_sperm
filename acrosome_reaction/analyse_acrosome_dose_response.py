@@ -699,9 +699,26 @@ def load_compound_metadata(
         if old in df.columns:
             df.rename(columns={old: new}, inplace=True)
 
-    # Ensure plate_id is string
+
+    # ---------------------------------------------------------
+    # NORMALISE plate_id (remove suffixes like '_15082024')
+    # ---------------------------------------------------------
     if "plate_id" in df.columns:
-        df["plate_id"] = df["plate_id"].astype(str)
+        if df["plate_id"].astype(str).str.contains("_").any():
+            before_vals = df["plate_id"].unique()[:10]
+
+            df["plate_id"] = df["plate_id"].astype(str).str.split("_").str[0]
+
+            after_vals = df["plate_id"].unique()[:10]
+
+            LOGGER.warning(
+                "Plate IDs in library metadata contained suffixes. They were normalised.\n"
+                "Examples before: %s\n"
+                "Examples after : %s",
+                before_vals,
+                after_vals,
+            )
+
 
     return df
 
@@ -1427,12 +1444,38 @@ def run_fisher_per_compound_dose(
         AR_pct_compound = (total_AR_compound / total_cells_compound) * 100.0
         delta_AR_pct = AR_pct_compound - AR_pct_dmso
 
+        # ----------------------------------------------------------------------
+        # SAFE CONTINGENCY TABLE CONSTRUCTION
+        # ----------------------------------------------------------------------
         table = np.array(
             [
                 [total_AR_compound, total_cells_compound - total_AR_compound],
                 [total_AR_dmso, total_cells_dmso - total_AR_dmso],
-            ]
+            ],
+            dtype=float,
         )
+
+        # 1) Clip negative values
+        if (table < 0).any():
+            LOGGER.warning(
+                "Negative values detected in contingency table for cpd_id=%s, conc=%s; "
+                "clipping negatives to zero.",
+                cpd_id,
+                conc,
+            )
+            table = np.clip(table, 0, None)
+
+        # 2) Skip tables with no signal
+        if table.sum() == 0:
+            LOGGER.warning(
+                "Skipping Fisher test for cpd_id=%s, conc=%s; contingency table is all zeros.",
+                cpd_id,
+                conc,
+            )
+            continue
+
+        # 3) Fisher test
+
 
         odds_ratio, p_value = fisher_exact(table, alternative="two-sided")
         p_vals.append(p_value)
@@ -1457,8 +1500,23 @@ def run_fisher_per_compound_dose(
         )
 
     results_df = pd.DataFrame(results)
+
     if results_df.empty:
-        raise ValueError("No compound–dose combinations to test.")
+        LOGGER.warning(
+            "No compound–dose combinations to test. "
+            "This is expected for single-replicate or single-dose datasets."
+        )
+        # Return an empty but valid table so downstream code does not crash
+        return pd.DataFrame(
+            columns=[
+                "plate_id", "cpd_id", "conc", "cpd_type", "n_wells",
+                "total_cells_compound", "total_AR_compound",
+                "AR_pct_compound", "total_cells_dmso", "total_AR_dmso",
+                "AR_pct_dmso", "delta_AR_pct", "odds_ratio",
+                "p_value", "q_value"
+            ]
+        )
+
 
     q_vals = benjamini_hochberg(p_values=np.asarray(p_vals, dtype=float))
     results_df["q_value"] = q_vals
@@ -1726,6 +1784,102 @@ def qc_section_html(
 
 
 def plot_inducer_boxplot_per_compound(
+    *,
+    df: pd.DataFrame,
+    output_path: Path,
+    ar_col: str = "AR_percent",
+    cpd_type_col: str = "cpd_type",
+    cpd_col: str = "cpd_id",
+):
+    """
+    Create a box plot comparing AR% for each compound vs DMSO without
+    producing gigantic figures. Automatically caps the figure width and
+    switches to rotated, compact labels.
+    """
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    df_dmso = df[df[cpd_type_col] == "DMSO"].copy()
+    df_ind = df[df[cpd_type_col] == "TEST"].copy()
+
+    if df_dmso.empty or df_ind.empty:
+        LOGGER.warning(
+            "Cannot create compound-wise inducer boxplot: missing DMSO or TEST wells."
+        )
+        return
+
+    # Unique compounds
+    unique_cpds = (
+        df_ind[cpd_col]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    unique_cpds = [c for c in unique_cpds if c.lower() not in {"nan", "none", ""}]
+    unique_cpds = sorted(unique_cpds)
+
+    groups = ["DMSO"] + unique_cpds
+    data = [df_dmso[ar_col].dropna().values]
+    for cpd in unique_cpds:
+        data.append(df_ind[df_ind[cpd_col] == cpd][ar_col].dropna().values)
+
+    num_groups = len(groups)
+
+    # -----------------------------------------------------------------
+    # SAFETY FIX: cap width to max 40 inches (≈4800 px at 120 dpi)
+    # -----------------------------------------------------------------
+    max_width_inches = 40.0
+    width_per_group = 0.4  # smaller spacing to fit more
+    fig_width = min(max_width_inches, max(8.0, num_groups * width_per_group))
+
+    fig, ax = plt.subplots(figsize=(fig_width, 6))
+
+    bp = ax.boxplot(
+        data,
+        labels=groups,
+        patch_artist=True,
+        showfliers=False,
+        widths=0.3,
+    )
+
+    colours = ["lightgrey"] + ["skyblue"] * (len(groups) - 1)
+    for patch, colour in zip(bp["boxes"], colours):
+        patch.set_facecolor(colour)
+        patch.set_alpha(0.7)
+
+    # Jitter points
+    rng = np.random.default_rng(seed=42)
+    for i, values in enumerate(data, start=1):
+        x_jitter = rng.normal(loc=i, scale=0.04, size=len(values))
+        ax.scatter(
+            x_jitter,
+            values,
+            alpha=0.5,
+            s=18,
+            edgecolor="black",
+            linewidth=0.3,
+        )
+
+    ax.set_ylabel("AR percentage")
+    ax.set_title("Compound-wise AR Inducers Compared with DMSO")
+
+    # SAFETY FIX: rotate labels to avoid huge horizontal size
+    plt.xticks(rotation=90)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+
+    LOGGER.info(
+        "Saved safe-size compound-wise inducer boxplot to %s (groups=%d)",
+        output_path,
+        num_groups,
+    )
+
+
+def plot_inducer_boxplot_per_compound_OLD(
     *,
     df: pd.DataFrame,
     output_path: Path,
@@ -2983,6 +3137,20 @@ def main() -> None:
         ar_count_col=args.image_ar_count_col,
     )
 
+    # Normalise plate_id suffixes (e.g. 24AP3815_15082024 → 24AP3815)
+    if df_image["plate_id"].astype(str).str.contains("_").any():
+        before = df_image["plate_id"].unique()[:10]
+        df_image["plate_id"] = df_image["plate_id"].astype(str).str.split("_").str[0]
+        after = df_image["plate_id"].unique()[:10]
+        LOGGER.warning(
+            "Plate IDs in the Image table contained suffixes and were normalised.\n"
+            "Example before: %s\n"
+            "Example after : %s",
+            before,
+            after,
+        )
+
+
     # Optional: load object-level acrosome table
     acrosome_path = cp_files["acrosome"]
 
@@ -3038,6 +3206,7 @@ def main() -> None:
 
     inducer_per_cpd_boxplot_png = Path(args.output_dir) / "inducer_boxplot_per_compound.png"
 
+ 
     plot_inducer_boxplot_per_compound(
         df=df_well_qc[df_well_qc["qc_keep"]].rename(columns={"AR_pct_well": "AR_percent"}),
         output_path=inducer_per_cpd_boxplot_png,
