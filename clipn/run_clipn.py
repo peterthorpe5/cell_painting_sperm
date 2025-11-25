@@ -3651,6 +3651,68 @@ def main(args: argparse.Namespace) -> None:
             return
 
 
+    # =========================
+
+    # =====================================================================
+    # Export final preprocessed table BEFORE label encoding
+    # =====================================================================
+    try:
+        logger.info("Preparing final preprocessed  table for export.")
+
+        # df_scaled_all contains the harmonised, filtered, features
+        df_export = df_scaled_all.copy()
+
+        # Ensure cpd_id is string
+        if "cpd_id" in df_export.columns:
+            df_export["cpd_id"] = df_export["cpd_id"].astype("string")
+
+        # Metadata columns to preserve
+        metadata_cols = [
+            c for c in df_export.columns
+            if c.lower() in (
+                "cpd_id",
+                "cpd_type",
+                "plate_metadata",
+                "well_metadata",
+                "library",
+                "sample",
+                "dataset",
+                "plate",
+                "well",
+                "row",
+                "col"
+            )
+        ]
+
+        # Numeric feature columns
+        feature_cols = [
+            c for c in df_export.columns
+            if c not in metadata_cols and p.api.types.is_numeric_dtype(df_export[c])
+        ]
+
+        logger.info(
+            f"Detected {len(feature_cols)} numeric feature columns and "
+            f"{len(metadata_cols)} metadata columns for final export."
+        )
+
+        # Arrange columns nicely: metadata first, then features
+        df_export = df_export[metadata_cols + feature_cols]
+
+        # Output file path
+        out_path = Path(args.out) / "final_preprocessed_features.tsv.gz"
+
+        df_export.to_csv(
+            out_path,
+            sep="\t",
+            index=False,
+            compression="gzip"
+        )
+
+        logger.info(f"Wrote final preprocessed feature table (per well) to: {out_path}")
+
+    except Exception as exc:
+        logger.error(f"Failed to export final preprocessed features: {exc}")
+
 
     # Encode labels (cpd_id is explicitly not encoded)
     logger.info("Encoding categorical labels for CLIPn compatibility")
