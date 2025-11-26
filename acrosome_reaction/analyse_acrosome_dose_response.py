@@ -2645,38 +2645,47 @@ def plot_top_delta_barplot(
 def plot_dose_response_examples(
     *,
     fisher_df: pd.DataFrame,
+    per_well_df: pd.DataFrame,
     drc_df: pd.DataFrame,
     output_dir: Path,
     max_compounds: int = 60,
 ) -> List[Path]:
     """
-    Plot dose–response curves for selected compounds, including DMSO
-    baseline shading, significant dose markers, and model diagnostics.
+    Plot dose–response curves for selected compounds, including:
+    - DMSO baseline and IQR shading
+    - significant dose markers
+    - correct 4PL curve using EC50, not log10(EC50)
+    - R² goodness-of-fit
+    - log-spaced x-values
+    - concentration labels on the x-axis
 
-    Compounds are selected from successful dose–response fits, ordered by
-    smallest EC50 (most potent), up to `max_compounds` entries.
+    Compounds are selected from successful dose–response fits,
+    ordered by smallest EC50, up to `max_compounds`.
 
     Parameters
     ----------
     fisher_df : pandas.DataFrame
         Per-compound–dose Fisher results (post-QC).
+    per_well_df : pandas.DataFrame
+        Per-well AR% values (post-QC), used for DMSO baseline.
     drc_df : pandas.DataFrame
-        Per-compound dose–response fit summary.
+        Summary of dose–response fits.
     output_dir : pathlib.Path
-        Directory in which to save PNG plots.
+        Directory to save PNG output.
     max_compounds : int, optional
         Maximum number of compounds to plot.
 
     Returns
     -------
     list of pathlib.Path
-        Paths to the generated PNG files.
+        Paths to saved PNG plots.
     """
 
     if drc_df.empty:
-        LOGGER.info("No successful dose–response fits; skipping DRC plots.")
+        LOGGER.info("No successful dose–response fits; skipping.")
         return []
 
+    # Filter to successful fits with valid EC50
     subset = drc_df[drc_df["fit_success"]].dropna(subset=["ec50"])
     subset = subset.sort_values("ec50").head(max_compounds)
 
@@ -2685,48 +2694,44 @@ def plot_dose_response_examples(
         return []
 
     # ------------------------------------------------------------------
-    # Precompute DMSO baseline statistics
+    # Compute DMSO baseline statistics from per-well QC data
     # ------------------------------------------------------------------
-    dmso = fisher_df[fisher_df["cpd_type"] == "DMSO"]["AR_pct_compound"]
-    dmso_median = dmso.median()
-    dmso_q1 = dmso.quantile(0.25)
-    dmso_q3 = dmso.quantile(0.75)
+    dmso_wells = per_well_df[per_well_df["cpd_type"] == "DMSO"]["AR_pct_well"]
+    dmso_median = dmso_wells.median()
+    dmso_q1 = dmso_wells.quantile(0.25)
+    dmso_q3 = dmso_wells.quantile(0.75)
 
     paths: List[Path] = []
 
+    # ------------------------------------------------------------------
+    # Loop over compounds
+    # ------------------------------------------------------------------
     for _, row in subset.iterrows():
         cpd_id = row["cpd_id"]
 
-        # Extract compound rows
         g = fisher_df[fisher_df["cpd_id"] == cpd_id].copy()
-        g = g[g["conc"] > 0].sort_values("conc")
-
+        g = g[g["conc"] > 0].sort_values("conc")   # Remove DMSO points
         if g.empty:
             continue
 
         conc = g["conc"].astype(float).values
         resp = g["AR_pct_compound"].astype(float).values
 
-        # Extract stored 4PL parameters
-        bottom = row["bottom"]
-        top = row["top"]
-        ec50 = float(row["ec50"])
-        hill = row["hill"]
+        # Retrieve 4PL parameters
+        bottom = float(row["bottom"])
+        top = float(row["top"])
+        hill = float(row["hill"])
+        ec50 = float(row["ec50"])          # Already stored as linear EC50
 
         # ------------------------------------------------------------------
-        # Generate smooth log-spaced x-values
+        # Log-spaced x-range for smooth sigmoid curve
         # ------------------------------------------------------------------
-        x_plot = np.logspace(
-            np.log10(conc.min()),
-            np.log10(conc.max()),
-            400
-        )
+        x_plot = np.logspace(np.log10(conc.min()), np.log10(conc.max()), 400)
 
-        # Compute fitted y-values
         y_fit = four_param_logistic(x_plot, bottom, top, ec50, hill)
 
         # ------------------------------------------------------------------
-        # Compute R² goodness-of-fit
+        # R² goodness-of-fit
         # ------------------------------------------------------------------
         y_pred_obs = four_param_logistic(conc, bottom, top, ec50, hill)
         ss_res = np.sum((resp - y_pred_obs) ** 2)
@@ -2738,54 +2743,43 @@ def plot_dose_response_examples(
         # ------------------------------------------------------------------
         fig, ax = plt.subplots(figsize=(6, 4))
 
-        # DMSO IQR shading
+        # DMSO variability shading
         ax.axhspan(
             dmso_q1,
             dmso_q3,
             color="lightgrey",
-            alpha=0.3,
+            alpha=0.25,
             label="DMSO IQR"
         )
 
-        # DMSO baseline
+        # DMSO median baseline
         ax.axhline(
             dmso_median,
             color="grey",
             linestyle="--",
-            linewidth=1.5,
-            alpha=0.9,
+            linewidth=1.2,
             label=f"DMSO median ({dmso_median:.1f}%)"
         )
 
-        # ------------------------------------------------------------------
-        # Scatter observed points
-        # ------------------------------------------------------------------
-        ax.scatter(
-            conc,
-            resp,
-            s=35,
-            alpha=0.9,
-            label="Observed"
-        )
+        # Observed data points
+        ax.scatter(conc, resp, s=35, alpha=0.9, label="Observed")
 
         # ------------------------------------------------------------------
-        # Highlight significant doses
+        # Mark significant increases
         # ------------------------------------------------------------------
         sig_mask = (g["delta_AR_pct"] > 0) & (g["q_value"] < 0.05)
         if sig_mask.any():
             ax.scatter(
                 g.loc[sig_mask, "conc"],
                 g.loc[sig_mask, "AR_pct_compound"],
-                s=90,
+                s=95,
                 facecolor="none",
                 edgecolor="red",
-                linewidth=1.6,
+                linewidth=1.7,
                 label="Significant increase (q<0.05)"
             )
 
-        # ------------------------------------------------------------------
-        # Plot fitted curve
-        # ------------------------------------------------------------------
+        # 4PL fit line
         ax.plot(
             x_plot,
             y_fit,
@@ -2794,18 +2788,15 @@ def plot_dose_response_examples(
             label="4PL fit"
         )
 
-        # ------------------------------------------------------------------
         # Axis formatting
-        # ------------------------------------------------------------------
         ax.set_xscale("log")
         ax.set_xlabel("Concentration")
         ax.set_ylabel("AR%")
 
-        # Optional: dose labels (log scale-friendly)
+        # Tick labels for real doses
         ax.set_xticks(conc)
         ax.set_xticklabels([f"{c:g}" for c in conc], rotation=45)
 
-        # Title includes EC50, effect magnitude, and R²
         ax.set_title(
             f"{cpd_id} – EC50={ec50:.3g}, "
             f"max ΔAR={row['max_delta_AR_pct']:.1f}%, "
@@ -2815,18 +2806,14 @@ def plot_dose_response_examples(
         ax.legend(loc="best", fontsize=8)
         fig.tight_layout()
 
-        # ------------------------------------------------------------------
-        # Save output
-        # ------------------------------------------------------------------
         out_path = output_dir / f"drc_{cpd_id}.png"
         fig.savefig(out_path, dpi=300)
         plt.close(fig)
 
         paths.append(out_path)
-        LOGGER.info("Saved DRC plot for %s to '%s'", cpd_id, out_path)
+        LOGGER.info("Saved dose–response plot for %s to '%s'", cpd_id, out_path)
 
     return paths
-
 
 
 def qc_summary_for_metadata(*, df_meta: pd.DataFrame) -> None:
