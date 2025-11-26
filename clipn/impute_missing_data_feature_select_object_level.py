@@ -178,7 +178,8 @@ from cell_painting.process_data import (
 _script_start_time = time.time()
 
 IMAGE_GLOB_PATTERNS = ("*Image.csv.gz", "*_Image.csv.gz", "*Image.csv", "*_Image.csv")
-EXCLUDE_PAT = re.compile(r"(?i)(image|normalis(e|ed)|NOT_USED)")  # exclude in object discovery
+EXCLUDE_PAT = re.compile(r"(?i)(image|normalis(e|ed)|NOT_USED|mask)") # exclude in object discovery
+
 
 
 def parse_args():
