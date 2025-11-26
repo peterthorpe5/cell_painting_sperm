@@ -1862,9 +1862,9 @@ def plot_inducer_boxplot_per_compound(
         widths=0.3,
     )
 
-    colours = ["lightgrey"] + ["skyblue"] * (len(groups) - 1)
-    for patch, colour in zip(bp["boxes"], colours):
-        patch.set_facecolor(colour)
+    colors = ["lightgrey"] + ["skyblue"] * (len(groups) - 1)
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
     # Jitter points
@@ -1969,10 +1969,10 @@ def plot_inducer_boxplot_per_compound_OLD(
         widths=0.5,
     )
 
-    # Colours
-    colours = ["lightgrey"] + ["skyblue"] * (len(groups) - 1)
-    for patch, colour in zip(bp["boxes"], colours):
-        patch.set_facecolor(colour)
+    # colors
+    colors = ["lightgrey"] + ["skyblue"] * (len(groups) - 1)
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
     # Overlay points with jitter
@@ -2054,9 +2054,9 @@ def plot_inducer_boxplot(
         widths=0.5,
     )
 
-    # Colour boxes
-    for patch, colour in zip(bp["boxes"], ["lightgrey", "skyblue"]):
-        patch.set_facecolor(colour)
+    # color boxes
+    for patch, color in zip(bp["boxes"], ["lightgrey", "skyblue"]):
+        patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
     # Jittered scatter points
@@ -2742,7 +2742,7 @@ def plot_dose_response_examples(
         ax.axhspan(
             dmso_q1,
             dmso_q3,
-            colour="lightgrey",
+            color="lightgrey",
             alpha=0.3,
             label="DMSO IQR"
         )
@@ -2750,7 +2750,7 @@ def plot_dose_response_examples(
         # DMSO baseline
         ax.axhline(
             dmso_median,
-            colour="grey",
+            color="grey",
             linestyle="--",
             linewidth=1.5,
             alpha=0.9,
@@ -2777,8 +2777,8 @@ def plot_dose_response_examples(
                 g.loc[sig_mask, "conc"],
                 g.loc[sig_mask, "AR_pct_compound"],
                 s=90,
-                facecolour="none",
-                edgecolour="red",
+                facecolor="none",
+                edgecolor="red",
                 linewidth=1.6,
                 label="Significant increase (q<0.05)"
             )
@@ -2790,7 +2790,7 @@ def plot_dose_response_examples(
             x_plot,
             y_fit,
             linewidth=1.5,
-            colour="blue",
+            color="blue",
             label="4PL fit"
         )
 
