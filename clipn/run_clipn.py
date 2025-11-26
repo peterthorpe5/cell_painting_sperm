@@ -4365,7 +4365,7 @@ if __name__ == "__main__":
         help="Distance metric for diagnostics.",
     )
 
-    parser.add_argument("--variance_threshold", type=float, default=0.001,
+    parser.add_argument("--variance_threshold", type=float, default=0.01,
                 help="Keep features with population variance strictly greater than this value.")
     parser.add_argument("--variance_pdf", type=str, default=None,
                 help="Path to write linear-scale variance diagnostics PDF.")
