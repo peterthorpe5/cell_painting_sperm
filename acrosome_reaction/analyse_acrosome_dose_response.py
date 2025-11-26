@@ -3597,6 +3597,7 @@ def main() -> None:
     if args.fit_dose_response and drc_df is not None:
         drc_pngs = plot_dose_response_examples(
             fisher_df=fisher_df,
+            per_well_df=per_well_df,
             drc_df=drc_df,
             output_dir=output_dir,
             max_compounds=60,
