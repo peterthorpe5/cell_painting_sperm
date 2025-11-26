@@ -2651,122 +2651,102 @@ def plot_dose_response_examples(
     max_compounds: int = 60,
 ) -> List[Path]:
     """
-    Plot dose–response curves for selected compounds, including:
-    - DMSO baseline and IQR shading
-    - significant dose markers
-    - correct 4PL curve using EC50, not log10(EC50)
-    - R² goodness-of-fit
-    - log-spaced x-values
-    - concentration labels on the x-axis
+    Plot dose–response curves for compounds with successful 4PL fits.
 
-    Compounds are selected from successful dose–response fits,
-    ordered by smallest EC50, up to `max_compounds`.
+    The plot includes:
+    - DMSO IQR shading
+    - DMSO median line
+    - Observed points
+    - Significant dose markers (q < 0.05, ΔAR% > 0)
+    - Correct 4PL dose–response curve
+    - R² goodness-of-fit
+    - Log-spaced x-axis
+    - Dose labels shown on the x-axis
 
     Parameters
     ----------
     fisher_df : pandas.DataFrame
-        Per-compound–dose Fisher results (post-QC).
+        Per compound–dose Fisher results.
     per_well_df : pandas.DataFrame
-        Per-well AR% values (post-QC), used for DMSO baseline.
+        Per-well table after QC; used to compute DMSO baseline statistics.
     drc_df : pandas.DataFrame
-        Summary of dose–response fits.
+        Dose–response summary table with EC50 and 4PL parameters.
     output_dir : pathlib.Path
-        Directory to save PNG output.
+        Directory where PNG files are saved.
     max_compounds : int, optional
         Maximum number of compounds to plot.
 
     Returns
     -------
     list of pathlib.Path
-        Paths to saved PNG plots.
+        Paths to exported PNG plots.
     """
 
     if drc_df.empty:
-        LOGGER.info("No successful dose–response fits; skipping.")
+        LOGGER.info("No dose–response fits available; skipping DRC plotting.")
         return []
 
-    # Filter to successful fits with valid EC50
-    subset = drc_df[drc_df["fit_success"]].dropna(subset=["ec50"])
-    subset = subset.sort_values("ec50").head(max_compounds)
+    # Keep only successful fits with finite EC50
+    df_fit = drc_df[drc_df["fit_success"]].dropna(subset=["ec50"])
+    df_fit = df_fit.sort_values("ec50").head(max_compounds)
 
-    if subset.empty:
-        LOGGER.info("No compounds with finite EC50 for DRC plotting.")
+    if df_fit.empty:
+        LOGGER.info("No valid EC50 values found; no DRC plots generated.")
         return []
 
-    # ------------------------------------------------------------------
-    # Compute DMSO baseline statistics from per-well QC data
-    # ------------------------------------------------------------------
-    dmso_wells = per_well_df[per_well_df["cpd_type"] == "DMSO"]["AR_pct_well"]
-    dmso_median = dmso_wells.median()
-    dmso_q1 = dmso_wells.quantile(0.25)
-    dmso_q3 = dmso_wells.quantile(0.75)
+    # DMSO baseline statistics
+    dmso_vals = per_well_df.loc[
+        per_well_df["cpd_type"] == "DMSO", "AR_pct_well"
+    ]
+
+    dmso_median = dmso_vals.median()
+    dmso_q1 = dmso_vals.quantile(0.25)
+    dmso_q3 = dmso_vals.quantile(0.75)
 
     paths: List[Path] = []
 
-    # ------------------------------------------------------------------
-    # Loop over compounds
-    # ------------------------------------------------------------------
-    for _, row in subset.iterrows():
+    for _, row in df_fit.iterrows():
         cpd_id = row["cpd_id"]
 
         g = fisher_df[fisher_df["cpd_id"] == cpd_id].copy()
-        g = g[g["conc"] > 0].sort_values("conc")   # Remove DMSO points
+        g = g[g["conc"] > 0].sort_values("conc")   # remove DMSO
         if g.empty:
             continue
 
         conc = g["conc"].astype(float).values
         resp = g["AR_pct_compound"].astype(float).values
 
-        # Retrieve 4PL parameters
+        # 4PL parameters
         bottom = float(row["bottom"])
         top = float(row["top"])
         hill = float(row["hill"])
-        ec50 = float(row["ec50"])          # Already stored as linear EC50
+        ec50 = float(row["ec50"])
 
-        # ------------------------------------------------------------------
-        # Log-spaced x-range for smooth sigmoid curve
-        # ------------------------------------------------------------------
+        # Log-spaced curve x-axis
         x_plot = np.logspace(np.log10(conc.min()), np.log10(conc.max()), 400)
+        y_fit_curve = four_param_logistic(x_plot, bottom, top, ec50, hill)
 
-        y_fit = four_param_logistic(x_plot, bottom, top, ec50, hill)
-
-        # ------------------------------------------------------------------
-        # R² goodness-of-fit
-        # ------------------------------------------------------------------
-        y_pred_obs = four_param_logistic(conc, bottom, top, ec50, hill)
-        ss_res = np.sum((resp - y_pred_obs) ** 2)
+        # R² calculation
+        y_pred = four_param_logistic(conc, bottom, top, ec50, hill)
+        ss_res = np.sum((resp - y_pred) ** 2)
         ss_tot = np.sum((resp - np.mean(resp)) ** 2)
-        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
-        # ------------------------------------------------------------------
-        # Prepare figure
-        # ------------------------------------------------------------------
+        # Begin plot
         fig, ax = plt.subplots(figsize=(6, 4))
 
-        # DMSO variability shading
-        ax.axhspan(
-            dmso_q1,
-            dmso_q3,
-            color="lightgrey",
-            alpha=0.25,
-            label="DMSO IQR"
-        )
+        # DMSO IQR shading
+        ax.axhspan(dmso_q1, dmso_q3, color="lightgrey", alpha=0.25,
+                   label="DMSO IQR")
 
-        # DMSO median baseline
-        ax.axhline(
-            dmso_median,
-            color="grey",
-            linestyle="--",
-            linewidth=1.2,
-            label=f"DMSO median ({dmso_median:.1f}%)"
-        )
+        # DMSO median
+        ax.axhline(dmso_median, linestyle="--", linewidth=1.2, color="grey",
+                   label=f"DMSO median ({dmso_median:.1f}%)")
 
-        # Observed data points
+        # Observed points
         ax.scatter(conc, resp, s=35, alpha=0.9, label="Observed")
 
-        # ------------------------------------------------------------------
         # Mark significant increases
-        # ------------------------------------------------------------------
         sig_mask = (g["delta_AR_pct"] > 0) & (g["q_value"] < 0.05)
         if sig_mask.any():
             ax.scatter(
@@ -2776,24 +2756,18 @@ def plot_dose_response_examples(
                 facecolor="none",
                 edgecolor="red",
                 linewidth=1.7,
-                label="Significant increase (q<0.05)"
+                label="Significant increase (q < 0.05)",
             )
 
-        # 4PL fit line
-        ax.plot(
-            x_plot,
-            y_fit,
-            linewidth=1.5,
-            color="blue",
-            label="4PL fit"
-        )
+        # 4PL curve
+        ax.plot(x_plot, y_fit_curve, linewidth=1.5, color="blue", label="4PL fit")
 
         # Axis formatting
         ax.set_xscale("log")
         ax.set_xlabel("Concentration")
         ax.set_ylabel("AR%")
 
-        # Tick labels for real doses
+        # Label true dose points
         ax.set_xticks(conc)
         ax.set_xticklabels([f"{c:g}" for c in conc], rotation=45)
 
@@ -2811,7 +2785,7 @@ def plot_dose_response_examples(
         plt.close(fig)
 
         paths.append(out_path)
-        LOGGER.info("Saved dose–response plot for %s to '%s'", cpd_id, out_path)
+        LOGGER.info("Saved DRC plot for %s → %s", cpd_id, out_path)
 
     return paths
 
@@ -3597,7 +3571,7 @@ def main() -> None:
     if args.fit_dose_response and drc_df is not None:
         drc_pngs = plot_dose_response_examples(
             fisher_df=fisher_df,
-            per_well_df=per_well_df,
+            per_well_df=df_well_qc,
             drc_df=drc_df,
             output_dir=output_dir,
             max_compounds=60,
