@@ -1552,35 +1552,34 @@ def run_fisher_per_compound_dose(
 
 
 def four_param_logistic(
-    conc: np.ndarray,
+    xlog: np.ndarray,
     bottom: float,
     top: float,
     log_ec50: float,
     hill: float,
 ) -> np.ndarray:
     """
-    Four-parameter logistic function on log10 concentration.
+    Four-parameter logistic (4PL) response model evaluated on log10 doses.
 
     Parameters
     ----------
-    conc : numpy.ndarray
-        Concentrations (strictly positive).
+    xlog : numpy.ndarray
+        log10-transformed concentrations.
     bottom : float
-        Response at very low concentration.
+        Response at very low dose.
     top : float
-        Response at very high concentration.
+        Response at very high dose.
     log_ec50 : float
-        log10(EC50).
+        log10(EC50) parameter.
     hill : float
-        Hill slope (steepness).
+        Hill slope controlling curve steepness.
 
     Returns
     -------
     numpy.ndarray
-        Response values at the given concentrations.
+        Predicted responses on the original AR% scale.
     """
-    x = np.log10(conc)
-    return bottom + (top - bottom) / (1.0 + 10.0 ** ((log_ec50 - x) * hill))
+    return bottom + (top - bottom) / (1.0 + 10.0 ** ((log_ec50 - xlog) * hill))
 
 
 def fit_dose_response_per_compound(
@@ -1589,76 +1588,100 @@ def fit_dose_response_per_compound(
     min_points: int,
 ) -> pd.DataFrame:
     """
-    Fit four-parameter logistic curves per compound and estimate EC50.
+    Fit four-parameter logistic (4PL) dose–response curves for every compound.
 
-    Fits are based on Fisher results aggregated by compound–dose. The
-    response is AR_pct_compound; the DMSO AR% is used as an approximate
-    baseline and informs initial parameter guesses.
+    This unified fitter supports both increasing (inducing) and decreasing
+    (suppressing) sigmoidal curves. For suppressors, the top and bottom
+    parameters are reversed and the Hill slope is expected to be negative.
+
+    If a 4PL fit fails (non-convergence, impossible parameter ordering or
+    insufficient dynamic range), a failed-fit record is returned with
+    fit_category set to 'failed'. Neutral compounds (low dynamic range)
+    are assigned fit_category='neutral'.
 
     Parameters
     ----------
     fisher_df : pandas.DataFrame
-        Per-compound–dose Fisher results.
+        Per-compound–dose summary table (AR_pct_compound for each dose).
     min_points : int
-        Minimum number of distinct doses required to attempt a fit.
+        Minimum number of distinct dose levels required to attempt fitting.
 
     Returns
     -------
     pandas.DataFrame
-        One row per compound with:
+        Fit summary with one row per compound containing:
         - cpd_id
         - n_doses
-        - ec50
-        - log10_ec50
+        - bottom, top
         - hill
-        - bottom
-        - top
-        - max_delta_AR_pct
+        - log10_ec50, ec50
+        - dynamic_range
+        - r2
         - fit_success (bool)
+        - fit_category ('inducer', 'suppressor', 'neutral', 'failed')
+        - fail_reason (if any)
     """
-    LOGGER.info(
-        "Fitting four-parameter logistic curves for compounds with at least "
-        "%d distinct doses.",
-        min_points,
-    )
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     records: List[Dict[str, object]] = []
 
     for cpd_id, group in fisher_df.groupby("cpd_id"):
         g = group.copy()
         g = g[g["conc"] > 0].sort_values("conc")
-        if g["conc"].nunique() < min_points:
-            LOGGER.debug(
-                "Skipping compound %s: insufficient distinct dose levels (%d).",
-                cpd_id,
-                g["conc"].nunique(),
-            )
+
+        unique_doses = g["conc"].nunique()
+        if unique_doses < min_points:
+            records.append({
+                "cpd_id": cpd_id,
+                "n_doses": unique_doses,
+                "bottom": np.nan,
+                "top": np.nan,
+                "hill": np.nan,
+                "log10_ec50": np.nan,
+                "ec50": np.nan,
+                "dynamic_range": np.nan,
+                "r2": np.nan,
+                "fit_success": False,
+                "fit_category": "failed",
+                "fail_reason": "insufficient doses"
+            })
             continue
 
         conc = g["conc"].values.astype(float)
         resp = g["AR_pct_compound"].values.astype(float)
 
-        dmso_level = float(g["AR_pct_dmso"].iloc[0])
-        bottom0 = dmso_level
-        top0 = float(resp.max())
-        if math.isclose(top0, bottom0):
-            top0 = bottom0 + 5.0
+        # Determine direction: positive effect (inducer) or negative (suppressor)
+        direction = np.sign(resp[-1] - resp[0])
+        is_increasing = direction >= 0
+
+        # Initial parameters depend on direction
+        if is_increasing:
+            bottom0 = float(resp.min())
+            top0 = float(resp.max())
+            hill0 = 1.0
+        else:
+            bottom0 = float(resp.max())
+            top0 = float(resp.min())
+            hill0 = -1.0
+
+        # Initial EC50 guess: median log-concentration
         log_ec50_0 = float(np.median(np.log10(conc)))
-        hill0 = 1.0
 
         p0 = [bottom0, top0, log_ec50_0, hill0]
+
+        # Allow both positive and negative slopes
         bounds = (
-            [0.0, 0.0, -12.0, 0.1],
+            [0.0, 0.0, -12.0, -5.0],   # bottom, top, logEC50, hill
             [100.0, 100.0, 2.0, 5.0],
         )
 
         fit_success = False
-        ec50 = np.nan
-        log_ec50 = np.nan
-        hill = np.nan
-        bottom = np.nan
-        top = np.nan
+        fail_reason = None
+        bottom = top = hill = log_ec50 = ec50 = np.nan
+        r2 = np.nan
 
+        # Attempt the fitted model
         try:
             params, _ = curve_fit(
                 four_param_logistic,
@@ -1666,35 +1689,67 @@ def fit_dose_response_per_compound(
                 resp,
                 p0=p0,
                 bounds=bounds,
-                maxfev=10000,
+                maxfev=20000,
             )
             bottom, top, log_ec50, hill = params
             ec50 = 10.0 ** log_ec50
             fit_success = True
         except Exception as err:  # noqa: BLE001
-            LOGGER.debug("Dose–response fit failed for %s: %s", cpd_id, err)
+            fit_success = False
+            fail_reason = f"curve_fit failure: {err}"
 
-        max_delta = float((resp - dmso_level).max())
+        # Compute dynamic range
+        dynamic_range = abs(top - bottom)
+
+        # Compute R-squared if fit succeeded
+        if fit_success:
+            y_pred = four_param_logistic(conc, bottom, top, log_ec50, hill)
+            ss_res = float(np.sum((resp - y_pred) ** 2))
+            ss_tot = float(np.sum((resp - resp.mean()) ** 2))
+            r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+
+        # Categorise fits
+        if not fit_success:
+            fit_category = "failed"
+            if fail_reason is None:
+                fail_reason = "curve_fit failure"
+        else:
+            if dynamic_range < 3.0:
+                fit_category = "neutral"
+                fail_reason = "dynamic range < 3"
+                fit_success = False
+            else:
+                if hill > 0 and top > bottom:
+                    fit_category = "inducer"
+                elif hill < 0 and bottom > top:
+                    fit_category = "suppressor"
+                else:
+                    fit_category = "neutral"
+                    fail_reason = "ambiguous direction"
+                    fit_success = False
 
         records.append(
             {
                 "cpd_id": cpd_id,
-                "n_doses": int(g["conc"].nunique()),
-                "ec50": ec50,
-                "log10_ec50": log_ec50,
-                "hill": hill,
+                "n_doses": unique_doses,
                 "bottom": bottom,
                 "top": top,
-                "max_delta_AR_pct": max_delta,
+                "hill": hill,
+                "log10_ec50": log_ec50,
+                "ec50": ec50,
+                "dynamic_range": dynamic_range,
+                "r2": r2,
                 "fit_success": bool(fit_success),
+                "fit_category": fit_category,
+                "fail_reason": fail_reason,
             }
         )
 
     drc_df = pd.DataFrame(records)
     LOGGER.info(
-        "Dose–response fitting attempted for %d compounds; %d fits succeeded.",
+        "4PL fitting completed: %d compounds, %d passed QC.",
         drc_df.shape[0],
-        drc_df["fit_success"].sum() if not drc_df.empty else 0,
+        drc_df["fit_success"].sum()
     )
     return drc_df
 
@@ -2645,149 +2700,139 @@ def plot_top_delta_barplot(
 def plot_dose_response_examples(
     *,
     fisher_df: pd.DataFrame,
-    per_well_df: pd.DataFrame,
     drc_df: pd.DataFrame,
+    per_well_df: pd.DataFrame,
     output_dir: Path,
-    max_compounds: int = 60,
 ) -> List[Path]:
     """
-    Plot dose–response curves for compounds with successful 4PL fits.
+    Plot dose–response curves for all compounds, including:
+    - increasing sigmoids (inducers)
+    - decreasing sigmoids (suppressors)
+    - neutral curves (flat or noisy)
+    - failed fits (fallback LOESS fit)
 
-    The plot includes:
-    - DMSO IQR shading
-    - DMSO median line
-    - Observed points
-    - Significant dose markers (q < 0.05, ΔAR% > 0)
-    - Correct 4PL dose–response curve
-    - R² goodness-of-fit
-    - Log-spaced x-axis
-    - Dose labels shown on the x-axis
+    Each compound is saved into its category folder:
+        plots/inducer/
+        plots/suppressor/
+        plots/neutral/
+        plots/failed/
 
     Parameters
     ----------
     fisher_df : pandas.DataFrame
-        Per compound–dose Fisher results.
-    per_well_df : pandas.DataFrame
-        Per-well table after QC; used to compute DMSO baseline statistics.
+        Per-dose Fisher results, including AR_pct_compound.
     drc_df : pandas.DataFrame
-        Dose–response summary table with EC50 and 4PL parameters.
-    output_dir : pathlib.Path
-        Directory where PNG files are saved.
-    max_compounds : int, optional
-        Maximum number of compounds to plot.
+        Dose–response fit summary (including fit_category).
+    per_well_df : pandas.DataFrame
+        Per-well table used to compute DMSO statistics.
+    output_dir : Path
+        Root output directory.
 
     Returns
     -------
-    list of pathlib.Path
-        Paths to exported PNG plots.
+    list of Path
+        Paths to the generated PNG files.
     """
+    from statsmodels.nonparametric.smoothers_lowess import lowess
 
-    if drc_df.empty:
-        LOGGER.info("No dose–response fits available; skipping DRC plotting.")
-        return []
+    plot_root = output_dir / "plots"
+    categories = ["inducer", "suppressor", "neutral", "failed"]
+    for cat in categories:
+        (plot_root / cat).mkdir(parents=True, exist_ok=True)
 
-    # Keep only successful fits with finite EC50
-    df_fit = drc_df[drc_df["fit_success"]].dropna(subset=["ec50"])
-    df_fit = df_fit.sort_values("ec50").head(max_compounds)
+    # Compute DMSO baseline from per-well data
+    if "AR_pct_compound" in per_well_df.columns:
+        dmso_df = per_well_df[per_well_df["cpd_type"] == "DMSO"]
+        dmso_values = dmso_df["AR_pct_compound"].astype(float)
+    else:
+        dmso_df = per_well_df[per_well_df["cpd_type"] == "DMSO"]
+        dmso_values = dmso_df["AR_pct"].astype(float)
 
-    if df_fit.empty:
-        LOGGER.info("No valid EC50 values found; no DRC plots generated.")
-        return []
+    dmso_median = float(dmso_values.median())
+    dmso_q1 = float(dmso_values.quantile(0.25))
+    dmso_q3 = float(dmso_values.quantile(0.75))
 
-    # DMSO baseline statistics
-    dmso_vals = per_well_df.loc[
-        per_well_df["cpd_type"] == "DMSO", "AR_pct_well"
-    ]
+    generated_paths: List[Path] = []
 
-    dmso_median = dmso_vals.median()
-    dmso_q1 = dmso_vals.quantile(0.25)
-    dmso_q3 = dmso_vals.quantile(0.75)
-
-    paths: List[Path] = []
-
-    for _, row in df_fit.iterrows():
+    for _, row in drc_df.iterrows():
         cpd_id = row["cpd_id"]
+        fit_category = row["fit_category"]
 
+        # Extract dose-level data
         g = fisher_df[fisher_df["cpd_id"] == cpd_id].copy()
-        g = g[g["conc"] > 0].sort_values("conc")   # remove DMSO
+        g = g[g["conc"] > 0].sort_values("conc")
         if g.empty:
             continue
 
-        conc = g["conc"].astype(float).values
-        resp = g["AR_pct_compound"].astype(float).values
+        conc = g["conc"].values.astype(float)
+        resp = g["AR_pct_compound"].values.astype(float)
 
-        # 4PL parameters
-        bottom = float(row["bottom"])
-        top = float(row["top"])
-        hill = float(row["hill"])
-        ec50 = float(row["ec50"])
+        # Where to save
+        cat_dir = plot_root / fit_category
+        out_path = cat_dir / f"drc_{cpd_id}.png"
 
-        # Log-spaced curve x-axis
-        x_plot = np.logspace(np.log10(conc.min()), np.log10(conc.max()), 400)
-        y_fit_curve = four_param_logistic(x_plot, bottom, top, ec50, hill)
-
-        # R² calculation
-        y_pred = four_param_logistic(conc, bottom, top, ec50, hill)
-        ss_res = np.sum((resp - y_pred) ** 2)
-        ss_tot = np.sum((resp - np.mean(resp)) ** 2)
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-
-        # Begin plot
+        # Prepare plot
         fig, ax = plt.subplots(figsize=(6, 4))
 
-        # DMSO IQR shading
-        ax.axhspan(dmso_q1, dmso_q3, color="lightgrey", alpha=0.25,
-                   label="DMSO IQR")
+        # DMSO baseline shading
+        ax.axhspan(dmso_q1, dmso_q3, colour="grey", alpha=0.15)
+        ax.axhline(dmso_median, colour="black", linestyle="--", linewidth=1)
 
-        # DMSO median
-        ax.axhline(dmso_median, linestyle="--", linewidth=1.2, color="grey",
-                   label=f"DMSO median ({dmso_median:.1f}%)")
+        # Main scatter points
+        ax.scatter(conc, resp, s=30, colour="black", alpha=0.8)
 
-        # Observed points
-        ax.scatter(conc, resp, s=35, alpha=0.9, label="Observed")
-
-        # Mark significant increases
-        sig_mask = (g["delta_AR_pct"] > 0) & (g["q_value"] < 0.05)
-        if sig_mask.any():
-            ax.scatter(
-                g.loc[sig_mask, "conc"],
-                g.loc[sig_mask, "AR_pct_compound"],
-                s=95,
-                facecolor="none",
-                edgecolor="red",
-                linewidth=1.7,
-                label="Significant increase (q < 0.05)",
+        # Overlay significance markers (red circles)
+        if "q_increase" in g.columns and "q_decrease" in g.columns:
+            sig_idx = (
+                ((g["q_increase"] < 0.05) & (g["delta_AR_pct"] > 0))
+                | ((g["q_decrease"] < 0.05) & (g["delta_AR_pct"] < 0))
             )
+            if sig_idx.any():
+                ax.scatter(
+                    conc[sig_idx],
+                    resp[sig_idx],
+                    s=60,
+                    facecolour="none",
+                    edgecolour="red",
+                    linewidth=1.5,
+                )
 
-        # 4PL curve
-        ax.plot(x_plot, y_fit_curve, linewidth=1.5, color="blue", label="4PL fit")
+        # Plot fitted or fallback curve
+        if row["fit_category"] in ["inducer", "suppressor"]:
+            bottom = row["bottom"]
+            top = row["top"]
+            hill = row["hill"]
+            log_ec50 = row["log10_ec50"]
 
-        # Axis formatting
+            x_plot = np.linspace(conc.min(), conc.max(), 300)
+            y_fit = four_param_logistic(x_plot, bottom, top, log_ec50, hill)
+            ax.plot(x_plot, y_fit, linewidth=2, colour="blue")
+        else:
+            # Fallback LOESS curve
+            lo = lowess(resp, conc, frac=0.6, return_sorted=True)
+            ax.plot(lo[:, 0], lo[:, 1], linewidth=2, colour="orange")
+
+        # Titles and labels
+        title = f"{cpd_id} — {fit_category}"
+        if fit_category in ["inducer", "suppressor"]:
+            title += f" (EC50={row['ec50']:.3g}, R²={row['r2']:.2f})"
+        elif row["fail_reason"] is not None:
+            title += f" — {row['fail_reason']}"
+
+        ax.set_title(title)
         ax.set_xscale("log")
         ax.set_xlabel("Concentration")
         ax.set_ylabel("AR%")
 
-        # Label true dose points
-        ax.set_xticks(conc)
-        ax.set_xticklabels([f"{c:g}" for c in conc], rotation=45)
-
-        ax.set_title(
-            f"{cpd_id} – EC50={ec50:.3g}, "
-            f"max ΔAR={row['max_delta_AR_pct']:.1f}%, "
-            f"R²={r2:.2f}"
-        )
-
-        ax.legend(loc="best", fontsize=8)
         fig.tight_layout()
-
-        out_path = output_dir / f"drc_{cpd_id}.png"
         fig.savefig(out_path, dpi=300)
         plt.close(fig)
 
-        paths.append(out_path)
-        LOGGER.info("Saved DRC plot for %s → %s", cpd_id, out_path)
+        generated_paths.append(out_path)
+        LOGGER.info("Saved dose–response plot for %s → %s", cpd_id, out_path)
 
-    return paths
+    return generated_paths
+
 
 
 def qc_summary_for_metadata(*, df_meta: pd.DataFrame) -> None:
