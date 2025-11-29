@@ -1144,25 +1144,65 @@ def merge_image_with_metadata(
         )
         df["cpd_type"] = df["control_type"].fillna(df["cpd_type"])
         df.drop(columns=["control_type"], inplace=True, errors="ignore")
+    # ------------------------------------------------------------------
+    # 5. Control inference (DMSO and POS)
+    # ------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # 5. Control inference (only apply where still TEST)
-    # ------------------------------------------------------------------
     # Extract numeric well column: A01 → 1, B12 → 12
     df["_colnum"] = df["well_id"].str[1:].astype(int)
 
-    # Column 23 → DMSO (LowControl)
-    mask_low = (df["_colnum"] == 23) & (df["cpd_type"] == "TEST")
-    df.loc[mask_low, "cpd_type"] = "DMSO"
+    # If is_dmso not present or all missing → try to infer
+    if "is_dmso" not in df.columns or df["is_dmso"].isna().all():
+        LOGGER.warning(
+            "DMSO inference: no 'is_dmso' column present or all NaN. "
+            "Attempting to infer controls from cpd_id."
+        )
 
-    # Column 24 → POS (HighControl)
-    mask_high = (df["_colnum"] == 24) & (df["cpd_type"] == "TEST")
-    df.loc[mask_high, "cpd_type"] = "POS"
+        # Try metadata-based inference first
+        if "cpd_id" in df.columns and df["cpd_id"].notna().any():
+            inferred_mask = df["cpd_id"].astype(str).str.upper().eq("DMSO")
 
+            if inferred_mask.any():
+                df["cpd_type"] = np.where(inferred_mask, "DMSO", "TEST")
+                df["is_dmso"] = inferred_mask
+                LOGGER.info("DMSO wells successfully identified from cpd_id column.")
+
+            else:
+                # Metadata exists but has *no* DMSO entries → fallback
+                LOGGER.critical(
+                    "No DMSO wells detected in metadata (cpd_id). "
+                    "Falling back to vendor assumption: column 23 = DMSO, column 24 = POS. "
+                    "THIS MAY BE INCORRECT FOR THIS SCREEN."
+                )
+
+                # Fallback assumption
+                mask_low = df["_colnum"] == 23
+                mask_high = df["_colnum"] == 24
+
+                df["cpd_type"] = np.where(mask_low, "DMSO", df["cpd_type"])
+                df["cpd_type"] = np.where(mask_high, "POS", df["cpd_type"])
+
+                df["is_dmso"] = mask_low
+
+        else:
+            # No cpd_id column available → fallback only
+            LOGGER.critical(
+                "cpd_id column absent. Cannot identify DMSO from metadata. "
+                "Falling back to vendor assumption: col 23 = DMSO, col 24 = POS. "
+                "THIS FALLBACK IS ONLY SAFE IF THE SCREEN USES THESE POSITIONS."
+            )
+
+            mask_low = df["_colnum"] == 23
+            mask_high = df["_colnum"] == 24
+
+            df["cpd_type"] = np.where(mask_low, "DMSO", "TEST")
+            df["cpd_type"] = np.where(mask_high, "POS", df["cpd_type"])
+            df["is_dmso"] = mask_low
+
+    # Clean up
     df.drop(columns=["_colnum"], inplace=True, errors="ignore")
 
     return df
-
 
 
 
@@ -1552,158 +1592,6 @@ def run_fisher_per_compound_dose(*, df_well_qc: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Dose–response fitting (4-parameter logistic)
-# ---------------------------------------------------------------------------
-
-
-def four_param_logistic(
-    xlog: np.ndarray,
-    bottom: float,
-    top: float,
-    log_ec50: float,
-    hill: float,
-) -> np.ndarray:
-    """
-    Four-parameter logistic (4PL) response model evaluated on log10 doses.
-
-    Parameters
-    ----------
-    xlog : numpy.ndarray
-        log10-transformed concentrations.
-    bottom : float
-        Response at very low dose.
-    top : float
-        Response at very high dose.
-    log_ec50 : float
-        log10(EC50) parameter.
-    hill : float
-        Hill slope controlling curve steepness.
-
-    Returns
-    -------
-    numpy.ndarray
-        Predicted responses on the original AR% scale.
-    """
-    return bottom + (top - bottom) / (1.0 + 10.0 ** ((log_ec50 - xlog) * hill))
-
-
-# Alias for backwards compatibility with older code
-def _4pl(x, bottom, top, ec50, hill):
-    return four_param_logistic(
-        xlog=np.log10(x),
-        bottom=bottom,
-        top=top,
-        log_ec50=np.log10(ec50),
-        hill=hill,
-    )
-
-
-
-def fit_dose_response_per_compound(
-    *,
-    fisher_df: pd.DataFrame,
-    min_points: int = 4
-) -> pd.DataFrame:
-    """
-    Fit 4-parameter logistic (4PL) dose–response models per compound using
-    aggregated AR_pct_compound values from Fisher output.
-
-    Parameters
-    ----------
-    fisher_df : pandas.DataFrame
-        Output of run_fisher_per_compound_dose().
-    min_points : int, default=4
-        Minimum number of non-zero, non-NaN dose points required to attempt fitting.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Table of model fits with columns:
-        - cpd_id
-        - direction (“increase” or “decrease”)
-        - hill_slope
-        - bottom
-        - top
-        - ec50
-        - success
-    """
-    LOGGER.info("Fitting 4PL models using aggregated AR_pct_compound data.")
-
-    required_cols = {"cpd_id", "conc", "AR_pct_compound"}
-    missing_cols = required_cols - set(fisher_df.columns)
-    if missing_cols:
-        raise KeyError(f"Missing required columns for fitting: {missing_cols}")
-
-    fit_results = []
-
-    for cpd_id, g in fisher_df.groupby("cpd_id"):
-        g = g.dropna(subset=["conc", "AR_pct_compound"]).copy()
-
-        # Remove DMSO explicitly (any rows where conc==0)
-        g = g[g["conc"] > 0]
-
-        if g.shape[0] < min_points:
-            fit_results.append(
-                {
-                    "cpd_id": cpd_id,
-                    "direction": "none",
-                    "hill_slope": np.nan,
-                    "bottom": np.nan,
-                    "top": np.nan,
-                    "ec50": np.nan,
-                    "success": False,
-                }
-            )
-            continue
-
-        x = g["conc"].values.astype(float)
-        y = g["AR_pct_compound"].values.astype(float)
-
-        # Detect direction
-        direction = "increase" if y.max() > y.min() else "decrease"
-
-        # Safe initial params
-        p0 = [
-            min(y),          # bottom
-            max(y),          # top
-            np.median(x),    # ec50
-            1.0,             # hill slope
-        ]
-
-        try:
-            popt, _ = curve_fit(_4pl, x, y, p0=p0, maxfev=20000)
-            bottom, top, ec50, hill = popt
-            success = True
-        except Exception as e:
-            LOGGER.debug("4PL failed for %s: %s", cpd_id, e)
-            bottom = top = ec50 = hill = np.nan
-            success = False
-
-        fit_results.append(
-            {
-                "cpd_id": cpd_id,
-                "direction": direction,
-                "hill_slope": hill,
-                "bottom": bottom,
-                "top": top,
-                "ec50": ec50,
-                "success": success,
-            }
-        )
-
-    fit_df = pd.DataFrame(fit_results)
-    LOGGER.info("4PL fitting complete: %d compounds attempted.", fit_df.shape[0])
-    return fit_df
-
-
-
-
-# ---------------------------------------------------------------------------
-# Plotting and HTML report (unchanged structure)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Plotting and HTML report
 # ---------------------------------------------------------------------------
 
@@ -1847,7 +1735,7 @@ def plot_inducer_boxplot_per_compound(
     # -----------------------------------------------------------------
     # SAFETY FIX: cap width to max 40 inches (≈4800 px at 120 dpi)
     # -----------------------------------------------------------------
-    max_width_inches = 40.0
+    max_width_inches = 12.0
     width_per_group = 0.4  # smaller spacing to fit more
     fig_width = min(max_width_inches, max(8.0, num_groups * width_per_group))
 
@@ -2667,124 +2555,246 @@ def resolve_ar_column(df: pd.DataFrame) -> str:
     )
 
 
-
-
-def plot_dose_response_examples(
-    *,
-    fisher_df: pd.DataFrame,
-    fit_df: pd.DataFrame,
-    output_dir: Path,
-) -> List[Path]:
+# --------------------------------------------------------------------------------------
+# Helper: 4-parameter logistic
+# --------------------------------------------------------------------------------------
+def four_param_logistic(x: np.ndarray, top: float, bottom: float,
+                        ec50: float, hill: float) -> np.ndarray:
     """
-    Generate dose–response plots per compound using aggregated AR_pct_compound
-    values and fitted 4PL curves.
+    Four-parameter logistic (4PL) model.
 
     Parameters
     ----------
-    fisher_df : pd.DataFrame
-        Fisher results including AR_pct_compound and q_value.
-    fit_df : pd.DataFrame
-        Output of fit_dose_response_per_compound().
-    output_dir : Path
-        Directory where plots are saved.
+    x : numpy.ndarray
+        Concentrations (linear scale).
+    top : float
+        Maximum response value.
+    bottom : float
+        Minimum response value.
+    ec50 : float
+        EC50 value.
+    hill : float
+        Hill slope.
 
     Returns
     -------
-    List[Path]
-        Paths to saved PNG files.
+    numpy.ndarray
+        Model-predicted response.
     """
-    output_dir = Path(output_dir)
-    inducers_dir = output_dir / "inducers"
-    suppressors_dir = output_dir / "suppressors"
-    inducers_dir.mkdir(parents=True, exist_ok=True)
-    suppressors_dir.mkdir(parents=True, exist_ok=True)
+    return bottom + (top - bottom) / (1.0 + (x / ec50) ** hill)
 
-    results = []
-    LOGGER.info("Generating dose–response plots.")
 
-    # Global DMSO summary
-    dmso_df = fisher_df[fisher_df["cpd_type"] == "DMSO"]
-    if not dmso_df.empty:
-        dmso_median = dmso_df["AR_pct_compound"].median()
-        dmso_q1 = dmso_df["AR_pct_compound"].quantile(0.25)
-        dmso_q3 = dmso_df["AR_pct_compound"].quantile(0.75)
-    else:
-        dmso_median = dmso_q1 = dmso_q3 = np.nan
+# --------------------------------------------------------------------------------------
+# FITTER
+# --------------------------------------------------------------------------------------
+def fit_dose_response_per_compound(
+    *,
+    fisher_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Fit a 4PL dose–response model for each compound.
 
-    for cpd_id, g in fisher_df.groupby("cpd_id"):
-        # Exclude DMSO rows
-        g = g[g["cpd_type"] != "DMSO"].copy()
-        g = g.sort_values("conc")
-        if g.empty:
+    Uses AR_pct_compound from Fisher's aggregated table.
+    Only fits compounds with >= 4 non-zero concentrations.
+
+    Parameters
+    ----------
+    fisher_df : pandas.DataFrame
+        Fisher per-dose table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Table of fit parameters with EC50 estimates.
+    """
+    results: List[Dict[str, float]] = []
+
+    required_cols = {"cpd_id", "conc", "AR_pct_compound"}
+    missing = required_cols - set(fisher_df.columns)
+    if missing:
+        raise ValueError(f"Fitter missing required columns: {missing}")
+
+    for cpd_id, sub in fisher_df.groupby("cpd_id"):
+        sub = sub.copy()
+        sub = sub.sort_values("conc")
+
+        x = sub["conc"].values.astype(float)
+        y = sub["AR_pct_compound"].values.astype(float)
+
+        # Must have at least 4 unique non-zero doses for stable fit
+        unique_nonzero = np.unique(x[x > 0])
+        if unique_nonzero.size < 4:
+            results.append(
+                {
+                    "cpd_id": cpd_id,
+                    "fit_success": False,
+                    "EC50": np.nan,
+                    "top": np.nan,
+                    "bottom": np.nan,
+                    "hill": np.nan,
+                }
+            )
             continue
 
-        conc = g["conc"].astype(float).values
-        y = g["AR_pct_compound"].astype(float).values
-        q_vals = g["q_value"].astype(float).values
+        xfit = x.astype(float)
+        yfit = y.astype(float)
 
-        # Fit row for labels
-        f = fit_df.loc[fit_df["cpd_id"] == cpd_id]
-        if f.empty:
-            continue
-        fit_row = f.iloc[0]
+        # Initial guesses
+        guess_top = np.nanmax(yfit)
+        guess_bottom = np.nanmin(yfit)
+        guess_ec50 = np.median(unique_nonzero)
+        guess_hill = 1.0
 
-        # Determine folder based on direction
-        direction = fit_row["direction"]
-        if direction == "increase":
-            save_dir = inducers_dir
-        else:
-            save_dir = suppressors_dir
+        try:
+            popt, _ = curve_fit(
+                four_param_logistic,
+                xfit,
+                yfit,
+                p0=[guess_top, guess_bottom, guess_ec50, guess_hill],
+                maxfev=20000,
+            )
+            top, bottom, ec50, hill = popt
+            fit_success = True
+        except Exception:
+            top = bottom = ec50 = hill = np.nan
+            fit_success = False
 
-        # Begin plot
-        fig, ax = plt.subplots(figsize=(6, 4))
-
-        # DMSO shading
-        if not np.isnan(dmso_median):
-            ax.axhline(dmso_median, color="black", linestyle="--", linewidth=1)
-            ax.axhspan(dmso_q1, dmso_q3, alpha=0.15, color="grey")
-
-        # Significant markers
-        sig_mask = q_vals < 0.05
-        ax.scatter(
-            conc, y,
-            s=80,
-            edgecolor=np.where(sig_mask, "black", "grey"),
-            facecolor=np.where(sig_mask, "red", "white"),
-            linewidth=1.5,
-            zorder=3,
+        results.append(
+            {
+                "cpd_id": cpd_id,
+                "fit_success": fit_success,
+                "EC50": ec50,
+                "top": top,
+                "bottom": bottom,
+                "hill": hill,
+            }
         )
 
-        # 4PL curve
-        if fit_row["success"] and not np.isnan(fit_row["ec50"]):
-            xx = np.logspace(np.log10(min(conc)), np.log10(max(conc)), 200)
-            yy = _4pl(xx,
-                      fit_row["bottom"],
-                      fit_row["top"],
-                      fit_row["ec50"],
-                      fit_row["hill_slope"])
-            ax.plot(xx, yy, linewidth=2)
+    return pd.DataFrame(results)
 
-        # Axis scale
+
+# --------------------------------------------------------------------------------------
+# PLOTTER: INCLUDES DMSO BAND, MEDIAN, GREY MARKERS, SIGNIFICANCE MASK
+# --------------------------------------------------------------------------------------
+def plot_dose_response_examples(
+    *,
+    df_well_qc: pd.DataFrame,
+    fisher_df: pd.DataFrame,
+    fit_df: pd.DataFrame,
+    output_dir: Path,
+    max_plots: int = 2000,
+) -> List[Path]:
+    """
+    Generate per-compound dose–response plots including:
+    - DMSO points (grey)
+    - DMSO median line and IQR band
+    - Observed compound AR%
+    - 4PL fit curve
+    - Significance (red = q < 0.05 AND outside IQR)
+
+    Parameters
+    ----------
+    df_well_qc : pandas.DataFrame
+        Per-well QC-filtered table.
+    fisher_df : pandas.DataFrame
+        Fisher per-dose aggregated table.
+    fit_df : pandas.DataFrame
+        Output of fit_dose_response_per_compound().
+    output_dir : pathlib.Path
+        Directory for saving plots.
+    max_plots : int, optional
+        Maximum number of compounds to plot.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Paths to saved PNG plots.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[Path] = []
+
+    # Extract DMSO baseline (OPTION A)
+    dmso = df_well_qc[df_well_qc["cpd_type"] == "DMSO"]
+    if dmso.empty:
+        raise ValueError("No DMSO wells found for plotting baseline.")
+
+    dmso_vals = dmso["AR_pct_well"].astype(float)
+    dmso_median = dmso_vals.median()
+    dmso_q1 = dmso_vals.quantile(0.25)
+    dmso_q3 = dmso_vals.quantile(0.75)
+
+    # Merge fits
+    merged = fisher_df.merge(fit_df, on="cpd_id", how="left")
+
+    # Unique compounds to plot
+    compounds = merged["cpd_id"].unique()[:max_plots]
+
+    for cpd_id in compounds:
+        sub = merged[merged["cpd_id"] == cpd_id].sort_values("conc").copy()
+        if sub.empty:
+            continue
+
+        conc = sub["conc"].values.astype(float)
+        ar = sub["AR_pct_compound"].values.astype(float)
+        qvals = sub["q_value"].fillna(1.0).values
+
+        # Determine significance (correct rule)
+        valid = ~np.isnan(ar)
+        sig_mask = valid & (qvals < 0.05) & ((ar < dmso_q1) | (ar > dmso_q3))
+
+        # Prepare figure
+        fig, ax = plt.subplots(figsize=(6, 4))
+
+        # DMSO band
+        ax.axhspan(dmso_q1, dmso_q3, color="lightgrey", alpha=0.4)
+        ax.axhline(dmso_median, color="grey", ls="--", lw=1)
+
+        # DMSO points
+        ax.scatter(
+            np.full(dmso_vals.size, conc.min()*0.8),
+            dmso_vals,
+            s=20,
+            color="grey",
+            alpha=0.7,
+            label="DMSO wells",
+        )
+
+        # Observed data
+        for x, y, is_sig in zip(conc, ar, sig_mask):
+            color = "red" if is_sig else "black"
+            ax.scatter(x, y, s=50, color=color)
+
+        # 4PL curve
+        fit_row = fit_df[fit_df["cpd_id"] == cpd_id]
+        if not fit_row.empty and fit_row.iloc[0]["fit_success"]:
+            top = fit_row.iloc[0]["top"]
+            bottom = fit_row.iloc[0]["bottom"]
+            ec50 = fit_row.iloc[0]["EC50"]
+            hill = fit_row.iloc[0]["hill"]
+
+            xfit = np.logspace(np.log10(conc.min()),
+                               np.log10(conc.max()), 200)
+            yfit = four_param_logistic(xfit, top, bottom, ec50, hill)
+            ax.plot(xfit, yfit, color="blue", lw=2)
+
+            title = f"{cpd_id}  (EC50 = {ec50:.2e})"
+        else:
+            title = f"{cpd_id}  (fit failed)"
+
         ax.set_xscale("log")
         ax.set_xlabel("Concentration")
         ax.set_ylabel("AR% (aggregated)")
-
-        # Title with EC50/IC50
-        if fit_row["success"] and not np.isnan(fit_row["ec50"]):
-            title = f"{cpd_id}  ({'EC50' if direction=='increase' else 'IC50'} = {fit_row['ec50']:.2e})"
-        else:
-            title = f"{cpd_id}  (fit failed)"
         ax.set_title(title)
 
-        fpath = save_dir / f"{cpd_id}.png"
+        out = output_dir / f"{cpd_id}_drc.png"
         fig.tight_layout()
-        fig.savefig(fpath, dpi=150)
+        fig.savefig(out, dpi=150)
         plt.close(fig)
 
-        results.append(fpath)
+        paths.append(out)
 
-    LOGGER.info("Dose–response plotting complete; %d plots saved.", len(results))
-    return results
+    return paths
+
 
 
 def qc_summary_for_metadata(*, df_meta: pd.DataFrame) -> None:
@@ -3179,7 +3189,9 @@ def write_html_report(
         parts.append("<h2>Example dose–response curves</h2>")
         for png in drc_pngs:
             parts.append(f"<h3>{png.stem}</h3>")
-            parts.append(f"<img src='{png.name}' alt='{png.stem}'>")
+            rel_path = png.relative_to(output_dir)
+            parts.append(f"<img src='{rel_path.as_posix()}' alt='{png.stem}'>")
+
 
     # Footer text
     parts.append(
@@ -3551,17 +3563,6 @@ def main() -> None:
     # 7. Optional dose–response fitting
     drc_tsv: Path | None = None
     drc_df: pd.DataFrame | None = None
-    if args.fit_dose_response:
-        drc_df = fit_dose_response_per_compound(
-            fisher_df=fisher_df,
-            min_points=args.min_drc_points,
-        )
-
-
-        drc_tsv = output_dir / "acrosome_drc_fits.tsv"
-        drc_df.to_csv(drc_tsv, sep="\t", index=False)
-        LOGGER.info("Wrote dose–response fits to '%s'", drc_tsv)
-
 
     # 8. Plots
     plate_heatmap_png = output_dir / "plate_AR_pct_heatmap.png"
@@ -3615,13 +3616,30 @@ def main() -> None:
 
 
     # Run dose–response plotting only if user requested it
-    if args.fit_dose_response and drc_df is not None:
-        plots = plot_dose_response_examples(
+    drc_pngs = []
+
+    if args.fit_dose_response:
+        fit_df = fit_dose_response_per_compound(fisher_df=fisher_df)
+
+        drc_tsv = output_dir / "acrosome_drc_fits.tsv"
+        fit_df.to_csv(drc_tsv, sep="\t", index=False)
+        LOGGER.info("Wrote DRC fit summary to '%s'", drc_tsv)
+
+        drc_pngs = plot_dose_response_examples(
+            df_well_qc=df_well_qc,
             fisher_df=fisher_df,
-            fit_df=drc_df,
-            output_dir=results_dir / "plots",
+            fit_df=fit_df,
+            output_dir=results_dir / "dose_response_plots",
+            max_plots=2000,
         )
-        drc_pngs = plots
+
+        # Merge effect class into fit_df so HTML shows the interpretation
+        if compound_summary_df is not None and not compound_summary_df.empty:
+            fit_df = fit_df.merge(
+                compound_summary_df[["cpd_id", "effect_class"]],
+                on="cpd_id",
+                how="left",
+            )
 
 
     # Inducer boxplot with jittered points and DMSO for reference
