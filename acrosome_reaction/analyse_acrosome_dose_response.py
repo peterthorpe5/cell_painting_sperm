@@ -77,7 +77,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
-
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -92,30 +92,49 @@ LOGGER = logging.getLogger(__name__)
 # Logging and argument parsing
 # ---------------------------------------------------------------------------
 
-
-def configure_logging(*, verbosity: int) -> None:
+def configure_logging(*, verbosity: int, output_dir: str) -> None:
     """
-    Configure the root logger for the script.
+    Configure logging for both console and file outputs.
 
     Parameters
     ----------
     verbosity : int
         Verbosity level (0=warning, 1=info, 2=debug).
+    output_dir : str
+        Directory where the log file will be written.
     """
+    # Select log level
     level = logging.WARNING
     if verbosity == 1:
         level = logging.INFO
     elif verbosity >= 2:
         level = logging.DEBUG
 
+    # Make sure directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    logfile = os.path.join(output_dir, "acrosome_analysis.log")
+
+    # Remove any pre-existing handlers to avoid duplication
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+
+    # Configure logging to BOTH console + file
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.StreamHandler(),                  # Console
+            logging.FileHandler(logfile, mode="w")    # Log file
+        ],
     )
+
     LOGGER.debug("Logging configured with level %s", logging.getLevelName(level))
 
+    # Add command-line info to log
     cmd_line = " ".join(shlex.quote(arg) for arg in sys.argv)
     LOGGER.info("Command line: %s", cmd_line)
+    LOGGER.info("Logging to file: %s", logfile)
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -1342,118 +1361,135 @@ def flag_wells_for_qc(
 # Fisher tests and FDR
 # ---------------------------------------------------------------------------
 
-
-def benjamini_hochberg(
-    *,
-    p_values: np.ndarray,
-) -> np.ndarray:
+def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     """
-    Apply Benjamini–Hochberg FDR correction to an array of p-values.
+    Compute Benjamini–Hochberg q-values for an array of p-values.
 
     Parameters
     ----------
     p_values : numpy.ndarray
-        Array of raw p-values.
+        Array of p-values.
 
     Returns
     -------
     numpy.ndarray
-        Array of adjusted p-values (q-values).
+        Array of q-values in the same order.
     """
-    n = len(p_values)
+    p = np.asarray(p_values, dtype=float)
+    n = p.shape[0]
+
     if n == 0:
-        return p_values
+        return np.array([])
 
-    order = np.argsort(p_values)
-    ranked_p = p_values[order]
-    ranks = np.arange(1, n + 1, dtype=float)
+    order = np.argsort(p)
+    ranks = np.arange(1, n + 1)
+    q = p[order] * n / ranks
+    q = np.minimum.accumulate(q[::-1])[::-1]
+    q_corrected = np.empty_like(q)
+    q_corrected[order] = q
 
-    bh_values = ranked_p * n / ranks
-    bh_values = np.minimum.accumulate(bh_values[::-1])[::-1]
-    bh_values = np.clip(bh_values, 0.0, 1.0)
-
-    q_values = np.empty_like(bh_values)
-    q_values[order] = bh_values
-    return q_values
+    return np.clip(q_corrected, 0, 1)
 
 
-def run_fisher_per_compound_dose(
-    *,
-    df_well_qc: pd.DataFrame,
-) -> pd.DataFrame:
+
+def run_fisher_per_compound_dose(*, df_well_qc: pd.DataFrame) -> pd.DataFrame:
     """
-    Run Fisher's exact test per compound–dose versus pooled DMSO controls.
+    Run Fisher’s exact tests per compound–dose versus pooled DMSO controls.
+
+    DMSO wells must have conc = NaN. Non-DMSO wells must have real numeric conc.
+
+    Returns a per-compound/dose result table.
+        Run Fisher’s exact test per compound–dose versus pooled DMSO controls.
 
     Parameters
     ----------
     df_well_qc : pandas.DataFrame
-        Per-well table with QC flags applied and 'qc_keep' column.
+        Per-well QC table with required columns:
+        - plate_id
+        - cpd_id
+        - cpd_type
+        - conc
+        - total_cells
+        - total_AR_cells
+        - qc_keep
 
     Returns
     -------
     pandas.DataFrame
-        Per-compound–dose table with:
-        - plate_id
-        - cpd_id
-        - conc
-        - cpd_type
-        - n_wells
-        - total_cells_compound
-        - total_AR_compound
-        - AR_pct_compound
-        - total_cells_dmso
-        - total_AR_dmso
-        - AR_pct_dmso
-        - delta_AR_pct
-        - odds_ratio
-        - p_value
-        - q_value
+        Per compound–dose Fisher results with:
+        plate_id, cpd_id, conc, cpd_type, n_wells,
+        total_cells_compound, total_AR_compound, AR_pct_compound,
+        total_cells_dmso, total_AR_dmso, AR_pct_dmso,
+        delta_AR_pct, odds_ratio, p_value, q_value
     """
+    LOGGER.info("DEBUG: Entering Fisher test function")
+
     df = df_well_qc[df_well_qc["qc_keep"]].copy()
-    if df.empty:
-        raise ValueError("No wells remain after QC; cannot run Fisher tests.")
+    LOGGER.info("DEBUG: Initial QC-pass rows = %d", df.shape[0])
 
-    plates = df["plate_id"].unique()
-    if len(plates) != 1:
-        LOGGER.warning(
-            "Multiple plate_ids found (%s); proceeding but pooling all.",
-            plates,
-        )
+    # ------------------------------------------------------------
+    # STEP 1 — Clean conc
+    # ------------------------------------------------------------
+    df["conc"] = pd.to_numeric(df["conc"], errors="coerce")
 
-    dmso_mask = df["cpd_type"] == "DMSO"
-    dmso_df = df[dmso_mask]
+    # Identify DMSO
+    dmso_mask = df["cpd_type"].eq("DMSO")
+    df.loc[dmso_mask, "conc"] = np.nan
+
+    LOGGER.info("DEBUG: Unique conc BEFORE NaN-drop = %s",
+                df["conc"].unique())
+
+    # ------------------------------------------------------------
+    # Separate test wells (non-DMSO)
+    # ------------------------------------------------------------
+    test_df = df.loc[~dmso_mask].copy()
+
+    LOGGER.info("DEBUG: Unique conc AFTER NaN-drop/float = %s",
+                test_df["conc"].unique())
+
+    if test_df.empty:
+        raise ValueError("No non-DMSO wells remain; cannot run Fisher tests.")
+
+    # ------------------------------------------------------------
+    # Compute pooled DMSO baseline
+    # ------------------------------------------------------------
+    dmso_df = df.loc[dmso_mask].copy()
     if dmso_df.empty:
-        raise ValueError("No DMSO wells found after QC; cannot perform comparisons.")
+        raise ValueError("No DMSO wells found after QC; cannot compute baseline.")
 
     total_cells_dmso = int(dmso_df["total_cells"].sum())
     total_AR_dmso = int(dmso_df["total_AR_cells"].sum())
     AR_pct_dmso = (total_AR_dmso / total_cells_dmso) * 100.0
-    LOGGER.info(
-        "Pooled DMSO counts: AR=%d, non-AR=%d, AR%%=%.3f",
-        total_AR_dmso,
-        total_cells_dmso - total_AR_dmso,
-        AR_pct_dmso,
-    )
 
-    test_df = df[~dmso_mask].copy()
-    if test_df.empty:
-        raise ValueError("No non-DMSO wells found after QC.")
+    LOGGER.info("Pooled DMSO counts: AR=%d, non-AR=%d, AR%%=%.3f",
+                total_AR_dmso,
+                total_cells_dmso - total_AR_dmso,
+                AR_pct_dmso)
 
+    # ------------------------------------------------------------
+    # STEP 2 — Safe grouping by unique concentration per compound
+    # ------------------------------------------------------------
     combos = (
         test_df[["cpd_id", "conc", "cpd_type"]]
+        .dropna(subset=["conc"])
         .drop_duplicates()
         .sort_values(["cpd_id", "conc"])
     )
 
-    results: List[Dict[str, object]] = []
-    p_vals: List[float] = []
+    results = []
+    p_vals = []
 
-    for _, combo in combos.iterrows():
-        cpd_id = combo["cpd_id"]
-        conc = combo["conc"]
-        cpd_type = combo["cpd_type"]
+    # ------------------------------------------------------------
+    # STEP 3 — Fisher test per (cpd_id, conc)
+    # ------------------------------------------------------------
+    for _, row in combos.iterrows():
+        cpd_id = row["cpd_id"]
+        conc = float(row["conc"])
+        cpd_type = row["cpd_type"]
 
-        subset = test_df[(test_df["cpd_id"] == cpd_id) & (test_df["conc"] == conc)]
+        subset = test_df.loc[(test_df["cpd_id"] == cpd_id) &
+                             (test_df["conc"] == conc)]
+
         if subset.empty:
             continue
 
@@ -1462,9 +1498,6 @@ def run_fisher_per_compound_dose(
         AR_pct_compound = (total_AR_compound / total_cells_compound) * 100.0
         delta_AR_pct = AR_pct_compound - AR_pct_dmso
 
-        # ----------------------------------------------------------------------
-        # SAFE CONTINGENCY TABLE CONSTRUCTION
-        # ----------------------------------------------------------------------
         table = np.array(
             [
                 [total_AR_compound, total_cells_compound - total_AR_compound],
@@ -1473,27 +1506,11 @@ def run_fisher_per_compound_dose(
             dtype=float,
         )
 
-        # 1) Clip negative values
-        if (table < 0).any():
-            LOGGER.warning(
-                "Negative values detected in contingency table for cpd_id=%s, conc=%s; "
-                "clipping negatives to zero.",
-                cpd_id,
-                conc,
-            )
-            table = np.clip(table, 0, None)
+        # Clip negative (safety)
+        table = np.clip(table, 0, None)
 
-        # 2) Skip tables with no signal
         if table.sum() == 0:
-            LOGGER.warning(
-                "Skipping Fisher test for cpd_id=%s, conc=%s; contingency table is all zeros.",
-                cpd_id,
-                conc,
-            )
             continue
-
-        # 3) Fisher test
-
 
         odds_ratio, p_value = fisher_exact(table, alternative="two-sided")
         p_vals.append(p_value)
@@ -1504,7 +1521,7 @@ def run_fisher_per_compound_dose(
                 "cpd_id": cpd_id,
                 "conc": conc,
                 "cpd_type": cpd_type,
-                "n_wells": int(subset.shape[0]),
+                "n_wells": subset.shape[0],
                 "total_cells_compound": total_cells_compound,
                 "total_AR_compound": total_AR_compound,
                 "AR_pct_compound": AR_pct_compound,
@@ -1520,30 +1537,18 @@ def run_fisher_per_compound_dose(
     results_df = pd.DataFrame(results)
 
     if results_df.empty:
-        LOGGER.warning(
-            "No compound–dose combinations to test. "
-            "This is expected for single-replicate or single-dose datasets."
-        )
-        # Return an empty but valid table so downstream code does not crash
-        return pd.DataFrame(
-            columns=[
-                "plate_id", "cpd_id", "conc", "cpd_type", "n_wells",
-                "total_cells_compound", "total_AR_compound",
-                "AR_pct_compound", "total_cells_dmso", "total_AR_dmso",
-                "AR_pct_dmso", "delta_AR_pct", "odds_ratio",
-                "p_value", "q_value"
-            ]
-        )
+        LOGGER.warning("No compound–dose combinations to test.")
+        return results_df
 
+    # ------------------------------------------------------------
+    # Add q-values
+    # ------------------------------------------------------------
+    results_df["q_value"] = benjamini_hochberg(np.array(p_vals))
 
-    q_vals = benjamini_hochberg(p_values=np.asarray(p_vals, dtype=float))
-    results_df["q_value"] = q_vals
-
-    LOGGER.info(
-        "Fisher testing completed for %d compound–dose combinations.",
-        results_df.shape[0],
-    )
+    LOGGER.info("Fisher testing completed for %d compound–dose combinations.",
+                results_df.shape[0])
     return results_df
+
 
 
 # ---------------------------------------------------------------------------
@@ -1582,176 +1587,115 @@ def four_param_logistic(
     return bottom + (top - bottom) / (1.0 + 10.0 ** ((log_ec50 - xlog) * hill))
 
 
+# Alias for backwards compatibility with older code
+def _4pl(x, bottom, top, ec50, hill):
+    return four_param_logistic(
+        xlog=np.log10(x),
+        bottom=bottom,
+        top=top,
+        log_ec50=np.log10(ec50),
+        hill=hill,
+    )
+
+
+
 def fit_dose_response_per_compound(
     *,
     fisher_df: pd.DataFrame,
-    min_points: int,
+    min_points: int = 4
 ) -> pd.DataFrame:
     """
-    Fit four-parameter logistic (4PL) dose–response curves for every compound.
-
-    This unified fitter supports both increasing (inducing) and decreasing
-    (suppressing) sigmoidal curves. For suppressors, the top and bottom
-    parameters are reversed and the Hill slope is expected to be negative.
-
-    If a 4PL fit fails (non-convergence, impossible parameter ordering or
-    insufficient dynamic range), a failed-fit record is returned with
-    fit_category set to 'failed'. Neutral compounds (low dynamic range)
-    are assigned fit_category='neutral'.
+    Fit 4-parameter logistic (4PL) dose–response models per compound using
+    aggregated AR_pct_compound values from Fisher output.
 
     Parameters
     ----------
     fisher_df : pandas.DataFrame
-        Per-compound–dose summary table (AR_pct_compound for each dose).
-    min_points : int
-        Minimum number of distinct dose levels required to attempt fitting.
+        Output of run_fisher_per_compound_dose().
+    min_points : int, default=4
+        Minimum number of non-zero, non-NaN dose points required to attempt fitting.
 
     Returns
     -------
     pandas.DataFrame
-        Fit summary with one row per compound containing:
+        Table of model fits with columns:
         - cpd_id
-        - n_doses
-        - bottom, top
-        - hill
-        - log10_ec50, ec50
-        - dynamic_range
-        - r2
-        - fit_success (bool)
-        - fit_category ('inducer', 'suppressor', 'neutral', 'failed')
-        - fail_reason (if any)
+        - direction (“increase” or “decrease”)
+        - hill_slope
+        - bottom
+        - top
+        - ec50
+        - success
     """
-    import warnings
-    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    LOGGER.info("Fitting 4PL models using aggregated AR_pct_compound data.")
 
-    records: List[Dict[str, object]] = []
+    required_cols = {"cpd_id", "conc", "AR_pct_compound"}
+    missing_cols = required_cols - set(fisher_df.columns)
+    if missing_cols:
+        raise KeyError(f"Missing required columns for fitting: {missing_cols}")
 
-    for cpd_id, group in fisher_df.groupby("cpd_id"):
-        g = group.copy()
-        g = g[g["conc"] > 0].sort_values("conc")
+    fit_results = []
 
-        unique_doses = g["conc"].nunique()
-        if unique_doses < min_points:
-            records.append({
-                "cpd_id": cpd_id,
-                "n_doses": unique_doses,
-                "bottom": np.nan,
-                "top": np.nan,
-                "hill": np.nan,
-                "log10_ec50": np.nan,
-                "ec50": np.nan,
-                "dynamic_range": np.nan,
-                "r2": np.nan,
-                "fit_success": False,
-                "fit_category": "failed",
-                "fail_reason": "insufficient doses"
-            })
+    for cpd_id, g in fisher_df.groupby("cpd_id"):
+        g = g.dropna(subset=["conc", "AR_pct_compound"]).copy()
+
+        # Remove DMSO explicitly (any rows where conc==0)
+        g = g[g["conc"] > 0]
+
+        if g.shape[0] < min_points:
+            fit_results.append(
+                {
+                    "cpd_id": cpd_id,
+                    "direction": "none",
+                    "hill_slope": np.nan,
+                    "bottom": np.nan,
+                    "top": np.nan,
+                    "ec50": np.nan,
+                    "success": False,
+                }
+            )
             continue
 
-        conc = g["conc"].values.astype(float)
-        resp = g["AR_pct_compound"].values.astype(float)
+        x = g["conc"].values.astype(float)
+        y = g["AR_pct_compound"].values.astype(float)
 
-        # Determine direction: positive effect (inducer) or negative (suppressor)
-        direction = np.sign(resp[-1] - resp[0])
-        is_increasing = direction >= 0
+        # Detect direction
+        direction = "increase" if y.max() > y.min() else "decrease"
 
-        # Initial parameters depend on direction
-        if is_increasing:
-            bottom0 = float(resp.min())
-            top0 = float(resp.max())
-            hill0 = 1.0
-        else:
-            bottom0 = float(resp.max())
-            top0 = float(resp.min())
-            hill0 = -1.0
+        # Safe initial params
+        p0 = [
+            min(y),          # bottom
+            max(y),          # top
+            np.median(x),    # ec50
+            1.0,             # hill slope
+        ]
 
-        # Initial EC50 guess: median log-concentration
-        log_ec50_0 = float(np.median(np.log10(conc)))
-
-        p0 = [bottom0, top0, log_ec50_0, hill0]
-
-        # Allow both positive and negative slopes
-        bounds = (
-            [0.0, 0.0, -12.0, -5.0],   # bottom, top, logEC50, hill
-            [100.0, 100.0, 2.0, 5.0],
-        )
-
-        fit_success = False
-        fail_reason = None
-        bottom = top = hill = log_ec50 = ec50 = np.nan
-        r2 = np.nan
-
-        # Attempt the fitted model
         try:
-            params, _ = curve_fit(
-                four_param_logistic,
-                conc,
-                resp,
-                p0=p0,
-                bounds=bounds,
-                maxfev=20000,
-            )
-            bottom, top, log_ec50, hill = params
-            ec50 = 10.0 ** log_ec50
-            fit_success = True
-        except Exception as err:  # noqa: BLE001
-            fit_success = False
-            fail_reason = f"curve_fit failure: {err}"
+            popt, _ = curve_fit(_4pl, x, y, p0=p0, maxfev=20000)
+            bottom, top, ec50, hill = popt
+            success = True
+        except Exception as e:
+            LOGGER.debug("4PL failed for %s: %s", cpd_id, e)
+            bottom = top = ec50 = hill = np.nan
+            success = False
 
-        # Compute dynamic range
-        dynamic_range = abs(top - bottom)
-
-        # Compute R-squared if fit succeeded
-        if fit_success:
-            y_pred = four_param_logistic(conc, bottom, top, log_ec50, hill)
-            ss_res = float(np.sum((resp - y_pred) ** 2))
-            ss_tot = float(np.sum((resp - resp.mean()) ** 2))
-            r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
-
-        # Categorise fits
-        if not fit_success:
-            fit_category = "failed"
-            if fail_reason is None:
-                fail_reason = "curve_fit failure"
-        else:
-            if dynamic_range < 3.0:
-                fit_category = "neutral"
-                fail_reason = "dynamic range < 3"
-                fit_success = False
-            else:
-                if hill > 0 and top > bottom:
-                    fit_category = "inducer"
-                elif hill < 0 and bottom > top:
-                    fit_category = "suppressor"
-                else:
-                    fit_category = "neutral"
-                    fail_reason = "ambiguous direction"
-                    fit_success = False
-
-        records.append(
+        fit_results.append(
             {
                 "cpd_id": cpd_id,
-                "n_doses": unique_doses,
+                "direction": direction,
+                "hill_slope": hill,
                 "bottom": bottom,
                 "top": top,
-                "hill": hill,
-                "log10_ec50": log_ec50,
                 "ec50": ec50,
-                "dynamic_range": dynamic_range,
-                "r2": r2,
-                "fit_success": bool(fit_success),
-                "fit_category": fit_category,
-                "fail_reason": fail_reason,
+                "success": success,
             }
         )
 
-    drc_df = pd.DataFrame(records)
-    LOGGER.info(
-        "4PL fitting completed: %d compounds, %d passed QC.",
-        drc_df.shape[0],
-        drc_df["fit_success"].sum()
-    )
-    return drc_df
+    fit_df = pd.DataFrame(fit_results)
+    LOGGER.info("4PL fitting complete: %d compounds attempted.", fit_df.shape[0])
+    return fit_df
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -2697,142 +2641,150 @@ def plot_top_delta_barplot(
     LOGGER.info("Saved top hits barplot to '%s'", output_path)
 
 
+def resolve_ar_column(df: pd.DataFrame) -> str:
+    """
+    Return the best AR% column available in a DataFrame.
+
+    Tries, in order:
+        1. 'AR_pct_compound'  (from Fisher)
+        2. 'AR_pct_well'      (from per-well QC)
+        3. 'AR_percent'       (older scripts)
+        4. 'AR_pct'           (legacy)
+
+    Raises KeyError if none exist.
+    """
+    candidates = [
+        "AR_pct_compound",
+        "AR_pct_well",
+        "AR_percent",
+        "AR_pct",
+    ]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    raise KeyError(
+        "No AR% column present. Tried: " + ", ".join(candidates)
+    )
+
+
+
+
 def plot_dose_response_examples(
     *,
     fisher_df: pd.DataFrame,
-    drc_df: pd.DataFrame,
-    per_well_df: pd.DataFrame,
+    fit_df: pd.DataFrame,
     output_dir: Path,
 ) -> List[Path]:
     """
-    Plot dose–response curves for all compounds, including:
-    - increasing sigmoids (inducers)
-    - decreasing sigmoids (suppressors)
-    - neutral curves (flat or noisy)
-    - failed fits (fallback LOESS fit)
-
-    Each compound is saved into its category folder:
-        plots/inducer/
-        plots/suppressor/
-        plots/neutral/
-        plots/failed/
+    Generate dose–response plots per compound using aggregated AR_pct_compound
+    values and fitted 4PL curves.
 
     Parameters
     ----------
-    fisher_df : pandas.DataFrame
-        Per-dose Fisher results, including AR_pct_compound.
-    drc_df : pandas.DataFrame
-        Dose–response fit summary (including fit_category).
-    per_well_df : pandas.DataFrame
-        Per-well table used to compute DMSO statistics.
+    fisher_df : pd.DataFrame
+        Fisher results including AR_pct_compound and q_value.
+    fit_df : pd.DataFrame
+        Output of fit_dose_response_per_compound().
     output_dir : Path
-        Root output directory.
+        Directory where plots are saved.
 
     Returns
     -------
-    list of Path
-        Paths to the generated PNG files.
+    List[Path]
+        Paths to saved PNG files.
     """
-    from statsmodels.nonparametric.smoothers_lowess import lowess
+    output_dir = Path(output_dir)
+    inducers_dir = output_dir / "inducers"
+    suppressors_dir = output_dir / "suppressors"
+    inducers_dir.mkdir(parents=True, exist_ok=True)
+    suppressors_dir.mkdir(parents=True, exist_ok=True)
 
-    plot_root = output_dir / "plots"
-    categories = ["inducer", "suppressor", "neutral", "failed"]
-    for cat in categories:
-        (plot_root / cat).mkdir(parents=True, exist_ok=True)
+    results = []
+    LOGGER.info("Generating dose–response plots.")
 
-    # Compute DMSO baseline from per-well data
-    if "AR_pct_compound" in per_well_df.columns:
-        dmso_df = per_well_df[per_well_df["cpd_type"] == "DMSO"]
-        dmso_values = dmso_df["AR_pct_compound"].astype(float)
+    # Global DMSO summary
+    dmso_df = fisher_df[fisher_df["cpd_type"] == "DMSO"]
+    if not dmso_df.empty:
+        dmso_median = dmso_df["AR_pct_compound"].median()
+        dmso_q1 = dmso_df["AR_pct_compound"].quantile(0.25)
+        dmso_q3 = dmso_df["AR_pct_compound"].quantile(0.75)
     else:
-        dmso_df = per_well_df[per_well_df["cpd_type"] == "DMSO"]
-        dmso_values = dmso_df["AR_pct"].astype(float)
+        dmso_median = dmso_q1 = dmso_q3 = np.nan
 
-    dmso_median = float(dmso_values.median())
-    dmso_q1 = float(dmso_values.quantile(0.25))
-    dmso_q3 = float(dmso_values.quantile(0.75))
-
-    generated_paths: List[Path] = []
-
-    for _, row in drc_df.iterrows():
-        cpd_id = row["cpd_id"]
-        fit_category = row["fit_category"]
-
-        # Extract dose-level data
-        g = fisher_df[fisher_df["cpd_id"] == cpd_id].copy()
-        g = g[g["conc"] > 0].sort_values("conc")
+    for cpd_id, g in fisher_df.groupby("cpd_id"):
+        # Exclude DMSO rows
+        g = g[g["cpd_type"] != "DMSO"].copy()
+        g = g.sort_values("conc")
         if g.empty:
             continue
 
-        conc = g["conc"].values.astype(float)
-        resp = g["AR_pct_compound"].values.astype(float)
+        conc = g["conc"].astype(float).values
+        y = g["AR_pct_compound"].astype(float).values
+        q_vals = g["q_value"].astype(float).values
 
-        # Where to save
-        cat_dir = plot_root / fit_category
-        out_path = cat_dir / f"drc_{cpd_id}.png"
+        # Fit row for labels
+        f = fit_df.loc[fit_df["cpd_id"] == cpd_id]
+        if f.empty:
+            continue
+        fit_row = f.iloc[0]
 
-        # Prepare plot
+        # Determine folder based on direction
+        direction = fit_row["direction"]
+        if direction == "increase":
+            save_dir = inducers_dir
+        else:
+            save_dir = suppressors_dir
+
+        # Begin plot
         fig, ax = plt.subplots(figsize=(6, 4))
 
-        # DMSO baseline shading
-        ax.axhspan(dmso_q1, dmso_q3, colour="grey", alpha=0.15)
-        ax.axhline(dmso_median, colour="black", linestyle="--", linewidth=1)
+        # DMSO shading
+        if not np.isnan(dmso_median):
+            ax.axhline(dmso_median, color="black", linestyle="--", linewidth=1)
+            ax.axhspan(dmso_q1, dmso_q3, alpha=0.15, color="grey")
 
-        # Main scatter points
-        ax.scatter(conc, resp, s=30, colour="black", alpha=0.8)
+        # Significant markers
+        sig_mask = q_vals < 0.05
+        ax.scatter(
+            conc, y,
+            s=80,
+            edgecolor=np.where(sig_mask, "black", "grey"),
+            facecolor=np.where(sig_mask, "red", "white"),
+            linewidth=1.5,
+            zorder=3,
+        )
 
-        # Overlay significance markers (red circles)
-        if "q_increase" in g.columns and "q_decrease" in g.columns:
-            sig_idx = (
-                ((g["q_increase"] < 0.05) & (g["delta_AR_pct"] > 0))
-                | ((g["q_decrease"] < 0.05) & (g["delta_AR_pct"] < 0))
-            )
-            if sig_idx.any():
-                ax.scatter(
-                    conc[sig_idx],
-                    resp[sig_idx],
-                    s=60,
-                    facecolour="none",
-                    edgecolour="red",
-                    linewidth=1.5,
-                )
+        # 4PL curve
+        if fit_row["success"] and not np.isnan(fit_row["ec50"]):
+            xx = np.logspace(np.log10(min(conc)), np.log10(max(conc)), 200)
+            yy = _4pl(xx,
+                      fit_row["bottom"],
+                      fit_row["top"],
+                      fit_row["ec50"],
+                      fit_row["hill_slope"])
+            ax.plot(xx, yy, linewidth=2)
 
-        # Plot fitted or fallback curve
-        if row["fit_category"] in ["inducer", "suppressor"]:
-            bottom = row["bottom"]
-            top = row["top"]
-            hill = row["hill"]
-            log_ec50 = row["log10_ec50"]
-
-            x_plot = np.linspace(conc.min(), conc.max(), 300)
-            y_fit = four_param_logistic(x_plot, bottom, top, log_ec50, hill)
-            ax.plot(x_plot, y_fit, linewidth=2, colour="blue")
-        else:
-            # Fallback LOESS curve
-            lo = lowess(resp, conc, frac=0.6, return_sorted=True)
-            ax.plot(lo[:, 0], lo[:, 1], linewidth=2, colour="orange")
-
-        # Titles and labels
-        title = f"{cpd_id} — {fit_category}"
-        if fit_category in ["inducer", "suppressor"]:
-            title += f" (EC50={row['ec50']:.3g}, R²={row['r2']:.2f})"
-        elif row["fail_reason"] is not None:
-            title += f" — {row['fail_reason']}"
-
-        ax.set_title(title)
+        # Axis scale
         ax.set_xscale("log")
         ax.set_xlabel("Concentration")
-        ax.set_ylabel("AR%")
+        ax.set_ylabel("AR% (aggregated)")
 
+        # Title with EC50/IC50
+        if fit_row["success"] and not np.isnan(fit_row["ec50"]):
+            title = f"{cpd_id}  ({'EC50' if direction=='increase' else 'IC50'} = {fit_row['ec50']:.2e})"
+        else:
+            title = f"{cpd_id}  (fit failed)"
+        ax.set_title(title)
+
+        fpath = save_dir / f"{cpd_id}.png"
         fig.tight_layout()
-        fig.savefig(out_path, dpi=300)
+        fig.savefig(fpath, dpi=150)
         plt.close(fig)
 
-        generated_paths.append(out_path)
-        LOGGER.info("Saved dose–response plot for %s → %s", cpd_id, out_path)
+        results.append(fpath)
 
-    return generated_paths
-
+    LOGGER.info("Dose–response plotting complete; %d plots saved.", len(results))
+    return results
 
 
 def qc_summary_for_metadata(*, df_meta: pd.DataFrame) -> None:
@@ -3256,11 +3208,15 @@ def main() -> None:
     Main entry point for command-line execution.
     """
     args = parse_args()
-    configure_logging(verbosity=args.verbosity)
+    configure_logging(verbosity=args.verbosity, output_dir=args.output_dir)
 
     df_acrosome = None
     df_spermcells = None
     df_nuclei = None
+
+    results_dir = Path(args.output_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
 
 
     cp_dir = Path(args.cp_dir)
@@ -3422,8 +3378,49 @@ def main() -> None:
     )
 
 
+    LOGGER.info("DEBUG: Checking conc column BEFORE Fisher test:")
+    LOGGER.info(
+        "Unique conc values sample: %s",
+        df_well_qc["conc"].dropna().unique()[:20]
+    )
+
     # 6. Fisher tests per compound–dose
     fisher_df = run_fisher_per_compound_dose(df_well_qc=df_well_qc)
+
+    logging.info("DEBUG Fisher columns: %s", fisher_df.columns.tolist())
+
+    # ==========================================
+    # DEBUG: Inspect rows per compound in fisher_df
+    # ==========================================
+    LOGGER.info("DEBUG: Inspecting rows per compound in fisher_df...")
+
+    unique_cpds = fisher_df["cpd_id"].unique()
+    for c in unique_cpds[:10]:  # first 10 compounds only
+        sub = fisher_df[fisher_df["cpd_id"] == c]
+        LOGGER.info(
+            "CPD %s: n_rows=%d; conc_list=%s; AR_pct_compound_list=%s",
+            c,
+            sub.shape[0],
+            list(sub["conc"].round(3)),
+            list(sub["AR_pct_compound"].round(2)),
+        )
+    LOGGER.info("DEBUG: Finished inspecting compound rows.\n")
+
+
+    # Debug: inspect AR-related columns in df_well_qc
+    try:
+        ar_cols = [c for c in df_well_qc.columns
+                if ("AR" in c.upper()) or ("acrosome" in c.lower())]
+
+        if not ar_cols:
+            logging.warning("DEBUG: No AR-related columns found in df_well_qc!")
+        else:
+            logging.info("DEBUG: AR-related columns in df_well_qc: %s", ar_cols)
+            logging.info("DEBUG AR column head:\n%s", df_well_qc[ar_cols].head())
+    except Exception as err:
+        logging.error("DEBUG: Failed to inspect AR columns: %s", err)
+
+
 
     # ---------------------------------------------------------
     # Rank compounds and write top-N table
@@ -3559,6 +3556,8 @@ def main() -> None:
             fisher_df=fisher_df,
             min_points=args.min_drc_points,
         )
+
+
         drc_tsv = output_dir / "acrosome_drc_fits.tsv"
         drc_df.to_csv(drc_tsv, sep="\t", index=False)
         LOGGER.info("Wrote dose–response fits to '%s'", drc_tsv)
@@ -3613,14 +3612,17 @@ def main() -> None:
     )
 
     drc_pngs: List[Path] = []
+
+
+    # Run dose–response plotting only if user requested it
     if args.fit_dose_response and drc_df is not None:
-        drc_pngs = plot_dose_response_examples(
+        plots = plot_dose_response_examples(
             fisher_df=fisher_df,
-            per_well_df=df_well_qc,
-            drc_df=drc_df,
-            output_dir=output_dir,
-            max_compounds=60,
+            fit_df=drc_df,
+            output_dir=results_dir / "plots",
         )
+        drc_pngs = plots
+
 
     # Inducer boxplot with jittered points and DMSO for reference
     inducer_boxplot_png = Path(args.output_dir) / "inducer_boxplot.png"
