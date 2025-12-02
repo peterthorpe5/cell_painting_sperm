@@ -2587,95 +2587,216 @@ def four_param_logistic(x: np.ndarray, top: float, bottom: float,
 # --------------------------------------------------------------------------------------
 # FITTER
 # --------------------------------------------------------------------------------------
-def fit_dose_response_per_compound(
-    *,
-    fisher_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Fit a 4PL dose–response model for each compound.
-
-    Uses AR_pct_compound from Fisher's aggregated table.
-    Only fits compounds with >= 4 non-zero concentrations.
-
-    Parameters
-    ----------
-    fisher_df : pandas.DataFrame
-        Fisher per-dose table.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Table of fit parameters with EC50 estimates.
-    """
-    results: List[Dict[str, float]] = []
-
-    required_cols = {"cpd_id", "conc", "AR_pct_compound"}
-    missing = required_cols - set(fisher_df.columns)
-    if missing:
-        raise ValueError(f"Fitter missing required columns: {missing}")
-
-    for cpd_id, sub in fisher_df.groupby("cpd_id"):
-        sub = sub.copy()
-        sub = sub.sort_values("conc")
-
-        x = sub["conc"].values.astype(float)
-        y = sub["AR_pct_compound"].values.astype(float)
-
-        # Must have at least 4 unique non-zero doses for stable fit
-        unique_nonzero = np.unique(x[x > 0])
-        if unique_nonzero.size < 4:
-            results.append(
-                {
-                    "cpd_id": cpd_id,
-                    "fit_success": False,
-                    "EC50": np.nan,
-                    "top": np.nan,
-                    "bottom": np.nan,
-                    "hill": np.nan,
-                }
-            )
-            continue
-
-        xfit = x.astype(float)
-        yfit = y.astype(float)
-
-        # Initial guesses
-        guess_top = np.nanmax(yfit)
-        guess_bottom = np.nanmin(yfit)
-        guess_ec50 = np.median(unique_nonzero)
-        guess_hill = 1.0
-
-        try:
-            popt, _ = curve_fit(
-                four_param_logistic,
-                xfit,
-                yfit,
-                p0=[guess_top, guess_bottom, guess_ec50, guess_hill],
-                maxfev=20000,
-            )
-            top, bottom, ec50, hill = popt
-            fit_success = True
-        except Exception:
-            top = bottom = ec50 = hill = np.nan
-            fit_success = False
-
-        results.append(
-            {
-                "cpd_id": cpd_id,
-                "fit_success": fit_success,
-                "EC50": ec50,
-                "top": top,
-                "bottom": bottom,
-                "hill": hill,
-            }
-        )
-
-    return pd.DataFrame(results)
 
 
 # --------------------------------------------------------------------------------------
 # PLOTTER: INCLUDES DMSO BAND, MEDIAN, GREY MARKERS, SIGNIFICANCE MASK
 # --------------------------------------------------------------------------------------
+
+
+def fit_dose_response_per_compound(
+    *,
+    fisher_df: pd.DataFrame,
+    min_drc_points: int = 3,
+) -> pd.DataFrame:
+    """
+    Fit a four-parameter logistic (4PL) dose–response model to each compound.
+
+    This function:
+      • Excludes all DMSO wells from fitting.
+      • Ensures concentrations are numeric.
+      • Requires a minimum number of unique doses.
+      • Supports both activators and suppressors by allowing
+        positive or negative Hill slopes.
+      • Provides robust initial parameter guesses.
+      • Uses bounded optimisation to avoid unstable fits.
+      • Computes r² safely and never returns NaN.
+
+    Parameters
+    ----------
+    fisher_df : pandas.DataFrame
+        Per-compound / per-dose Fisher results. Must contain:
+        ['cpd_id', 'conc', 'AR_pct_compound', 'cpd_type'].
+    min_drc_points : int, default 3
+        Minimum number of distinct non-control concentrations required
+        to attempt a fit.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per compound with:
+        cpd_id, fit_success, EC50, top, bottom, hill,
+        max_delta_AR_pct, r_squared, effect_class.
+    """
+
+    # ---------------------------
+    # 4PL MODEL
+    # ---------------------------
+    def logistic_4pl(x, bottom, ec50, hill, top):
+        """
+        Standard four-parameter logistic model.
+
+        The model supports both increasing (hill > 0)
+        and decreasing (hill < 0) curves.
+        """
+        return bottom + (top - bottom) / (1.0 + (x / ec50) ** hill)
+
+    # Output records
+    results: List[Dict[str, object]] = []
+
+    # Group Fisher results by compound
+    for cpd_id, sub in fisher_df.groupby("cpd_id"):
+        rec: Dict[str, object] = {
+            "cpd_id": cpd_id,
+            "fit_success": False,
+            "EC50": float("nan"),
+            "top": float("nan"),
+            "bottom": float("nan"),
+            "hill": float("nan"),
+            "max_delta_AR_pct": float("nan"),
+            "r_squared": float("nan"),
+            "effect_class": "none",
+        }
+
+        # ----------------------------------------------
+        # 1. Remove DMSO – must NEVER enter the fit
+        # ----------------------------------------------
+        sub = sub[sub["cpd_type"] != "DMSO"].copy()
+        if sub.empty:
+            results.append(rec)
+            continue
+
+        # ----------------------------------------------
+        # 2. Ensure numeric concentration
+        # ----------------------------------------------
+        sub["conc"] = pd.to_numeric(sub["conc"], errors="coerce")
+        sub = sub.dropna(subset=["conc"])
+
+        if sub.empty:
+            results.append(rec)
+            continue
+
+        # ----------------------------------------------
+        # 3. Require ≥ min_drc_points unique doses
+        # ----------------------------------------------
+        unique_doses = np.sort(sub["conc"].unique())
+        if len(unique_doses) < min_drc_points:
+            results.append(rec)
+            continue
+
+        # ----------------------------------------------
+        # 4. Extract x and y
+        # ----------------------------------------------
+        x = unique_doses
+        # Aggregate AR% across wells for each concentration
+        y = (
+            sub.groupby("conc")["AR_pct_compound"]
+            .mean()
+            .reindex(x)
+            .values
+        )
+
+        # Ecological check — must not contain NaN
+        if np.isnan(x).any() or np.isnan(y).any():
+            results.append(rec)
+            continue
+
+        # ----------------------------------------------
+        # 5. Determine whether increasing or decreasing
+        # ----------------------------------------------
+        is_increasing = y[-1] > y[0]
+
+        # ----------------------------------------------
+        # 6. Parameter initialisation
+        # ----------------------------------------------
+        bottom_init = float(np.min(y))
+        top_init = float(np.max(y))
+        ec50_init = float(np.median(x))
+        hill_init = 1.0 if is_increasing else -1.0
+
+        p0 = [bottom_init, ec50_init, hill_init, top_init]
+
+        # ----------------------------------------------
+        # 7. Parameter bounds
+        # ----------------------------------------------
+        # bottom between 0–100
+        # top between 0–100
+        # EC50 positive
+        # hill between -5 and +5
+        bounds = (
+            [0.0, 1e-12, -5.0, 0.0],     # lower
+            [100.0, 1e12, 5.0, 100.0],   # upper
+        )
+
+        # ----------------------------------------------
+        # 8. Attempt fitting
+        # ----------------------------------------------
+        try:
+            popt, _ = curve_fit(
+                logistic_4pl,
+                x,
+                y,
+                p0=p0,
+                bounds=bounds,
+                maxfev=20000,
+            )
+            bottom, ec50, hill, top = popt
+
+        except Exception:
+            # Fit failed
+            results.append(rec)
+            continue
+
+        # ----------------------------------------------
+        # 9. Compute predictions and r²
+        # ----------------------------------------------
+        y_pred = logistic_4pl(x, bottom, ec50, hill, top)
+
+        ss_res = float(np.sum((y - y_pred) ** 2))
+        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+        if ss_tot <= 0.0:
+            r2 = 0.0
+        else:
+            r2 = 1.0 - ss_res / ss_tot
+
+        # ----------------------------------------------
+        # 10. Determine effect class
+        # ----------------------------------------------
+        delta = y - np.mean(y)
+        max_delta = float(np.max(delta))
+
+        if is_increasing:
+            effect_class = "activator"
+        elif not is_increasing:
+            effect_class = "suppressor"
+        else:
+            effect_class = "none"
+
+        # ----------------------------------------------
+        # 11. Populate record
+        # ----------------------------------------------
+        # r-squared clean formatting here
+        r2_clean = round(float(r2), 3)
+        rec.update(
+            {
+                "fit_success": True,
+                "EC50": float(ec50),
+                "top": float(top),
+                "bottom": float(bottom),
+                "hill": float(hill),
+                "max_delta_AR_pct": max_delta,
+                "r_squared": r2_clean,
+                "effect_class": effect_class,
+            }
+        )
+
+        results.append(rec)
+
+    return pd.DataFrame(results)
+
+
+
+
 def plot_dose_response_examples(
     *,
     df_well_qc: pd.DataFrame,
@@ -2749,15 +2870,15 @@ def plot_dose_response_examples(
         ax.axhspan(dmso_q1, dmso_q3, color="lightgrey", alpha=0.4)
         ax.axhline(dmso_median, color="grey", ls="--", lw=1)
 
-        # DMSO points
-        ax.scatter(
-            np.full(dmso_vals.size, conc.min()*0.8),
-            dmso_vals,
-            s=20,
-            color="grey",
-            alpha=0.7,
-            label="DMSO wells",
-        )
+        # DMSO points  -- uncomment if we want them back. 
+        #ax.scatter(
+        #    np.full(dmso_vals.size, conc.min()*0.8),
+        #    dmso_vals,
+        #    s=20,
+        #    color="grey",
+        #    alpha=0.7,
+        #    label="DMSO wells",
+        # )
 
         # Observed data
         for x, y, is_sig in zip(conc, ar, sig_mask):
@@ -2787,8 +2908,11 @@ def plot_dose_response_examples(
         ax.set_title(title)
 
         out = output_dir / f"{cpd_id}_drc.png"
+        # ADD THIS TO AUTOSCALE
+        # ax.autoscale(enable=True, axis="y", tight=False)
+
         fig.tight_layout()
-        fig.savefig(out, dpi=150)
+        fig.savefig(out, dpi=300)
         plt.close(fig)
 
         paths.append(out)
@@ -3621,6 +3745,14 @@ def main() -> None:
     if args.fit_dose_response:
         fit_df = fit_dose_response_per_compound(fisher_df=fisher_df)
 
+
+        # Merge effect class into fit_df so HTML shows the interpretation
+        if compound_summary_df is not None and not compound_summary_df.empty:
+            fit_df = fit_df.merge(
+                compound_summary_df[["cpd_id", "effect_class"]],
+                on="cpd_id",
+                how="left",
+            )
         drc_tsv = output_dir / "acrosome_drc_fits.tsv"
         fit_df.to_csv(drc_tsv, sep="\t", index=False)
         LOGGER.info("Wrote DRC fit summary to '%s'", drc_tsv)
@@ -3633,13 +3765,7 @@ def main() -> None:
             max_plots=2000,
         )
 
-        # Merge effect class into fit_df so HTML shows the interpretation
-        if compound_summary_df is not None and not compound_summary_df.empty:
-            fit_df = fit_df.merge(
-                compound_summary_df[["cpd_id", "effect_class"]],
-                on="cpd_id",
-                how="left",
-            )
+
 
 
     # Inducer boxplot with jittered points and DMSO for reference
