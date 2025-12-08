@@ -261,6 +261,15 @@ def parse_args() -> argparse.Namespace:
         help="Verbosity level: 0=warnings, 1=info, 2=debug.",
     )
 
+    parser.add_argument(
+        "--motility_csv",
+        type=str,
+        required=False,
+        default=None,
+        help="Optional motility data CSV/TSV containing HA/PM/TM/VCL metrics."
+    )
+
+
     return parser.parse_args()
 
 
@@ -548,6 +557,32 @@ def write_qc_pdf(
         plt.close(fig)
 
     LOGGER.info("QC PDF written: %s", output_path)
+
+
+def load_motility_file(path: str) -> pd.DataFrame:
+    """
+    Load optional motility dataset and keep only the required columns.
+    Missing cpd_id values are removed.
+    """
+
+    df = pd.read_csv(path, sep=None, engine="python")  # auto-detect delimiter
+
+    required_cols = [
+        "cpd_id",
+        "HA_value", "HA_pc",
+        "PM_value", "PM_pc",
+        "TM_value", "TM_pc",
+        "VCL_median_value", "VCL_median_pc",
+    ]
+
+    missing = set(required_cols) - set(df.columns)
+    if missing:
+        raise ValueError(f"Motility file missing required columns: {missing}")
+
+    df = df[required_cols].copy()
+    df = df.dropna(subset=["cpd_id"])  # removes DMSO rows like cpd_id = NA
+
+    return df
 
 
 
@@ -2910,6 +2945,7 @@ def plot_dose_response_examples(
         out = output_dir / f"{cpd_id}_drc.png"
         # ADD THIS TO AUTOSCALE
         # ax.autoscale(enable=True, axis="y", tight=False)
+        # ax.set_ylim(0, 50)
 
         fig.tight_layout()
         fig.savefig(out, dpi=300)
@@ -3057,6 +3093,54 @@ def tsv_preview_html(
         "</div>"
     )
     return wrapped
+
+
+def load_motility_csv(path: Path) -> pd.DataFrame:
+    """
+    Load motility data (HA, PM, TM, VCL metrics) from a CSV/TSV file.
+
+    The file must contain:
+        - cpd_id
+        - HA_value, HA_pc
+        - PM_value, PM_pc
+        - TM_value, TM_pc
+        - VCL_median_value, VCL_median_pc
+
+    Any missing columns will raise an error.
+
+    Parameters
+    ----------
+    path : Path
+        Path to CSV or TSV file.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with motility metrics, filtered to required columns.
+    """
+
+    # Auto-detect delimiter (tab or comma)
+    df = pd.read_csv(path, sep=None, engine="python")
+
+    required_cols = [
+        "cpd_id",
+        "HA_value", "HA_pc",
+        "PM_value", "PM_pc",
+        "TM_value", "TM_pc",
+        "VCL_median_value", "VCL_median_pc",
+    ]
+
+    missing = set(required_cols) - set(df.columns)
+    if missing:
+        raise ValueError(f"Motility file missing required columns: {missing}")
+
+    # Only keep required columns
+    df = df[required_cols].copy()
+
+    # Drop rows with missing cpd_id (e.g. DMSO wells)
+    df = df.dropna(subset=["cpd_id"])
+
+    return df
 
 
 def write_html_report(
@@ -3317,6 +3401,48 @@ def write_html_report(
             parts.append(f"<img src='{rel_path.as_posix()}' alt='{png.stem}'>")
 
 
+    # ---------------------------------------------------------
+    # Optional motility metrics section (HA, PM, TM, VCL)
+    # ---------------------------------------------------------
+    if compound_summary_tsv is not None and compound_summary_tsv.exists():
+        try:
+            df_summary = pd.read_csv(compound_summary_tsv, sep="\t")
+
+            motility_cols = [
+                "cpd_id",
+                "HA_value", "HA_pc",
+                "PM_value", "PM_pc",
+                "TM_value", "TM_pc",
+                "VCL_median_value", "VCL_median_pc",
+            ]
+
+            # Identify columns actually present in the TSV
+            available = [c for c in motility_cols if c in df_summary.columns]
+
+            # Only show section if at least one motility metric exists
+            if len(available) > 1:  # must include cpd_id + ≥1 metric
+                parts.append("<hr>")
+                parts.append("<h2>Additional Motility Readouts (HA, PM, TM, VCL)</h2>")
+                parts.append(
+                    "<p>These values were supplied from a separate motility "
+                    "assay and merged by compound ID. Missing values indicate "
+                    "no corresponding measurement for that compound.</p>"
+                )
+
+                motility_html = (
+                    df_summary[available]
+                    .sort_values("cpd_id")
+                    .to_html(index=False, float_format="%.3f")
+                )
+                parts.append(motility_html)
+                parts.append("<hr>")
+
+        except Exception as err:
+            LOGGER.error(
+                "Failed to render motility section in HTML report: %s", err
+            )
+
+
     # Footer text
     parts.append(
         "<p>All p-values are from two-sided Fisher's exact tests comparing each "
@@ -3349,6 +3475,9 @@ def main() -> None:
     df_acrosome = None
     df_spermcells = None
     df_nuclei = None
+    fit_df = None
+    mot_df = None
+
 
     results_dir = Path(args.output_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -3429,6 +3558,23 @@ def main() -> None:
     # 2. Load metadata and controls
     df_meta = load_compound_metadata(metadata_path=lib_path)
     qc_summary_for_metadata(df_meta=df_meta)
+
+    # ---------------------------------------------------------
+    # Optional: load motility metrics (one row per cpd_id)
+    # ---------------------------------------------------------
+    mot_df = None
+    if args.motility_csv is not None:
+        LOGGER.info("Loading motility data from '%s'", args.motility_csv)
+        try:
+            mot_df = load_motility_csv(path=args.motility_csv)
+            LOGGER.info(
+                "Loaded motility metrics (%d rows, %d columns)",
+                mot_df.shape[0], mot_df.shape[1],
+            )
+        except Exception as err:
+            LOGGER.error("Failed to load motility file: %s", err)
+            mot_df = None
+
 
 
     # 3. Merge per-image counts with metadata
@@ -3530,7 +3676,65 @@ def main() -> None:
     # ==========================================
     LOGGER.info("DEBUG: Inspecting rows per compound in fisher_df...")
 
-    unique_cpds = fisher_df["cpd_id"].unique()
+    # ---------------------------------------------------------
+    # Safe handling for single-replicate datasets (no conc/empty Fisher)
+    # ---------------------------------------------------------
+    if fisher_df is None or fisher_df.empty or "cpd_id" not in fisher_df.columns:
+        LOGGER.warning("Fisher results empty or missing cpd_id column. "
+                    "This looks like a single-replicate dataset. "
+                    "Skipping dose-response and Fisher-dependent plots.")
+
+
+        # Determine which AR% column exists
+
+        # Automatically detect the correct AR% column for single-rep datasets
+        possible_ar_cols = [
+            "AR_pct_compound", "AR_pct", "AR_pct_well", "AR_percent",
+            "AR_pct_x", "AR_pct_y", "AR_QC_pct"
+        ]
+
+        ar_col = None
+        for col in possible_ar_cols:
+            if col in df_well_qc.columns:
+                ar_col = col
+                break
+
+        if ar_col is None:
+            raise KeyError(
+                f"No AR% column found in df_well_qc. "
+                f"Available columns: {df_well_qc.columns.tolist()}"
+            )
+
+        single_rep_summary = (
+            df_well_qc.groupby("cpd_id", as_index=False)
+            .agg(
+                AR_pct_mean=(ar_col, "mean"),
+                AR_pct_median=(ar_col, "median"),
+                n_wells=("cpd_id", "count"),
+            )
+        )
+
+        out_path = output_dir / "acrosome_single_rep_summary.tsv"
+        single_rep_summary.to_csv(out_path, sep="\t", index=False)
+        LOGGER.info("Wrote single-replicate summary to '%s'", out_path)
+
+        # Do NOT return – allow HTML creation to continue
+        # but skip all Fisher/DRC-dependent sections
+        skip_fisher_drc = True
+
+        # Skip remaining Fisher/dose-response logic
+        return
+
+
+    # ---------------------------------------------------------
+    # Optional debug: inspect fisher_df per compound
+    # ---------------------------------------------------------
+    if fisher_df is not None and not fisher_df.empty and "cpd_id" in fisher_df.columns:
+        unique_cpds = fisher_df["cpd_id"].unique()
+        LOGGER.info("DEBUG: First 10 compounds in fisher_df: %s", unique_cpds[:10].tolist())
+    else:
+        LOGGER.info("DEBUG: Skipping fisher_df inspection (empty or missing cpd_id).")
+
     for c in unique_cpds[:10]:  # first 10 compounds only
         sub = fisher_df[fisher_df["cpd_id"] == c]
         LOGGER.info(
@@ -3683,6 +3887,40 @@ def main() -> None:
             "Per-compound summary is empty; no summary TSV will be written."
         )
 
+    # ---------------------------------------------------------
+    # Optional: merge motility metrics into per-compound summary
+    # ---------------------------------------------------------
+    if mot_df is not None and compound_summary_df is not None:
+        LOGGER.info("Merging motility metrics into compound summary (left merge on cpd_id).")
+        before = compound_summary_df.shape[0]
+
+        LOGGER.info("Example cpd_id values from compound summary: %s",
+            compound_summary_df['cpd_id'].head(10).tolist())
+
+        LOGGER.info("Example cpd_id values from motility data: %s",
+                    mot_df['cpd_id'].head(10).tolist())
+
+        # Normalise cpd_id in mot_df
+        mot_df["cpd_id"] = (
+            mot_df["cpd_id"]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\s+", "", regex=True)
+        )
+
+        compound_summary_df = compound_summary_df.merge(
+            mot_df,
+            on="cpd_id",
+            how="left",
+        )
+
+        LOGGER.info(
+            "Motility merge complete. Summary rows before=%d, after=%d.",
+            before,
+            compound_summary_df.shape[0],
+        )
+
+
 
     # 7. Optional dose–response fitting
     drc_tsv: Path | None = None
@@ -3741,18 +3979,32 @@ def main() -> None:
 
     # Run dose–response plotting only if user requested it
     drc_pngs = []
+    fit_df = None
+
 
     if args.fit_dose_response:
         fit_df = fit_dose_response_per_compound(fisher_df=fisher_df)
 
 
         # Merge effect class into fit_df so HTML shows the interpretation
+        #if compound_summary_df is not None and not compound_summary_df.empty:
+        #    fit_df = fit_df.merge(
+        #        compound_summary_df[["cpd_id", "effect_class"]],
+        #        on="cpd_id",
+        #        how="left",
+         #   )
+
         if compound_summary_df is not None and not compound_summary_df.empty:
+            # Remove the effect_class column created during fitting
+            if "effect_class" in fit_df.columns:
+                fit_df = fit_df.drop(columns=["effect_class"])
+
             fit_df = fit_df.merge(
                 compound_summary_df[["cpd_id", "effect_class"]],
                 on="cpd_id",
                 how="left",
             )
+    
         drc_tsv = output_dir / "acrosome_drc_fits.tsv"
         fit_df.to_csv(drc_tsv, sep="\t", index=False)
         LOGGER.info("Wrote DRC fit summary to '%s'", drc_tsv)
@@ -3767,6 +4019,27 @@ def main() -> None:
 
 
 
+    # ---------------------------------------------------------
+    # Optional: merge motility metrics into dose–response fits
+    # ---------------------------------------------------------
+    if mot_df is not None and fit_df is not None:
+        LOGGER.info("Merging motility metrics into dose–response fit table.")
+        before_rows = fit_df.shape[0]
+
+        fit_df = fit_df.merge(
+            mot_df,
+            on="cpd_id",
+            how="left",
+        )
+
+        LOGGER.info(
+            "Motility merge into DRC fits complete. Rows before=%d, after=%d.",
+            before_rows,
+            fit_df.shape[0],
+        )
+    else:
+        LOGGER.info("Skipping motility merge into DRC fits.")
+
 
     # Inducer boxplot with jittered points and DMSO for reference
     inducer_boxplot_png = Path(args.output_dir) / "inducer_boxplot.png"
@@ -3779,7 +4052,6 @@ def main() -> None:
         ar_col="AR_percent",
         cpd_type_col="cpd_type",
     )
-
 
 
     # 9. HTML report
