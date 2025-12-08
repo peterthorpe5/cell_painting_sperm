@@ -1140,7 +1140,7 @@ def merge_image_with_metadata(
     df = df.merge(
         meta,
         how="left",
-        on=["plate_id", "well_id"],
+        on=["plate_id", "well_id"],   #"plate_id", 
         suffixes=("", "_meta"),
     )
 
@@ -3471,6 +3471,8 @@ def main() -> None:
     """
     args = parse_args()
     configure_logging(verbosity=args.verbosity, output_dir=args.output_dir)
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    LOGGER.info("Starting acrosome dose–response analysis")
 
     df_acrosome = None
     df_spermcells = None
