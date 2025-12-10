@@ -3731,7 +3731,7 @@ def main(args: argparse.Namespace) -> None:
         # Numeric feature columns
         feature_cols = [
             c for c in df_export.columns
-            if c not in metadata_cols and p.api.types.is_numeric_dtype(df_export[c])
+            if c not in metadata_cols and pd.api.types.is_numeric_dtype(df_export[c])
         ]
 
         logger.info(
@@ -3767,6 +3767,10 @@ def main(args: argparse.Namespace) -> None:
 
     df_encoded, encoders = encode_labels(df=df_scaled_all.copy(), logger=logger)
     log_memory_usage(logger, prefix="[After encoding] ")
+    # Ensure df_encoded has the correct MultiIndex
+    if not isinstance(df_encoded.index, pd.MultiIndex) or df_encoded.index.names != ["Dataset", "Sample"]:
+        df_encoded = df_encoded.set_index(["Dataset", "Sample"])
+
 
     # Keep a decoded metadata view for later merge
     decoded_meta_df = decode_labels(df=df_encoded.copy(), encoders=encoders, logger=logger)[
