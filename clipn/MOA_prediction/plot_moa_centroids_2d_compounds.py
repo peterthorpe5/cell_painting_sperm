@@ -541,7 +541,6 @@ def main() -> None:
                 label_points=args.label_points,
                 label_jitter=args.label_jitter,
                 centroid_coords=centroid_coords_umap,
-                centroid_coords=centroid_coords_umap,
                 centroid_labels=centroid_labels,
             )
             LOGGER.info("Wrote: %s", out_pdf)
