@@ -12,7 +12,7 @@ Supports:
 Plots:
 1. All compounds in embedding space
 2. MOA centroids overlaid
-3. Optional colouring by metadata column (e.g., cpd_type, Library)
+3. Optional coloring by metadata column (e.g., cpd_type, Library)
 
 Inputs are compatible with:
 - CLIPn latent embeddings
@@ -52,9 +52,9 @@ from analysis_pipeline.embedding_utils import (
 # Plotting utilities
 # --------------------------------------------------------------------------- #
 
-def _make_colour_map(categories: List[str]) -> dict:
+def _make_color_map(categories: List[str]) -> dict:
     """
-    Create a categorical colour map.
+    Create a categorical color map.
 
     Parameters
     ----------
@@ -64,7 +64,7 @@ def _make_colour_map(categories: List[str]) -> dict:
     Returns
     -------
     dict
-        Mapping from category to RGB colour.
+        Mapping from category to RGB color.
     """
     import matplotlib.cm as cm
     import numpy as np
@@ -81,7 +81,7 @@ def _plot_2d(
     df: pd.DataFrame,
     id_col: str,
     feature_cols: List[str],
-    colour_by: Optional[str],
+    color_by: Optional[str],
     out_path: Path,
     title: str,
 ) -> None:
@@ -102,8 +102,8 @@ def _plot_2d(
         Identifier column.
     feature_cols : list of str
         Embedding columns.
-    colour_by : str or None
-        Column used to colour compounds (optional).
+    color_by : str or None
+        Column used to color compounds (optional).
     out_path : Path
         Path to write the PDF.
     title : str
@@ -111,32 +111,32 @@ def _plot_2d(
     """
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    if colour_by and colour_by in df.columns:
-        categories = sorted(df[colour_by].astype(str).unique())
-        cmap = _make_colour_map(categories)
+    if color_by and color_by in df.columns:
+        categories = sorted(df[color_by].astype(str).unique())
+        cmap = _make_color_map(categories)
         for cat in categories:
-            mask = df[colour_by].astype(str) == cat
+            mask = df[color_by].astype(str) == cat
             ax.scatter(
                 coords[mask, 0],
                 coords[mask, 1],
                 s=15,
                 label=str(cat),
-                colour=cmap[cat],
+                color=cmap[cat],
                 alpha=0.7,
             )
-        ax.legend(title=colour_by, fontsize=7)
+        ax.legend(title=color_by, fontsize=7)
     else:
-        ax.scatter(coords[:, 0], coords[:, 1], s=15, alpha=0.7, colour="grey")
+        ax.scatter(coords[:, 0], coords[:, 1], s=15, alpha=0.7, color="grey")
 
     # Centroids
     ax.scatter(
         centroids[:, 0],
         centroids[:, 1],
         s=120,
-        colour="red",
+        color="red",
         marker="X",
         label="centroid",
-        edgecolour="black",
+        edgecolor="black",
     )
 
     for i, lab in enumerate(centroid_labels):
@@ -190,10 +190,10 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--colour_by",
+        "--color_by",
         type=str,
         default=None,
-        help="Metadata column to colour compounds by (optional)."
+        help="Metadata column to color compounds by (optional)."
     )
 
     parser.add_argument("--umap_n_neighbours", type=int, default=15)
@@ -271,7 +271,7 @@ def main() -> None:
             df=df,
             id_col=args.id_col,
             feature_cols=feature_cols,
-            colour_by=args.colour_by,
+            color_by=args.color_by,
             out_path=out_pdf,
             title="PCA projection of embeddings and MOA centroids",
         )
@@ -304,7 +304,7 @@ def main() -> None:
             df=df,
             id_col=args.id_col,
             feature_cols=feature_cols,
-            colour_by=args.colour_by,
+            color_by=args.color_by,
             out_path=out_pdf,
             title="UMAP projection of embeddings and MOA centroids",
         )
@@ -321,9 +321,9 @@ def main() -> None:
                 "x": coords_pca[:, 0],
                 "y": coords_pca[:, 1],
                 args.id_col: ids,
-                args.colour_by: df[args.colour_by] if args.colour_by in df.columns else None,
+                args.color_by: df[args.color_by] if args.color_by in df.columns else None,
             })
-            fig_pca = px.scatter(df_pca, x="x", y="y", colour=args.colour_by)
+            fig_pca = px.scatter(df_pca, x="x", y="y", color=args.color_by)
             pio.write_html(fig_pca, file=f"{args.out_prefix}_pca.html")
 
         if args.projection in ("umap", "both"):
@@ -331,9 +331,9 @@ def main() -> None:
                 "x": coords_umap[:, 0],
                 "y": coords_umap[:, 1],
                 args.id_col: ids,
-                args.colour_by: df[args.colour_by] if args.colour_by in df.columns else None,
+                args.color_by: df[args.color_by] if args.color_by in df.columns else None,
             })
-            fig_umap = px.scatter(df_umap, x="x", y="y", colour=args.colour_by)
+            fig_umap = px.scatter(df_umap, x="x", y="y", color=args.color_by)
             pio.write_html(fig_umap, file=f"{args.out_prefix}_umap.html")
 
     except Exception:
