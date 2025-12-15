@@ -294,10 +294,11 @@ def cosine_distance_matrix(*, x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 def spearman_distance_matrix(*, x: np.ndarray) -> np.ndarray:
     """
-    Compute Spearman distance matrix (1 - Spearman correlation).
+    Compute Spearman distance matrix (1 - Spearman correlation) robustly.
 
-    Spearman correlation is Pearson correlation applied to ranks, which is
-    more robust to non-normal distributions and monotonic relationships.
+    This implementation is designed to be stable when some vectors have
+    zero variance (or become constant after scaling), which would otherwise
+    yield NaN correlations.
 
     Parameters
     ----------
@@ -307,19 +308,28 @@ def spearman_distance_matrix(*, x: np.ndarray) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        Distance matrix (n, n).
+        Distance matrix (n, n) with finite values.
     """
-    # Rank each row across features
-    df = pd.DataFrame(x)
-    ranks = df.rank(axis=1, method="average", na_option="keep").to_numpy(dtype=float)
+    # Rank each row across features (Spearman = Pearson on ranks)
+    ranks = pd.DataFrame(x).rank(axis=1, method="average").to_numpy(dtype=float)
 
-    # Pearson correlation of rank vectors
-    # corr = cov / (sd * sd)
-    ranks = np.nan_to_num(ranks, nan=np.nanmean(ranks))
-    r = np.corrcoef(ranks)
-    dist = 1.0 - r
+    # Correlation across rows (each row is a compound vector)
+    corr = pd.DataFrame(ranks).T.corr(method="pearson").to_numpy(dtype=float)
+
+    dist = 1.0 - corr
+
+    # Replace non-finite distances: if corr is NaN, treat as unrelated (distance=1)
+    dist = np.where(np.isfinite(dist), dist, 1.0)
+
+    # Force symmetry and clean diagonal
+    dist = 0.5 * (dist + dist.T)
     np.fill_diagonal(dist, 0.0)
+
+    # Clip to [0, 2] to avoid tiny numerical negatives
+    dist = np.clip(dist, 0.0, 2.0)
+
     return dist
+
 
 
 def euclidean_distance_matrix(*, x: np.ndarray) -> np.ndarray:
@@ -599,6 +609,15 @@ def main() -> None:
                 name,
             )
             continue
+
+        if not np.isfinite(dist).all():
+            LOGGER.warning(
+                "Distance matrix '%s' contains non-finite values; replacing with 1.0.",
+                name,
+            )
+            dist = np.where(np.isfinite(dist), dist, 1.0)
+            np.fill_diagonal(dist, 0.0)
+
 
         Z, order = hierarchical_order(dist=dist, method=args.linkage)
 
