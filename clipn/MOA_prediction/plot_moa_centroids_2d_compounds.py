@@ -136,6 +136,24 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Random seed (used for reproducibility; UMAP may run single-threaded).",
     )
+    parser.add_argument(
+        "--label_points",
+        action="store_true",
+        help="Label each compound point with its identifier.",
+    )
+    parser.add_argument(
+        "--label_col",
+        type=str,
+        default="",
+        help="Column to use for labels (default: id_col).",
+    )
+    parser.add_argument(
+        "--label_jitter",
+        type=float,
+        default=0.0,
+        help="Optional jitter applied to labels (not points) to reduce overlap.",
+    )
+
 
     return parser.parse_args()
 
@@ -285,6 +303,9 @@ def plot_scatter(
     labels: pd.Series,
     title: str,
     out_pdf: Path,
+    point_ids: Optional[pd.Series] = None,
+    label_points: bool = False,
+    label_jitter: float = 0.0,
     centroid_coords: Optional[np.ndarray] = None,
     centroid_labels: Optional[pd.Series] = None,
 ) -> None:
@@ -301,29 +322,71 @@ def plot_scatter(
         Plot title.
     out_pdf : Path
         Output PDF path.
+    point_ids : pd.Series, optional
+        Text labels for points (e.g. cpd_id).
+    label_points : bool
+        Whether to annotate each point with point_ids.
+    label_jitter : float
+        Jitter applied to label positions to reduce overlap.
     centroid_coords : np.ndarray, optional
         2D coordinates for centroids.
     centroid_labels : pd.Series, optional
         Label per centroid.
     """
-    fig, ax = plt.subplots(figsize=(7.5, 6.0))
+    fig, ax = plt.subplots(figsize=(9.5, 7.0))
 
     labels = labels.astype(str).fillna("NA")
     uniq = sorted(labels.unique().tolist())
 
     for lab in uniq:
         mask = labels == lab
-        ax.scatter(coords[mask.values, 0], coords[mask.values, 1], s=40, alpha=0.9, label=lab)
+        ax.scatter(coords[mask.values, 0], coords[mask.values, 1], s=55, alpha=0.9, label=lab)
 
+    # Label each point (compound)
+    if label_points and point_ids is not None:
+        ids = point_ids.astype(str).tolist()
+
+        # Deterministic small offsets to separate labels when points overlap
+        # (spiral-like offsets around the point)
+        offsets = [
+            (0.0, 0.0),
+            (0.01, 0.01),
+            (-0.01, 0.01),
+            (0.01, -0.01),
+            (-0.01, -0.01),
+            (0.02, 0.0),
+            (-0.02, 0.0),
+            (0.0, 0.02),
+            (0.0, -0.02),
+        ]
+
+        rng = np.random.RandomState(0)
+        for i, cid in enumerate(ids):
+            x, y = coords[i, 0], coords[i, 1]
+            dx, dy = offsets[i % len(offsets)]
+            if label_jitter > 0:
+                dx += rng.normal(loc=0.0, scale=label_jitter)
+                dy += rng.normal(loc=0.0, scale=label_jitter)
+
+            ax.text(
+                x + dx,
+                y + dy,
+                cid,
+                fontsize=8,
+                ha="left",
+                va="bottom",
+            )
+
+    # Centroids
     if centroid_coords is not None and centroid_labels is not None and centroid_coords.size > 0:
         cent_labs = centroid_labels.astype(str).tolist()
         ax.scatter(
             centroid_coords[:, 0],
             centroid_coords[:, 1],
-            s=160,
+            s=190,
             marker="X",
             alpha=1.0,
-            linewidths=0.5,
+            linewidths=0.6,
             edgecolors="black",
             label="Centroids",
         )
@@ -332,7 +395,7 @@ def plot_scatter(
                 centroid_coords[i, 0],
                 centroid_coords[i, 1],
                 str(lab),
-                fontsize=8,
+                fontsize=9,
                 ha="left",
                 va="bottom",
             )
@@ -397,6 +460,12 @@ def main() -> None:
 
     plot_df = emb.merge(anchors, how="left", on=args.id_col)
 
+    label_col = args.label_col.strip() if args.label_col.strip() else args.id_col
+    if label_col not in plot_df.columns:
+        raise KeyError(f"Label column '{label_col}' not found in plot table.")
+    point_ids = plot_df[label_col].astype(str)
+
+
     if args.colour_by.strip():
         colour_col = args.colour_by.strip()
         if colour_col not in plot_df.columns:
@@ -441,9 +510,13 @@ def main() -> None:
             labels=plot_df[colour_col],
             title=f"PCA (n={plot_df.shape[0]}) coloured by {colour_col}",
             out_pdf=out_pdf,
+            point_ids=point_ids,
+            label_points=args.label_points,
+            label_jitter=args.label_jitter,
             centroid_coords=centroid_coords_pca,
             centroid_labels=centroid_labels,
         )
+
         LOGGER.info("Wrote: %s", out_pdf)
 
     # UMAP
@@ -464,6 +537,10 @@ def main() -> None:
                 labels=plot_df[colour_col],
                 title=f"UMAP (n={plot_df.shape[0]}) coloured by {colour_col}",
                 out_pdf=out_pdf,
+                point_ids=point_ids,
+                label_points=args.label_points,
+                label_jitter=args.label_jitter,
+                centroid_coords=centroid_coords_umap,
                 centroid_coords=centroid_coords_umap,
                 centroid_labels=centroid_labels,
             )
