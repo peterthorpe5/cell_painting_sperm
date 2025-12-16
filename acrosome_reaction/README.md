@@ -67,6 +67,8 @@ pip install \
     jinja2
 ```
 
+---
+
 ## Key Features
 
 ### 1. Data Loading
