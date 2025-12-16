@@ -4,6 +4,69 @@ A reproducible Python workflow for analysing acrosome reaction (AR) data extract
 
 ---
 
+## Installation and Dependencies
+
+### Required Python packages
+
+The core analysis relies on the following external packages:
+
+| Package | Purpose |
+|------|--------|
+| `numpy` | Numerical operations |
+| `pandas` | Table manipulation and metadata handling |
+| `scipy` | Fisher’s exact tests and curve fitting |
+| `matplotlib` | All static plots and QC PDFs |
+
+All other imports (`argparse`, `logging`, `pathlib`, `typing`, etc.) are part of the Python standard library.
+
+---
+
+### Optional packages
+
+These are only required for specific features:
+
+| Package | Required for |
+|------|-------------|
+| `plotly` | Interactive HTML volcano plots |
+| `jinja2` | HTML report templating (if enabled) |
+
+If these are not installed, the pipeline will still run but will skip interactive outputs.
+
+---
+
+## Conda installation (recommended)
+
+```bash
+conda create \
+    --name acrosome_reaction \
+    --channel conda-forge \
+    python=3.10 \
+    numpy \
+    pandas \
+    scipy \
+    matplotlib \
+    plotly \
+    jinja2
+```
+
+```bash
+conda activate acrosome_reaction
+```
+
+or install the required packages using pip in an existing python 3 instance:
+
+Pip installation
+
+```bash
+pip install \
+    numpy \
+    pandas \
+    scipy \
+    matplotlib \
+    plotly \
+    jinja2
+```
+
 ## Key Features
 
 ### 1. Data Loading
