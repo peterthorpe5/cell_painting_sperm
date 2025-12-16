@@ -32,6 +32,8 @@ import argparse
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from matplotlib.colors import LinearSegmentedColormap, Normalize, TwoSlopeNorm
+from scipy.cluster.hierarchy import dendrogram
 
 import numpy as np
 import pandas as pd
@@ -431,49 +433,99 @@ def nearest_neighbours(
     return pd.DataFrame(rows)
 
 
-def plot_heatmap_pdf(
+
+def plot_clustered_matrix_pdf(
     *,
-    dist: np.ndarray,
+    mat: np.ndarray,
     ids: List[str],
-    order: np.ndarray,
+    Z: np.ndarray,
     out_pdf: str | Path,
     title: str,
+    mode: str,
 ) -> None:
     """
-    Plot a clustered heatmap (distance matrix) and save as PDF.
+    Plot a clustered matrix with a dendrogram above the heatmap.
 
     Parameters
     ----------
-    dist : np.ndarray
-        Square distance matrix.
+    mat : np.ndarray
+        Square matrix (n, n). For mode="distance" values should be >= 0.
+        For mode="similarity" values should typically be in [-1, 1].
     ids : list of str
-        Identifiers.
-    order : np.ndarray
-        Leaf order indices.
+        Identifiers in the same order used to build Z.
+    Z : np.ndarray
+        Linkage matrix (built from a distance matrix).
     out_pdf : str or Path
         Output PDF path.
     title : str
-        Title.
+        Plot title.
+    mode : str
+        "distance" or "similarity".
     """
     out_pdf = Path(out_pdf)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
 
-    dist_ord = dist[np.ix_(order, order)]
-    ids_ord = [ids[i] for i in order.tolist()]
+    if not np.isfinite(mat).all():
+        raise ValueError("Matrix contains non-finite values.")
 
-    fig, ax = plt.subplots(figsize=(10.5, 9.0))
-    im = ax.imshow(dist_ord, aspect="auto", interpolation="nearest")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    dendro = dendrogram(Z, labels=ids, no_plot=True)
+    ordered_labels = dendro["ivl"]
+    idx_map = {lab: i for i, lab in enumerate(ids)}
+    order = np.array([idx_map[lab] for lab in ordered_labels], dtype=int)
 
-    ax.set_title(title)
-    ax.set_xticks(np.arange(len(ids_ord)))
-    ax.set_yticks(np.arange(len(ids_ord)))
-    ax.set_xticklabels(ids_ord, rotation=90, fontsize=8)
-    ax.set_yticklabels(ids_ord, fontsize=8)
+    mat_ord = mat[np.ix_(order, order)]
+
+    if mode == "distance":
+        vmax = float(np.nanmax(mat_ord))
+        norm = Normalize(vmin=0.0, vmax=vmax if vmax > 0 else 1.0)
+        cmap = LinearSegmentedColormap.from_list("wr", ["white", "red"])
+        cbar_label = "Distance"
+    elif mode == "similarity":
+        # Diverging: negative (blue) → zero (white) → positive (red)
+        # This is the most interpretable for correlation-like values.
+        vmin = float(np.nanmin(mat_ord))
+        vmax = float(np.nanmax(mat_ord))
+        vmin = max(vmin, -1.0)
+        vmax = min(vmax, 1.0)
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+        cmap = LinearSegmentedColormap.from_list("bwr_custom", ["blue", "white", "red"])
+        cbar_label = "Similarity"
+    else:
+        raise ValueError("mode must be 'distance' or 'similarity'.")
+
+    fig = plt.figure(figsize=(11.5, 10.0))
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[2.0, 8.0], hspace=0.05)
+
+    ax_d = fig.add_subplot(gs[0, 0])
+    dendrogram(
+        Z,
+        labels=ids,
+        leaf_rotation=90,
+        leaf_font_size=8,
+        ax=ax_d,
+        color_threshold=0,
+        above_threshold_color="black",
+        no_labels=True,
+    )
+    ax_d.set_xticks([])
+    ax_d.set_yticks([])
+
+    ax_h = fig.add_subplot(gs[1, 0])
+    im = ax_h.imshow(mat_ord, aspect="auto", interpolation="nearest", cmap=cmap, norm=norm)
+
+    ax_h.set_title(title)
+    ax_h.set_xticks(np.arange(len(ordered_labels)))
+    ax_h.set_yticks(np.arange(len(ordered_labels)))
+    ax_h.set_xticklabels(ordered_labels, rotation=90, fontsize=8)
+    ax_h.set_yticklabels(ordered_labels, fontsize=8)
+
+    cbar = fig.colorbar(im, ax=ax_h, fraction=0.046, pad=0.02)
+    cbar.set_label(cbar_label, rotation=90)
 
     fig.tight_layout()
     fig.savefig(out_pdf)
     plt.close(fig)
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -630,6 +682,38 @@ def main() -> None:
         )
         write_tsv(df=order_df, path=out_dir / f"leaf_order_{name}_{args.linkage}.tsv")
 
+        plot_clustered_matrix_pdf(
+            mat=dist,
+            ids=ids,
+            Z=Z,
+            out_pdf=out_dir / f"heatmap_distance_{name}_{args.linkage}.pdf",
+            title=f"Distance heatmap ({name}), linkage={args.linkage}, n={len(ids)}",
+            mode="distance",
+        )
+
+
+        if name in {"cosine", "spearman"}:
+            sim = 1.0 - dist
+            sim = np.clip(sim, -1.0, 1.0)
+
+            sim = np.where(np.isfinite(sim), sim, 0.0)
+            np.fill_diagonal(sim, 1.0)
+
+            sim_df = pd.DataFrame(sim, index=ids, columns=ids)
+            sim_df.insert(0, args.id_col, ids)
+            sim_path = out_dir / f"pairwise_similarity_{name}.tsv"
+            sim_df.to_csv(sim_path, sep="\t", index=False)
+
+            plot_clustered_matrix_pdf(
+                mat=sim,
+                ids=ids,
+                Z=Z,
+                out_pdf=out_dir / f"heatmap_similarity_{name}_{args.linkage}.pdf",
+                title=f"Similarity heatmap ({name}), linkage={args.linkage}, n={len(ids)}",
+                mode="similarity",
+            )
+
+
         # Cluster labels (optional: cut into k clusters, where k=min(5,n))
         k = min(5, dist.shape[0])
         if k >= 2:
@@ -647,14 +731,7 @@ def main() -> None:
         nn_df = nearest_neighbours(ids=ids, dist=dist, top_n=args.top_n)
         write_tsv(df=nn_df, path=out_dir / f"nearest_neighbours_{name}.tsv")
 
-        # Heatmap PDF (clustered order)
-        plot_heatmap_pdf(
-            dist=dist,
-            ids=ids,
-            order=order,
-            out_pdf=out_dir / f"heatmap_{name}_{args.linkage}.pdf",
-            title=f"Distance heatmap ({name}), linkage={args.linkage}, n={len(ids)}",
-        )
+
 
         LOGGER.info("Wrote outputs for distance=%s", name)
 
