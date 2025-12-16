@@ -77,24 +77,115 @@ Generates a standalone HTML summary including:
 
 ---
 
-## Input Requirements
+# Input Requirements
 
-### Mandatory Inputs
-- CellProfiler output tables containing:
-- `total_cells`
-- `total_AR_cells`
-- metadata needed to identify wells and plates
-- A compound metadata file with:
-- `plate_id`
-- `well_id`
-- `cpd_id`
-- concentration
+## Metadata file: required columns and format
 
-### Optional Inputs
-- Annotation fields such as SMILES, chemical series, formulae.
-- Object-level tables for extra QC.
+The metadata (library / plate map) file links CellProfiler wells to compounds and concentrations.  
+It must be a delimiter-detected text file (TSV strongly recommended).
 
+### Essential columns
+
+The following logical fields **must** be present, either under the exact name or one of the recognised aliases:
+
+| Logical field | Required | Accepted column names / notes |
+|-------------|----------|--------------------------------|
+| Plate ID | Yes | `plate_id`, `Plate ID`, `Plate_Metadata` |
+| Well ID | Yes | `well_id`, `Well`, `Well_Metadata`, or derived from `Row` + `Col` |
+| Compound ID | Yes | `cpd_id`, `DDD`, `OBJDID` |
+| Concentration | Yes (TEST compounds) | `conc`, `PTODCONCVALUE`; numeric |
+
+### Well identifier handling
+
+- All wells are normalised internally to `A01` format.
+- The script can automatically construct `well_id` if you provide:
+  - `Row` (A–H) **and** `Col` (1–12), or
+  - `Well` values such as `A1`, `A01`, or `A001`.
+
+### Concentration (`conc`) rules
+
+- Must be numeric for all non-DMSO wells.
+- DMSO wells should have `conc = NA` (recommended).
+- Non-numeric strings (e.g. `10 uM`) are coerced to NA and excluded from testing.
+
+### Example minimal metadata file (TSV)
+
+```
+plate_id	well_id	cpd_id	conc
+PLATE_001	A01	DMSO	
+PLATE_001	A02	DMSO	
+PLATE_001	A03	CMPD_001	0.1
+PLATE_001	A04	CMPD_001	1.0
+PLATE_001	A05	CMPD_001	10.0
+PLATE_001	B01	CMPD_002	0.1
+PLATE_001	B02	CMPD_002	1.0
+```
+
+
+Optional but recommended columns
+
+These columns are not required for analysis but are preserved in outputs and reports:
+
+Column	Purpose
+cpd_type	One of DMSO, POS, TEST (overrides automatic inference)
+Library	Compound library name
+SMILES, Series, Class	Annotation only
 ---
+
+
+
+## CellProfiler Image table (required columns)
+
+The *_Image.csv table must contain:
+
+ImageNumber
+
+Plate identifier column (default: Plate_Metadata)
+
+Well identifier column (default: Well_Metadata)
+
+Total cell count column (default: Count_SpermCells)
+
+Acrosome-reacted cell count column (default: Count_Acrosome)
+
+These column names can be overridden via command-line arguments.
+
+
+
+## Example Commands
+Basic single-plate run
+
+```
+python analyse_acrosome_dose_response.py \
+    --cp_dir raw \
+    --library_metadata metadata/plate_001_metadata.tsv \
+    --output_dir results/plate_001 \
+    --verbosity 1
+```
+
+With explicit controls and dose–response fitting
+
+```
+python analyse_acrosome_dose_response.py \
+    --cp_dir raw \
+    --library_metadata metadata/plate_001_metadata.tsv \
+    --controls metadata/plate_001_controls.tsv \
+    --fit_dose_response \
+    --min_cells_per_well 100 \
+    --output_dir results/plate_001 \
+    --verbosity 2
+```
+
+Including optional motility data
+
+```
+python analyse_acrosome_dose_response.py \
+    --cp_dir raw \
+    --library_metadata metadata/plate_001_metadata.tsv \
+    --motility_csv metadata/plate_001_motility.tsv \
+    --output_dir results/plate_001
+
+```
 
 ## Output Structure
 
